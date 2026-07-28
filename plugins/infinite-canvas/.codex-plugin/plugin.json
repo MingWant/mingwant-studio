@@ -1,0 +1,29 @@
+{
+  "name": "infinite-canvas",
+  "version": "0.1.0",
+  "description": "Use Codex to read and operate MingWant Studio through the local Canvas Agent MCP server.",
+  "author": {
+    "name": "ddcat"
+  },
+  "repository": "https://github.com/ddcat-ai/open-ai-canvas",
+  "license": "AGPL-3.0",
+  "keywords": ["infinite-canvas", "canvas", "mcp", "agent"],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "明想 MingWant Studio",
+    "shortDescription": "Use Codex to operate the current MingWant canvas.",
+    "longDescription": "Connects Codex to the local Canvas Agent MCP server so Codex can inspect the current MingWant Studio canvas, create nodes, connect commerce workflows, and trigger generation through the web canvas confirmation flow.",
+    "developerName": "MingWant Studio",
+    "category": "Productivity",
+    "capabilities": ["Canvas", "MCP", "Creative Workflow"],
+    "defaultPrompt": [
+      "打开明想 MingWant Studio",
+      "读取当前画布并总结节点结构",
+      "根据选中节点创建一组生图提示词"
+    ],
+    "brandColor": "#2563EB",
+    "composerIcon": "./assets/logo.svg",
+    "logo": "./assets/logo.svg"
+  }
+}

@@ -1,5 +1,5 @@
-import { useCallback, type Dispatch, type SetStateAction } from "react";
-import { App } from "antd";
+import { createElement, useCallback, type Dispatch, type SetStateAction } from "react";
+import { App, Select } from "antd";
 import { nanoid } from "nanoid";
 
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
@@ -18,6 +18,7 @@ import {
 } from "@/lib/canvas/canvas-project-domain";
 import { buildNodeMentionReferences } from "@/lib/canvas/canvas-resource-references";
 import { navigateToSettings } from "@/lib/settings-navigation";
+import { DESKTOP_VIDEO_PROVIDER_OPTIONS, isDesktopVideoWorkflowAvailable, preferredDesktopVideoProvider, rememberDesktopVideoProvider, resolveDesktopVideoProvider } from "@/services/desktop-video-workflow";
 import { createGenerationTask, waitForGenerationTask } from "@/services/api/task-center";
 import { modelOptionName, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import {
@@ -25,6 +26,7 @@ import {
     type CanvasConnection,
     type CanvasGenerationBatchMode,
     type CanvasNodeData,
+    type DesktopVideoProvider,
     type StoryboardRow,
 } from "@/types/canvas";
 
@@ -66,6 +68,31 @@ export function useCanvasStoryboard({
             centered: true,
             onOk: () => resolve(true),
             onCancel: () => resolve(false),
+        });
+    }), [modal]);
+
+    const confirmDesktopVideoSubmission = useCallback((count: number, initialProvider: DesktopVideoProvider) => new Promise<DesktopVideoProvider | null>((resolve) => {
+        let selectedProvider = initialProvider;
+        modal.confirm({
+            title: `确认加入 ${count} 个网页视频任务`,
+            content: createElement("div", { style: { display: "grid", gap: 10 } },
+                createElement("span", null, "选择本批任务使用的平台；任务只会分配给该平台的空闲账号。"),
+                createElement(Select, {
+                    defaultValue: initialProvider,
+                    options: DESKTOP_VIDEO_PROVIDER_OPTIONS,
+                    style: { width: "100%" },
+                    onChange: (provider: unknown) => { selectedProvider = resolveDesktopVideoProvider(typeof provider === "string" ? provider : undefined); },
+                    "aria-label": "本批网页视频平台",
+                }),
+            ),
+            okText: "加入工作台",
+            cancelText: "取消",
+            centered: true,
+            onOk: () => {
+                rememberDesktopVideoProvider(selectedProvider);
+                resolve(selectedProvider);
+            },
+            onCancel: () => resolve(null),
         });
     }), [modal]);
 
@@ -303,7 +330,8 @@ export function useCanvasStoryboard({
 
     const createAndGenerateScriptVideos = useCallback(async (nodeId: string) => {
         const videoModel = effectiveConfig.videoModel || effectiveConfig.model;
-        if (!isAiConfigReady(effectiveConfig, videoModel)) {
+        const desktopVideoWorkflow = isDesktopVideoWorkflowAvailable();
+        if (!desktopVideoWorkflow && !isAiConfigReady(effectiveConfig, videoModel)) {
             navigateToSettings({ continueCreation: true });
             return;
         }
@@ -320,7 +348,10 @@ export function useCanvasStoryboard({
             else message.warning("请先补充镜头画面描述");
             return;
         }
-        if (!await confirmGenerationSubmission(targetRows.length, videoModel, "视频生成")) return;
+        const desktopProvider = desktopVideoWorkflow
+            ? await confirmDesktopVideoSubmission(targetRows.length, preferredDesktopVideoProvider(scriptNode?.metadata?.desktopVideoProvider))
+            : null;
+        if (desktopVideoWorkflow ? !desktopProvider : !await confirmGenerationSubmission(targetRows.length, videoModel, "视频生成")) return;
         createScriptVideoNodes(nodeId, true, targetRows.map((row) => row.id));
         scriptNode = nodesRef.current.find((node) => node.id === nodeId && node.type === CanvasNodeType.Script);
         const targetRowIds = new Set(targetRows.map((row) => row.id));
@@ -336,8 +367,9 @@ export function useCanvasStoryboard({
         });
         const targetById = new Map(targets.map((target) => [target.videoNode.id, target]));
         const nextNodes = nodesRef.current.map((node) => {
+            if (node.id === nodeId && desktopProvider) return { ...node, metadata: { ...node.metadata, desktopVideoProvider: desktopProvider } };
             const target = targetById.get(node.id);
-            return target ? { ...node, metadata: { ...node.metadata, prompt: target.prompt, composerContent: target.prompt, generationMode: "video" as const, videoEditOperation: target.imageNode ? "image_to_video" as const : "text_to_video" as const } } : node;
+            return target ? { ...node, metadata: { ...node.metadata, prompt: target.prompt, composerContent: target.prompt, generationMode: "video" as const, videoEditOperation: target.imageNode ? "image_to_video" as const : "text_to_video" as const, ...(desktopProvider ? { desktopVideoProvider: desktopProvider } : {}) } } : node;
         });
         const nextConnections = [...connectionsRef.current];
         targets.forEach((target) => {
@@ -350,7 +382,7 @@ export function useCanvasStoryboard({
         setConnections(nextConnections);
         setSelectedNodeIds(new Set(targets.map((target) => target.videoNode.id)));
         if (enqueueGenerationBatch(nodeId, "storyboard_video", targets.map((target) => ({ rowId: target.row.id, nodeId: target.videoNode.id })))) message.success("镜头视频已加入生成队列");
-    }, [connectionsRef, confirmGenerationSubmission, createScriptVideoNodes, effectiveConfig, enqueueGenerationBatch, isAiConfigReady, message, nodesRef, setConnections, setNodes, setSelectedNodeIds]);
+    }, [connectionsRef, confirmDesktopVideoSubmission, confirmGenerationSubmission, createScriptVideoNodes, effectiveConfig, enqueueGenerationBatch, isAiConfigReady, message, nodesRef, setConnections, setNodes, setSelectedNodeIds]);
 
     const createScriptActionBoards = useCallback(async (nodeId: string) => {
         const scriptNode = nodesRef.current.find((node) => node.id === nodeId && node.type === CanvasNodeType.Script);
@@ -407,7 +439,8 @@ export function useCanvasStoryboard({
         if (!readyRows.length) return message.warning("请先生成选中镜头的分镜图");
         if (readyRows.length !== rows.length) message.warning(`${rows.length - readyRows.length} 个镜头没有可用分镜图，已跳过`);
         const videoModel = effectiveConfig.videoModel || effectiveConfig.model;
-        if (!isAiConfigReady(effectiveConfig, videoModel)) {
+        const desktopVideoWorkflow = isDesktopVideoWorkflowAvailable();
+        if (!desktopVideoWorkflow && !isAiConfigReady(effectiveConfig, videoModel)) {
             navigateToSettings({ continueCreation: true });
             return;
         }
@@ -417,7 +450,10 @@ export function useCanvasStoryboard({
             return !videoNode?.metadata?.content && (!videoNode || !activeNodeIds.has(videoNode.id));
         });
         if (!targetRows.length) return message.info("所选镜头视频已生成或正在生成");
-        if (!await confirmGenerationSubmission(targetRows.length, videoModel, "视频生成")) return;
+        const desktopProvider = desktopVideoWorkflow
+            ? await confirmDesktopVideoSubmission(targetRows.length, preferredDesktopVideoProvider(scriptNode.metadata?.desktopVideoProvider))
+            : null;
+        if (desktopVideoWorkflow ? !desktopProvider : !await confirmGenerationSubmission(targetRows.length, videoModel, "视频生成")) return;
         createScriptVideoNodes(nodeId, true, targetRows.map((row) => row.id));
         scriptNode = nodesRef.current.find((node) => node.id === nodeId && node.type === CanvasNodeType.Script);
         if (!scriptNode) return;
@@ -425,7 +461,7 @@ export function useCanvasStoryboard({
         const videoSpec = NODE_DEFAULT_SIZE[CanvasNodeType.Video];
         const currentRows = targetRows.map((row) => currentScriptNode.metadata?.storyboard?.rows.find((item) => item.id === row.id) || row);
         const startX = Math.max(...currentRows.map((row) => nodesRef.current.find((node) => node.id === row.imageNodeId)?.position.x || currentScriptNode.position.x + currentScriptNode.width)) + videoSpec.width + 120;
-        const nextNodes = [...nodesRef.current];
+        const nextNodes = nodesRef.current.map((node) => node.id === nodeId && desktopProvider ? { ...node, metadata: { ...node.metadata, desktopVideoProvider: desktopProvider } } : node);
         const nextConnections = [...connectionsRef.current];
         const targets: Array<{ row: StoryboardRow; node: CanvasNodeData; prompt: string }> = [];
         currentRows.forEach((row, index) => {
@@ -433,8 +469,8 @@ export function useCanvasStoryboard({
             const existing = row.videoNodeId ? nextNodes.find((node) => node.id === row.videoNodeId && node.type === CanvasNodeType.Video) : undefined;
             const existingMetadata = existing?.metadata?.content ? existing.metadata : resetGenerationTaskMetadata(existing?.metadata);
             const videoNode = existing
-                ? { ...existing, metadata: { ...existingMetadata, prompt, composerContent: prompt, workflowKind: "shot" as const, workflowTitle: `镜头 ${row.shotNumber} 视频`, shotIndex: row.shotNumber, generationMode: "video" as const, videoEditOperation: "image_to_video" as const, seconds: String(row.durationSeconds) } }
-                : createCanvasNode(CanvasNodeType.Video, { x: startX, y: currentScriptNode.position.y + index * (videoSpec.height + 36) + videoSpec.height / 2 }, { prompt, workflowKind: "shot", workflowTitle: `镜头 ${row.shotNumber} 视频`, shotIndex: row.shotNumber, generationMode: "video", videoEditOperation: "image_to_video", status: NODE_STATUS_IDLE, seconds: String(row.durationSeconds) });
+                ? { ...existing, metadata: { ...existingMetadata, prompt, composerContent: prompt, workflowKind: "shot" as const, workflowTitle: `镜头 ${row.shotNumber} 视频`, shotIndex: row.shotNumber, generationMode: "video" as const, videoEditOperation: "image_to_video" as const, seconds: String(row.durationSeconds), ...(desktopProvider ? { desktopVideoProvider: desktopProvider } : {}) } }
+                : createCanvasNode(CanvasNodeType.Video, { x: startX, y: currentScriptNode.position.y + index * (videoSpec.height + 36) + videoSpec.height / 2 }, { prompt, workflowKind: "shot", workflowTitle: `镜头 ${row.shotNumber} 视频`, shotIndex: row.shotNumber, generationMode: "video", videoEditOperation: "image_to_video", status: NODE_STATUS_IDLE, seconds: String(row.durationSeconds), ...(desktopProvider ? { desktopVideoProvider: desktopProvider } : {}) });
             if (!existing) {
                 videoNode.title = `镜头 ${row.shotNumber} · 视频`;
                 nextNodes.push(videoNode);
@@ -451,7 +487,7 @@ export function useCanvasStoryboard({
         setNodes(nextNodes);
         setConnections(nextConnections);
         if (enqueueGenerationBatch(nodeId, "storyboard_video", targets.map((target) => ({ rowId: target.row.id, nodeId: target.node.id })))) message.success("镜头视频已加入生成队列");
-    }, [connectionsRef, confirmGenerationSubmission, createScriptVideoNodes, effectiveConfig, enqueueGenerationBatch, isAiConfigReady, message, nodesRef, setConnections, setNodes]);
+    }, [connectionsRef, confirmDesktopVideoSubmission, confirmGenerationSubmission, createScriptVideoNodes, effectiveConfig, enqueueGenerationBatch, isAiConfigReady, message, nodesRef, setConnections, setNodes]);
 
     return {
         addScriptRow,

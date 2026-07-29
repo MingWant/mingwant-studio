@@ -1,0 +1,154 @@
+<!doctype html>
+<html lang="zh-CN">
+    <head>
+        <meta charset="UTF-8" />
+        <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+        <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'" />
+        <title>明想网页视频工作台</title>
+        <link rel="stylesheet" href="./workbench.css" />
+        <link rel="stylesheet" href="./workbench-task.css" />
+    </head>
+    <body>
+        <div class="app-shell">
+            <aside class="account-rail">
+                <header class="brand-block">
+                    <div class="brand-mark">M</div>
+                    <div>
+                        <h1>网页视频工作台</h1>
+                        <p>独立登录态 · 独立代理 · 人工确认</p>
+                    </div>
+                </header>
+
+                <form id="add-account-form" class="add-account-form">
+                    <label for="account-name">新增账号</label>
+                    <div class="account-create-row">
+                        <input id="account-name" maxlength="40" placeholder="例如：工作室 A" autocomplete="off" />
+                        <select id="account-provider" aria-label="网页平台">
+                            <option value="lumina">Lumina</option>
+                            <option value="dola">Dola</option>
+                            <option value="dreamina">Dreamina</option>
+                        </select>
+                        <button type="submit">添加</button>
+                    </div>
+                    <div class="new-account-network">
+                        <button id="new-account-proxy" type="button">新账号网络：直连</button>
+                    </div>
+                </form>
+
+                <section class="rail-section account-section">
+                    <div class="section-heading">
+                        <span>账号池</span>
+                        <span id="account-summary">0 个</span>
+                    </div>
+                    <div id="account-list" class="account-list"></div>
+                </section>
+
+                <section class="rail-section queue-section">
+                    <div class="section-heading">
+                        <span>等待任务</span>
+                        <span id="queue-summary">0 项</span>
+                    </div>
+                    <div id="queue-list" class="queue-list"></div>
+                </section>
+
+                <footer class="rail-footer">
+                    <span class="privacy-dot"></span>
+                    登录态分区隔离 · 代理密码由系统加密
+                </footer>
+            </aside>
+
+            <main class="workspace">
+                <header class="task-console">
+                    <div class="account-toolbar">
+                        <div class="selected-account">
+                            <span id="selected-status" class="status-dot"></span>
+                            <div>
+                                <strong id="selected-account-name">请选择账号</strong>
+                                <span id="selected-account-url">尚未打开网页容器</span>
+                            </div>
+                        </div>
+                        <div class="toolbar-actions">
+                            <button id="browser-back" type="button" title="后退">←</button>
+                            <button id="browser-forward" type="button" title="前进">→</button>
+                            <button id="browser-reload" type="button" title="刷新">刷新</button>
+                            <button id="browser-home" type="button" title="返回首页">首页</button>
+                            <span class="toolbar-divider"></span>
+                            <button id="rename-account" type="button">重命名</button>
+                            <button id="configure-proxy" type="button">代理：直连</button>
+                            <button id="toggle-login-state" type="button">标记需登录</button>
+                            <button id="toggle-account" type="button">停用</button>
+                            <button id="clear-account" type="button" class="danger-ghost">清空登录态</button>
+                            <button id="delete-account" type="button" class="danger-ghost">删除</button>
+                        </div>
+                    </div>
+
+                    <section id="task-card" class="task-card empty">
+                        <div class="task-empty">
+                            <strong>等待视频任务</strong>
+                            <span>从画布提交视频生成后，任务参数和素材会显示在这里。</span>
+                        </div>
+                        <div class="task-content" hidden>
+                            <div class="task-copy">
+                                <div class="task-title-line">
+                                    <strong id="task-title"></strong>
+                                    <span id="task-state" class="state-badge"></span>
+                                </div>
+                                <p id="task-prompt"></p>
+                                <div id="task-parameters" class="parameter-row"></div>
+                            </div>
+                            <div class="task-actions">
+                                <button id="copy-prompt" type="button">复制提示词</button>
+                                <button id="open-inputs" type="button">打开参考素材</button>
+                                <button id="ignore-download" type="button" hidden>忽略此下载</button>
+                                <button id="accept-download" type="button" class="primary" hidden>回填当前节点</button>
+                                <button id="cancel-task" type="button" class="danger-ghost">取消任务</button>
+                            </div>
+                        </div>
+                    </section>
+                </header>
+
+                <div class="browser-placeholder">
+                    <div>
+                        <span class="placeholder-orbit"></span>
+                        <strong>选择或新增账号</strong>
+                        <p>每个 Lumina、Dola 或 Dreamina 账号使用独立的持久化浏览器分区，Cookie、缓存和站点存储互不共享。</p>
+                    </div>
+                </div>
+            </main>
+        </div>
+
+        <dialog id="proxy-dialog" class="proxy-dialog">
+            <form id="proxy-form">
+                <div class="proxy-dialog-heading">
+                    <div>
+                        <strong id="proxy-dialog-title">账号代理</strong>
+                        <span id="proxy-dialog-subtitle"></span>
+                    </div>
+                    <button id="proxy-dialog-close" type="button" aria-label="关闭">×</button>
+                </div>
+                <p class="proxy-dialog-description">代理会在账号网页首次加载前应用，并覆盖该账号 Session 的网页、OAuth 子窗口和下载流量。</p>
+                <label for="proxy-server">代理地址</label>
+                <input id="proxy-server" maxlength="512" placeholder="例如：http://127.0.0.1:7890 或 socks5://host:1080" autocomplete="off" spellcheck="false" />
+                <div class="proxy-auth-grid">
+                    <div>
+                        <label for="proxy-username">用户名（可选）</label>
+                        <input id="proxy-username" maxlength="200" autocomplete="off" spellcheck="false" />
+                    </div>
+                    <div>
+                        <label for="proxy-password">密码（可选）</label>
+                        <input id="proxy-password" type="password" maxlength="1024" autocomplete="new-password" />
+                    </div>
+                </div>
+                <p class="proxy-security-note">留空代理地址即为直连。代理密码只通过操作系统安全存储加密保存，不会返回给本地工作台页面。</p>
+                <div class="proxy-dialog-actions">
+                    <button id="proxy-use-direct" type="button" class="danger-ghost">使用直连</button>
+                    <span></span>
+                    <button id="proxy-dialog-cancel" type="button">取消</button>
+                    <button type="submit" class="primary">保存代理</button>
+                </div>
+            </form>
+        </dialog>
+        <div id="toast" class="toast" role="status" aria-live="polite"></div>
+        <script type="module" src="./workbench-renderer.mjs"></script>
+    </body>
+</html>

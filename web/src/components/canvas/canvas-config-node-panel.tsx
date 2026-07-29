@@ -1,6 +1,6 @@
 import type { CSSProperties } from "react";
-import { Image as ImageIcon, LoaderCircle, MessageSquare, Music2, Play, Settings2, Square, Video } from "lucide-react";
-import { Button, Segmented, Select } from "antd";
+import { Image as ImageIcon, LoaderCircle, MessageSquare, MonitorPlay, Music2, Play, Settings2, Square, Video } from "lucide-react";
+import { App, Button, Segmented, Select } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
 import { configuredModelMatchesCapability, defaultConfig, modelOptionName, resolveModelChannel, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
@@ -8,11 +8,12 @@ import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
 import { navigateToSettings } from "@/lib/settings-navigation";
+import { DESKTOP_VIDEO_PROVIDER_OPTIONS, desktopVideoProviderLabel, isDesktopVideoWorkflowAvailable, openDesktopVideoWorkbench, preferredDesktopVideoProvider, rememberDesktopVideoProvider } from "@/services/desktop-video-workflow";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
-import type { CanvasGenerationMode, CanvasNodeData, CanvasNodeMetadata, CanvasVideoEditOperation, CanvasWorkspaceMode } from "@/types/canvas";
+import type { CanvasGenerationMode, CanvasNodeData, CanvasNodeMetadata, CanvasVideoEditOperation, CanvasWorkspaceMode, DesktopVideoProvider } from "@/types/canvas";
 
 type CanvasConfigNodePanelProps = {
     node: CanvasNodeData;
@@ -38,10 +39,14 @@ const videoOperationOptions: Array<{ label: string; value: CanvasVideoEditOperat
 ];
 
 export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigChange, onGenerate, onStop, onComposerToggle, workspaceMode = "professional" }: CanvasConfigNodePanelProps) {
+    const { message } = App.useApp();
     const globalConfig = useEffectiveConfig();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const mode = node.metadata?.generationMode || "image";
     const simpleMode = workspaceMode === "simple";
+    const desktopVideoWorkflow = mode === "video" && isDesktopVideoWorkflowAvailable();
+    const desktopVideoProvider = preferredDesktopVideoProvider(node.metadata?.desktopVideoProvider);
+    const desktopVideoProviderName = desktopVideoProviderLabel(desktopVideoProvider);
     const config = buildNodeConfig(globalConfig, node, mode);
     const operationOptions = node.metadata?.videoEditOperation === "concat" ? [...videoOperationOptions, { label: "合并成片", value: "concat" as const }] : videoOperationOptions;
     const count = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
@@ -52,6 +57,26 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     const hasAnyInput = Boolean(inputSummary.textCount || inputSummary.imageCount || inputSummary.videoCount || inputSummary.audioCount);
     const hasComposerContent = Boolean((node.metadata?.composerContent ?? node.metadata?.prompt ?? "").trim());
     const canGenerate = hasComposerContent || (mode === "audio" ? inputSummary.textCount > 0 : hasAnyInput);
+    const changeDesktopVideoProvider = (provider: DesktopVideoProvider) => {
+        rememberDesktopVideoProvider(provider);
+        onConfigChange(node.id, { desktopVideoProvider: provider });
+    };
+    const openVideoWorkbench = () => {
+        void openDesktopVideoWorkbench().catch((error) => message.error(error instanceof Error ? error.message : "网页视频工作台打开失败"));
+    };
+    const desktopProviderControl = (
+        <div className="flex min-w-0 items-center gap-2">
+            <Select<DesktopVideoProvider>
+                size="small"
+                className="canvas-compact-control canvas-control-select !h-10 min-w-0 flex-1"
+                value={desktopVideoProvider}
+                options={DESKTOP_VIDEO_PROVIDER_OPTIONS}
+                onChange={changeDesktopVideoProvider}
+                aria-label="网页视频平台"
+            />
+            <Button className="!size-10 shrink-0 !p-0" type="text" icon={<MonitorPlay className="size-4" />} onClick={openVideoWorkbench} aria-label="打开网页视频工作台" />
+        </div>
+    );
 
     return (
         <div className="flex h-full w-full cursor-move flex-col px-3 pb-3 pt-7 text-sm" style={{ color: theme.node.text }} onWheel={(event) => event.stopPropagation()}>
@@ -137,10 +162,10 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
             ) : null}
 
             {simpleMode ? (
-                <div className="mb-2 rounded-lg px-2 py-2 text-[11px]" style={{ background: theme.node.fill, color: theme.node.muted }}>将使用当前默认模型与生成参数</div>
+                desktopVideoWorkflow ? <div className="mb-2 cursor-default" onMouseDown={(event) => event.stopPropagation()}>{desktopProviderControl}</div> : <div className="mb-2 rounded-lg px-2 py-2 text-[11px]" style={{ background: theme.node.fill, color: theme.node.muted }}>将使用当前默认模型与生成参数</div>
             ) : (
                 <div className={`mb-2 grid min-w-0 cursor-default items-center gap-2 ${mode === "image" || mode === "video" || mode === "audio" ? "grid-cols-[minmax(0,1fr)_148px]" : "grid-cols-1"}`} onMouseDown={(event) => event.stopPropagation()}>
-                    <ModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability={mode} onMissingConfig={() => navigateToSettings({ continueCreation: true })} fullWidth />
+                    {desktopVideoWorkflow ? desktopProviderControl : <ModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability={mode} onMissingConfig={() => navigateToSettings({ continueCreation: true })} fullWidth />}
                     {mode === "video" ? (
                         <CanvasVideoSettingsPopover config={config} placement="topRight" buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
                     ) : mode === "image" ? (
@@ -168,7 +193,12 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                         </>
                     ) : (
                         <>
-                            {hasPrice ? (
+                            {desktopVideoWorkflow ? (
+                                <span className="inline-flex items-center gap-1">
+                                    <MonitorPlay className="size-4" />
+                                    {desktopVideoProviderName} 网页生成
+                                </span>
+                            ) : hasPrice ? (
                                 <span className="inline-flex items-center gap-1">
                                     <CreditSymbol />
                                     {credits.toLocaleString()}

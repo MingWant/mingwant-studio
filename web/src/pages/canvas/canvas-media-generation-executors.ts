@@ -7,6 +7,7 @@ import { nextCanvasVersionLabel } from "@/lib/canvas/canvas-layout";
 import { buildAudioGenerationMetadata, buildVideoGenerationMetadata, generationReferenceUrls, runBackendCanvasGenerationTask } from "@/lib/canvas/canvas-project-generation";
 import { storeGeneratedAudio } from "@/services/api/audio";
 import { storeGeneratedVideo } from "@/services/api/video";
+import { createDesktopVideoTaskId, isDesktopVideoWorkflowAvailable, preferredDesktopVideoProvider, requestDesktopVideoGeneration, type DesktopVideoGenerationResult } from "@/services/desktop-video-workflow";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 
 import type { CanvasGenerationExecution } from "./canvas-generation-executor-types";
@@ -37,6 +38,9 @@ export async function executeVideoGeneration({
     const videoId = isEmptyVideoNode ? nodeId : nanoid();
     const parent = sourceNode?.position || { x: 0, y: 0 };
     const videoGenerationMetadata = buildVideoGenerationMetadata(sourceNode, generationContext);
+    const desktopWorkflow = isDesktopVideoWorkflowAvailable();
+    const desktopProvider = preferredDesktopVideoProvider(sourceNode?.metadata?.desktopVideoProvider);
+    const desktopTaskId = desktopWorkflow ? createDesktopVideoTaskId() : "";
     const videoNode: CanvasNodeData = {
         id: videoId,
         type: CanvasNodeType.Video,
@@ -58,6 +62,9 @@ export async function executeVideoGeneration({
             generateAudio: generationConfig.videoGenerateAudio,
             watermark: generationConfig.videoWatermark,
             references: generationReferenceUrls(generationContext),
+            ...(desktopWorkflow
+                ? { taskId: undefined, taskStatus: undefined, taskUpdatedAt: undefined, desktopVideoProvider: desktopProvider, desktopVideoResultProvider: undefined, desktopVideoTaskId: desktopTaskId, desktopVideoAccountId: undefined, desktopVideoAccountName: undefined, desktopVideoSourceFileName: undefined, taskStage: "等待网页工作台操作", taskProgress: 0, taskCreatedAt: new Date().toISOString() }
+                : { desktopVideoProvider: undefined, desktopVideoResultProvider: undefined, desktopVideoTaskId: undefined, desktopVideoAccountId: undefined, desktopVideoAccountName: undefined, desktopVideoSourceFileName: undefined }),
             ...videoGenerationMetadata,
         },
     };
@@ -79,14 +86,21 @@ export async function executeVideoGeneration({
 
     startGenerationRequest(videoId, nodeId, nodeId, controller);
     try {
-        const result = await runBackendCanvasGenerationTask({ projectId, nodeId: videoId, mode: "video", prompt: effectivePrompt, config: generationConfig, referenceImages: generationContext.referenceImages, referenceVideos: generationContext.referenceVideos, referenceAudios: generationContext.referenceAudios, signal: controller.signal, metadata: { sourceNodeId: nodeId, resolvedCharacterVersions: generationContext.resolvedCharacterVersions, resolvedCharacterVoices: generationContext.resolvedCharacterVoices, ...videoGenerationMetadata }, onTaskCreated: (task) => bindGenerationTask(videoId, task) });
-        if (!result.video?.dataUrl) throw new Error("后端任务没有返回视频");
-        const video = await storeGeneratedVideo({ url: result.video.dataUrl, mimeType: result.video.mimeType || "video/mp4" });
+        let desktopResult: DesktopVideoGenerationResult | null = null;
+        let video: Awaited<ReturnType<typeof storeGeneratedVideo>>;
+        if (desktopWorkflow) {
+            desktopResult = await requestDesktopVideoGeneration({ taskId: desktopTaskId, projectId, nodeId: videoId, provider: desktopProvider, title: videoNode.title, prompt: effectivePrompt, config: generationConfig, context: generationContext, signal: controller.signal });
+            video = await storeGeneratedVideo({ blob: desktopResult.blob });
+        } else {
+            const result = await runBackendCanvasGenerationTask({ projectId, nodeId: videoId, mode: "video", prompt: effectivePrompt, config: generationConfig, referenceImages: generationContext.referenceImages, referenceVideos: generationContext.referenceVideos, referenceAudios: generationContext.referenceAudios, signal: controller.signal, metadata: { sourceNodeId: nodeId, resolvedCharacterVersions: generationContext.resolvedCharacterVersions, resolvedCharacterVoices: generationContext.resolvedCharacterVoices, ...videoGenerationMetadata }, onTaskCreated: (task) => bindGenerationTask(videoId, task) });
+            if (!result.video?.dataUrl) throw new Error("后端任务没有返回视频");
+            video = await storeGeneratedVideo({ url: result.video.dataUrl, mimeType: result.video.mimeType || "video/mp4" });
+        }
         const videoSize = fitNodeSize(video.width || spec.width, video.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
         setNodes((current) => current.map((node) => {
             if (node.id !== videoId) return node;
             const geometry = node.metadata?.locked ? {} : { width: videoSize.width, height: videoSize.height, position: { x: node.position.x + node.width / 2 - videoSize.width / 2, y: node.position.y + node.height / 2 - videoSize.height / 2 } };
-            return { ...node, ...geometry, metadata: { ...node.metadata, ...videoMetadata(video), prompt: effectivePrompt, model: generationConfig.model, size: generationConfig.size, seconds: generationConfig.videoSeconds, vquality: generationConfig.vquality, generateAudio: generationConfig.videoGenerateAudio, watermark: generationConfig.videoWatermark, references: generationReferenceUrls(generationContext), ...videoGenerationMetadata } };
+            return { ...node, ...geometry, metadata: { ...node.metadata, ...videoMetadata(video), prompt: effectivePrompt, model: generationConfig.model, size: generationConfig.size, seconds: generationConfig.videoSeconds, vquality: generationConfig.vquality, generateAudio: generationConfig.videoGenerateAudio, watermark: generationConfig.videoWatermark, references: generationReferenceUrls(generationContext), ...videoGenerationMetadata, ...(desktopResult ? { desktopVideoProvider: desktopResult.provider, desktopVideoResultProvider: desktopResult.provider, desktopVideoTaskId: desktopResult.taskId, desktopVideoAccountId: desktopResult.accountId, desktopVideoAccountName: desktopResult.accountName, desktopVideoSourceFileName: desktopResult.fileName, taskStage: undefined, taskProgress: undefined } : {}) } };
         }));
     } finally {
         finishGenerationRequest(videoId, controller);

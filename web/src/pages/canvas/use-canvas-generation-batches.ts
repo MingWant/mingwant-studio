@@ -5,6 +5,7 @@ import { nanoid } from "nanoid";
 import { generationBatchStatus, isGenerationCostUncertainError } from "@/lib/canvas/canvas-generation-batch";
 import { buildGenerationConfig, generationTaskMetadata, resetGenerationTaskMetadata } from "@/lib/canvas/canvas-project-generation";
 import { unchangedModeratedPrompt } from "@/lib/generation-error";
+import { DESKTOP_VIDEO_PROVIDER_OPTIONS, getDesktopVideoWorkflowState, isDesktopVideoWorkflowAvailable, preferredDesktopVideoProvider } from "@/services/desktop-video-workflow";
 import { cancelGenerationTask, listGenerationTasks } from "@/services/api/task-center";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { useUserStore } from "@/stores/use-user-store";
@@ -140,46 +141,64 @@ export function useCanvasGenerationBatches({ projectId, projectLoaded, nodes, no
         });
     }, [projectId, setNodes]);
 
-    // 调度只补齐后台返回的用户级活跃任务空位，最终并发仍由后端原子校验。
+    // 后台任务遵循用户并发限制；桌面视频任务改由本地账号池按空闲账号数调度。
     const scheduleWaitingItems = useCallback(async () => {
         if (!projectLoaded || schedulingRef.current) return;
         schedulingRef.current = true;
         try {
+            const desktopVideoWorkflow = isDesktopVideoWorkflowAvailable();
             const tasks = await listGenerationTasks(100).catch(() => null);
-            if (!Array.isArray(tasks)) return;
-            const activeTaskCount = tasks.filter((task) => task.status === "queued" || task.status === "running").length;
+            const desktopState = desktopVideoWorkflow ? await getDesktopVideoWorkflowState().catch(() => null) : null;
+            const activeTaskCount = Array.isArray(tasks) ? tasks.filter((task) => task.status === "queued" || task.status === "running").length : activeTaskLimit;
             const currentNodes = nodesRef.current;
             const nodeById = new Map(currentNodes.map((node) => [node.id, node]));
             const pendingReservations = [...controllersRef.current.keys()].filter((key) => {
                 const [, itemId] = key.split(":");
-                const item = currentNodes.flatMap((node) => node.metadata?.generationBatches || []).flatMap((batch) => batch.items).find((candidate) => candidate.id === itemId);
-                return item ? !nodeById.get(item.nodeId)?.metadata?.taskId : false;
+                const reservation = currentNodes.flatMap((node) => node.metadata?.generationBatches || []).flatMap((batch) => batch.items.map((item) => ({ batch, item }))).find((candidate) => candidate.item.id === itemId);
+                if (!reservation || (desktopVideoWorkflow && reservation.batch.mode === "storyboard_video")) return false;
+                return !nodeById.get(reservation.item.nodeId)?.metadata?.taskId;
             }).length;
-            let availableSlots = Math.max(0, activeTaskLimit - activeTaskCount - pendingReservations);
-            if (!availableSlots) return;
+            let availableBackendSlots = Math.max(0, activeTaskLimit - activeTaskCount - pendingReservations);
+            const availableDesktopSlots = new Map(DESKTOP_VIDEO_PROVIDER_OPTIONS.map(({ value: provider }) => {
+                const providerState = desktopState?.providers?.[provider];
+                let slots = desktopVideoWorkflow ? providerState ? Math.max(0, providerState.enabledAccountCount - providerState.busyAccountCount - providerState.queuedTaskCount) : 1 : 0;
+                // 某个平台尚未配置账号时先提交一个任务以打开工作台，其余任务留在画布等待。
+                if (desktopVideoWorkflow && providerState?.enabledAccountCount === 0 && providerState.queuedTaskCount === 0) slots = 1;
+                return [provider, slots] as const;
+            }));
+            if (!availableBackendSlots && ![...availableDesktopSlots.values()].some((slots) => slots > 0)) return;
 
-            const candidates: Array<{ batch: CanvasGenerationBatch; item: CanvasGenerationBatchItem; node: CanvasNodeData }> = [];
+            const candidates: Array<{ batch: CanvasGenerationBatch; item: CanvasGenerationBatchItem; node: CanvasNodeData; generationMode: CanvasNodeGenerationMode; desktopWorkflow: boolean }> = [];
             for (const sourceNode of currentNodes) {
                 for (const batch of sourceNode.metadata?.generationBatches || []) {
                     if (batch.projectId !== projectId || batch.status === "completed" || batch.status === "cancelled") continue;
                     for (const item of batch.items) {
-                        if (item.status !== "waiting" || availableSlots <= 0) continue;
+                        if (item.status !== "waiting") continue;
                         const node = nodeById.get(item.nodeId);
                         if (!node) continue;
                         // 已绑定任务或已有成品的节点交给恢复/对账链路处理，绝不重复提交。
                         if (node.metadata?.taskId || (node.metadata?.status === "success" && node.metadata.content)) continue;
-                        candidates.push({ batch, item, node });
-                        availableSlots -= 1;
+                        const generationMode: CanvasNodeGenerationMode = batch.mode === "storyboard_video" ? "video" : "image";
+                        const usesDesktopWorkflow = generationMode === "video" && desktopVideoWorkflow;
+                        if (usesDesktopWorkflow) {
+                            const provider = preferredDesktopVideoProvider(node.metadata?.desktopVideoProvider);
+                            const slots = availableDesktopSlots.get(provider) || 0;
+                            if (slots <= 0) continue;
+                            availableDesktopSlots.set(provider, slots - 1);
+                        } else {
+                            if (availableBackendSlots <= 0) continue;
+                            availableBackendSlots -= 1;
+                        }
+                        candidates.push({ batch, item, node, generationMode, desktopWorkflow: usesDesktopWorkflow });
                     }
                 }
             }
 
-            for (const { batch, item, node } of candidates) {
+            for (const { batch, item, node, generationMode, desktopWorkflow } of candidates) {
                 const key = batchItemKey(batch.id, item.id);
                 if (controllersRef.current.has(key)) continue;
-                const generationMode: CanvasNodeGenerationMode = batch.mode === "storyboard_video" ? "video" : "image";
                 const generationConfig = buildGenerationConfig(effectiveConfig, node, generationMode);
-                if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+                if (!desktopWorkflow && !isAiConfigReady(generationConfig, generationConfig.model)) {
                     updateBatch(batch.sourceNodeId, batch.id, (current) => withUpdatedItem(current, item.id, { status: "failed", errorDetails: "生成模型未配置，请完成配置后重试" }));
                     continue;
                 }
@@ -191,7 +210,7 @@ export function useCanvasGenerationBatches({ projectId, projectLoaded, nodes, no
                 const controller = new AbortController();
                 controllersRef.current.set(key, controller);
                 updateBatch(batch.sourceNodeId, batch.id, (current) => withUpdatedItem(current, item.id, { status: "submitting", errorDetails: undefined }));
-                void handleGenerateNode(node.id, generationMode, prompt, { controller, waitForTaskCapacity: true }).finally(() => {
+                void handleGenerateNode(node.id, generationMode, prompt, { controller, waitForTaskCapacity: !desktopWorkflow }).finally(() => {
                     controllersRef.current.delete(key);
                     reconcileBatches();
                 });

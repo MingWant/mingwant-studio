@@ -4,6 +4,7 @@ import { App } from "antd";
 
 import { applyGenerationTaskResultToNodes, generationTaskNodeId } from "@/lib/canvas/canvas-generation-task-sync";
 import { ensureCanvasNodeAsset } from "@/services/project-asset-sync";
+import { cancelDesktopVideoTask, isDesktopVideoWorkflowAvailable } from "@/services/desktop-video-workflow";
 import { cancelGenerationTask, listGenerationTasks, listTaskLogs, queryGenerationTask, waitForGenerationTask, type GenerationTask, type TaskLog } from "@/services/api/task-center";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 import { cinematicStoryboardColumns, storyboardRowsFromTask } from "@/lib/canvas/canvas-project-domain";
@@ -162,14 +163,24 @@ export function useCanvasGeneration({ projectId, domainProjectId, projectLoaded,
     const recoverInterruptedGenerationTasks = useCallback(async () => {
         const recoveryNodes = nodesRef.current.filter((node) => node.metadata?.status === NODE_STATUS_LOADING || node.metadata?.errorDetails === "页面刷新后生成已中断，请重新生成。" || Boolean(node.metadata?.taskId && node.metadata.status !== NODE_STATUS_SUCCESS));
         if (!recoveryNodes.length) return;
-        const taskIds = Array.from(new Set(recoveryNodes.map((node) => node.metadata?.taskId).filter((id): id is string => Boolean(id))));
+        const desktopRecoveryNodes = recoveryNodes.filter((node) => Boolean(node.metadata?.desktopVideoTaskId));
+        if (desktopRecoveryNodes.length) {
+            if (isDesktopVideoWorkflowAvailable()) {
+                await Promise.all(desktopRecoveryNodes.map((node) => cancelDesktopVideoTask(node.metadata!.desktopVideoTaskId!).catch(() => undefined)));
+            }
+            const desktopNodeIds = new Set(desktopRecoveryNodes.map((node) => node.id));
+            setNodes((current) => current.map((node) => desktopNodeIds.has(node.id) ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, taskStage: undefined, taskProgress: undefined, errorDetails: "页面刷新后桌面网页任务已中断，请重新生成。" } } : node));
+        }
+        const backendRecoveryNodes = recoveryNodes.filter((node) => !node.metadata?.desktopVideoTaskId);
+        if (!backendRecoveryNodes.length) return;
+        const taskIds = Array.from(new Set(backendRecoveryNodes.map((node) => node.metadata?.taskId).filter((id): id is string => Boolean(id))));
         const tasks = (await Promise.all(taskIds.map((id) => queryGenerationTask(id).catch(() => undefined)))).filter((task): task is GenerationTask => Boolean(task));
-        if (recoveryNodes.some((node) => !node.metadata?.taskId)) {
+        if (backendRecoveryNodes.some((node) => !node.metadata?.taskId)) {
             const recentTasks = await listGenerationTasks(30).catch(() => []);
             tasks.push(...recentTasks.filter((task) => !tasks.some((item) => item.id === task.id)));
         }
         const projectTasks = tasks.filter((task) => task.projectId === projectId && (task.type.startsWith("canvas_") || task.type === "agent_storyboard_rows"));
-        await Promise.all(recoveryNodes.map(async (node) => {
+        await Promise.all(backendRecoveryNodes.map(async (node) => {
             let task = projectTasks.find((item) => item.id === node.metadata?.taskId) || projectTasks.find((item) => generationTaskNodeId(item) === node.id);
             if (!task && node.metadata?.taskId) task = await queryGenerationTask(node.metadata.taskId).catch(() => undefined);
             if (!task) {
@@ -204,7 +215,7 @@ export function useCanvasGeneration({ projectId, domainProjectId, projectLoaded,
     useEffect(() => {
         if (!projectLoaded) return;
         nodes.forEach((node) => {
-            const taskId = node.metadata?.taskId;
+            const taskId = node.metadata?.taskId || node.metadata?.desktopVideoTaskId;
             if (!taskId || !node.metadata?.content || node.metadata.status !== NODE_STATUS_SUCCESS || (node.type !== CanvasNodeType.Image && node.type !== CanvasNodeType.Video && node.type !== CanvasNodeType.Audio)) return;
             const saveKey = `${taskId}:${node.id}:${domainProjectId || "personal"}`;
             if (autoSavedTaskIdsRef.current.has(saveKey)) return;

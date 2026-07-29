@@ -8,6 +8,7 @@ import { isGenerationTaskCapacityError } from "@/lib/canvas/canvas-generation-ba
 import { expandSkillMentions } from "@/lib/canvas/canvas-skill-mentions";
 import { generationFailureMetadata } from "@/lib/generation-error";
 import { navigateToSettings } from "@/lib/settings-navigation";
+import { isDesktopVideoWorkflowAvailable } from "@/services/desktop-video-workflow";
 import type { UpdreamSkill } from "@/services/api/skills";
 import type { GenerationTask } from "@/services/api/task-center";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -71,7 +72,8 @@ export function useCanvasGenerationExecutor({
                 return;
             }
             let generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, mode);
-            if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+            const desktopVideoWorkflow = mode === "video" && isDesktopVideoWorkflowAvailable();
+            if (!desktopVideoWorkflow && !isAiConfigReady(generationConfig, generationConfig.model)) {
                 navigateToSettings({ continueCreation: true });
                 return;
             }
@@ -111,7 +113,7 @@ export function useCanvasGenerationExecutor({
                     projectId,
                     domainProjectId,
                     mode,
-                    mode === "video" && supportsVideoReferenceAudio(generationConfig),
+                    mode === "video" && (desktopVideoWorkflow || supportsVideoReferenceAudio(generationConfig)),
                 );
             } catch (error) {
                 const errorDetails = error instanceof Error ? error.message : "生成任务准备失败";

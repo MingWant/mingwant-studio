@@ -9,6 +9,7 @@ import { canvasNodeAssetCategory } from "@/lib/canvas/canvas-node-asset";
 import { formatBytes, getDataUrlByteSize } from "@/lib/image-utils";
 import { CONTENT_MODERATION_ERROR_CODE, isContentModerationError } from "@/lib/generation-error";
 import { useCopyText } from "@/hooks/use-copy-text";
+import { desktopVideoProviderLabel } from "@/services/desktop-video-workflow";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { FloatingDock, type FloatingDockEntry } from "@/components/ui/aceternity/floating-dock";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeMetadata, type CanvasWorkspaceMode, type ViewportTransform } from "@/types/canvas";
@@ -414,6 +415,9 @@ export function CanvasNodeInfoModal({ node, open, onClose, onMetadataChange, rea
                                     <InfoRow label="位置" value={`${Math.round(node.position.x)}, ${Math.round(node.position.y)}`} />
                                     {batchCount > 1 ? <InfoRow label="图片组" value={`${batchCount} 张`} /> : null}
                                     {imageBytes ? <InfoRow label="图片大小" value={formatBytes(imageBytes)} /> : null}
+                                    {node.type === CanvasNodeType.Video && (node.metadata?.desktopVideoResultProvider || node.metadata?.desktopVideoProvider) ? <InfoRow label={node.metadata.desktopVideoResultProvider ? "生成平台" : "网页平台选择"} value={desktopVideoProviderLabel(node.metadata.desktopVideoResultProvider || node.metadata.desktopVideoProvider)} /> : null}
+                                    {node.type === CanvasNodeType.Video && node.metadata?.desktopVideoAccountName ? <InfoRow label="生成账号" value={node.metadata.desktopVideoAccountName} /> : null}
+                                    {node.type === CanvasNodeType.Video && node.metadata?.desktopVideoSourceFileName ? <InfoRow label="源文件" value={node.metadata.desktopVideoSourceFileName} /> : null}
                                 </div>
                                 {node.type === CanvasNodeType.Image ? (
                                     <div className="border-t pt-3" style={{ borderColor: theme.toolbar.border }}>

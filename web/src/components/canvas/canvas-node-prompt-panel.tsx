@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
-import { ArrowUp, AtSign, Boxes, FileText, ImageIcon, ImagePlus, Maximize2, Music2, Pencil, Square, UserRound, Video } from "lucide-react";
-import { Button, Modal, Tooltip } from "antd";
+import { ArrowUp, AtSign, Boxes, FileText, ImageIcon, ImagePlus, Maximize2, MonitorPlay, Music2, Pencil, Square, UserRound, Video } from "lucide-react";
+import { App, Button, Modal, Select, Tooltip } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
 import { configuredModelMatchesCapability, defaultConfig, modelOptionName, resolveModelChannel, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
@@ -8,6 +8,7 @@ import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
 import { navigateToSettings } from "@/lib/settings-navigation";
+import { DESKTOP_VIDEO_PROVIDER_OPTIONS, isDesktopVideoWorkflowAvailable, openDesktopVideoWorkbench, preferredDesktopVideoProvider, rememberDesktopVideoProvider } from "@/services/desktop-video-workflow";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
@@ -15,7 +16,7 @@ import { CanvasResourceMentionTextarea } from "./canvas-resource-mention-textare
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
 import { CanvasVideoPromptTools } from "./canvas-video-prompt-tools";
 import { CanvasPresetPicker, type CanvasPromptPreset } from "./canvas-preset-picker";
-import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData, type CanvasNodeMetadata, type CanvasWorkspaceMode } from "@/types/canvas";
+import { CanvasNodeType, type CanvasGenerationMode, type CanvasNodeData, type CanvasNodeMetadata, type CanvasWorkspaceMode, type DesktopVideoProvider } from "@/types/canvas";
 import { canvasResourceMentionToken, type CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 
 export type CanvasNodeGenerationMode = CanvasGenerationMode;
@@ -35,11 +36,14 @@ type CanvasNodePromptPanelProps = {
 type CanvasTheme = (typeof canvasThemes)[keyof typeof canvasThemes];
 
 export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfigChange, onGenerate, onStop, mentionReferences = [], onImageSettingsOpenChange, workspaceMode = "professional" }: CanvasNodePromptPanelProps) {
+    const { message } = App.useApp();
     const globalConfig = useEffectiveConfig();
     const themeName = useThemeStore((state) => state.theme);
     const theme = canvasThemes[themeName];
     const simpleMode = workspaceMode === "simple";
     const mode = defaultMode(node.type);
+    const desktopVideoWorkflow = mode === "video" && isDesktopVideoWorkflowAvailable();
+    const desktopVideoProvider = preferredDesktopVideoProvider(node.metadata?.desktopVideoProvider);
     const config = buildNodeConfig(globalConfig, node, mode);
     const hasTextContent = node.type === CanvasNodeType.Text && Boolean(node.metadata?.content?.trim());
     const hasImageContent = node.type === CanvasNodeType.Image && Boolean(node.metadata?.content);
@@ -119,6 +123,33 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
         }
     };
 
+    const openVideoWorkbench = () => {
+        void openDesktopVideoWorkbench().catch((error) => message.error(error instanceof Error ? error.message : "网页视频工作台打开失败"));
+    };
+
+    const changeDesktopVideoProvider = (provider: DesktopVideoProvider) => {
+        rememberDesktopVideoProvider(provider);
+        onConfigChange(node.id, { desktopVideoProvider: provider });
+    };
+
+    const renderDesktopWorkflowPicker = () => (
+        <div className="flex h-7 min-w-0 flex-1 items-center gap-1">
+            <Select<DesktopVideoProvider>
+                size="small"
+                className="min-w-0 flex-1 text-[10px]"
+                value={desktopVideoProvider}
+                options={DESKTOP_VIDEO_PROVIDER_OPTIONS}
+                onChange={changeDesktopVideoProvider}
+                aria-label="网页视频平台"
+            />
+            <Tooltip title="打开多账号网页视频工作台">
+                <button type="button" className="grid size-7 shrink-0 place-items-center rounded-md transition hover:brightness-110" style={{ background: theme.accent.primarySoft, color: theme.accent.primary }} onClick={openVideoWorkbench} aria-label="打开网页视频工作台">
+                    <MonitorPlay className="size-3.5" />
+                </button>
+            </Tooltip>
+        </div>
+    );
+
     const renderComposerHeader = (expanded: boolean) => (
         <div className="flex min-w-0 items-center gap-1 px-0.5">
             <div className="flex h-6 min-w-0 items-center gap-1 rounded-md px-1.5" style={{ background: theme.toolbar.itemHover }}>
@@ -158,9 +189,11 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
 
     const renderComposerControls = (expanded: boolean) => simpleMode ? (
         <div className="flex min-w-0 items-center justify-between gap-2 px-0.5">
-            <span className="min-w-0 truncate px-2 text-[10px]" style={{ color: theme.node.muted }}>
-                {activeReferenceCount ? `已连接 ${activeReferenceCount} 个素材` : "将使用默认模型与参数"}
-            </span>
+            {desktopVideoWorkflow ? renderDesktopWorkflowPicker() : (
+                <span className="min-w-0 truncate px-2 text-[10px]" style={{ color: theme.node.muted }}>
+                    {activeReferenceCount ? `已连接 ${activeReferenceCount} 个素材` : "将使用默认模型与参数"}
+                </span>
+            )}
             <Button
                 type="text"
                 className="!inline-flex !h-8 shrink-0 !items-center !gap-1 !rounded-md !px-2.5 !text-[10px] !font-medium"
@@ -177,7 +210,11 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     ) : (
         <div className="flex min-w-0 items-center justify-between gap-0.5 px-0.5">
             <div className={`${expanded ? "max-w-[320px]" : mode === "image" || mode === "video" ? "max-w-[240px]" : "max-w-[174px]"} min-w-[104px] flex-1`}>
-                <ModelPicker className="!h-7 !w-full !min-w-0 !text-[10px] !font-normal [&_img]:!size-3 [&_.lucide]:!size-3" fullWidth config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability={mode} onMissingConfig={() => navigateToSettings({ continueCreation: true })} showSelectedPrice={false} />
+                {desktopVideoWorkflow ? (
+                    renderDesktopWorkflowPicker()
+                ) : (
+                    <ModelPicker className="!h-7 !w-full !min-w-0 !text-[10px] !font-normal [&_img]:!size-3 [&_.lucide]:!size-3" fullWidth config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability={mode} onMissingConfig={() => navigateToSettings({ continueCreation: true })} showSelectedPrice={false} />
+                )}
             </div>
             <div className="ml-auto flex min-w-0 shrink-0 items-center gap-0.5">
                 {mode === "image" ? (
@@ -194,7 +231,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                 ) : mode === "audio" ? (
                     <CanvasAudioSettingsPopover config={config} buttonClassName="!h-7 !w-[138px] !justify-start !rounded-md !border-0 !bg-transparent !px-1.5 !text-[10px] !font-normal !shadow-none [&>span]:min-w-0 [&_.lucide]:!size-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
                 ) : null}
-                <GenerationCostBadge credits={credits} theme={theme} />
+                {desktopVideoWorkflow ? null : <GenerationCostBadge credits={credits} theme={theme} />}
                 <Button
                     type="text"
                     className="!inline-flex !h-8 !w-8 shrink-0 !items-center !justify-center !rounded-md !border-0 !p-0 !shadow-none"

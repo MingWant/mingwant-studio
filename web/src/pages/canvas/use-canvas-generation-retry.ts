@@ -26,6 +26,7 @@ import { generationFailureMetadata, unchangedModeratedPrompt } from "@/lib/gener
 import { navigateToSettings } from "@/lib/settings-navigation";
 import { storeGeneratedAudio } from "@/services/api/audio";
 import { storeGeneratedVideo } from "@/services/api/video";
+import { createDesktopVideoTaskId, isDesktopVideoWorkflowAvailable, preferredDesktopVideoProvider, requestDesktopVideoGeneration, type DesktopVideoGenerationResult } from "@/services/desktop-video-workflow";
 import type { UpdreamSkill } from "@/services/api/skills";
 import type { GenerationTask } from "@/services/api/task-center";
 import { resolveImageUrl, uploadImage } from "@/services/image-storage";
@@ -71,7 +72,8 @@ export function useCanvasGenerationRetry({ projectId, domainProjectId, activated
                 hasSavedImageMetadata && savedImageMetadata
                     ? { ...effectiveConfig, model: savedImageMetadata.model || effectiveConfig.imageModel || effectiveConfig.model, quality: savedImageMetadata.quality || effectiveConfig.quality, size: savedImageMetadata.size || effectiveConfig.size, transparentBackground: (savedImageMetadata.transparentBackground || effectiveConfig.transparentBackground) === "true" ? "true" : "false", count: "1" }
                     : { ...buildGenerationConfig(effectiveConfig, sourceNode, retryMode), count: "1" };
-            if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+            const desktopVideoWorkflow = retryMode === "video" && isDesktopVideoWorkflowAvailable();
+            if (!desktopVideoWorkflow && !isAiConfigReady(generationConfig, generationConfig.model)) {
                 navigateToSettings({ continueCreation: true });
                 return;
             }
@@ -84,7 +86,7 @@ export function useCanvasGenerationRetry({ projectId, domainProjectId, activated
             let rawContext: Awaited<ReturnType<typeof hydrateNodeGenerationContext>> | null;
             try {
                 const baseContext = buildNodeGenerationContext(sourceNode.id, nodesRef.current, connectionsRef.current, retryPromptSource);
-                rawContext = hasSavedImageMetadata && !baseContext.characterReferences.length ? null : await hydrateNodeGenerationContext(baseContext, projectId, domainProjectId, retryMode, retryMode === "video" && supportsVideoReferenceAudio(generationConfig));
+                rawContext = hasSavedImageMetadata && !baseContext.characterReferences.length ? null : await hydrateNodeGenerationContext(baseContext, projectId, domainProjectId, retryMode, retryMode === "video" && (desktopVideoWorkflow || supportsVideoReferenceAudio(generationConfig)));
             } catch (error) {
                 const failure = generationFailureMetadata(error, retryPromptSource);
                 message.error(failure.errorDetails);
@@ -130,10 +132,12 @@ export function useCanvasGenerationRetry({ projectId, domainProjectId, activated
                 return;
             }
             const videoReferenceImages = context?.referenceImages.length ? context.referenceImages : storedVideoImages;
-            const videoContext = node.type === CanvasNodeType.Video ? { prompt, referenceImages: videoReferenceImages, referenceVideos: context?.referenceVideos || [], referenceAudios: context?.referenceAudios || [], textCount: context?.textCount || 0, imageCount: videoReferenceImages.length, videoCount: context?.referenceVideos.length || 0, audioCount: context?.referenceAudios.length || 0 } : undefined;
+            const videoContext = node.type === CanvasNodeType.Video ? { prompt, referenceImages: videoReferenceImages, referenceVideos: context?.referenceVideos || [], referenceAudios: context?.referenceAudios || [], characterReferences: context?.characterReferences || [], resolvedCharacterVersions: context?.resolvedCharacterVersions || [], resolvedCharacterVoices: context?.resolvedCharacterVoices || [], textCount: context?.textCount || 0, imageCount: videoReferenceImages.length, videoCount: context?.referenceVideos.length || 0, audioCount: context?.referenceAudios.length || 0 } : undefined;
+            const desktopProvider = preferredDesktopVideoProvider(node.metadata?.desktopVideoProvider);
+            const desktopTaskId = desktopVideoWorkflow ? createDesktopVideoTaskId() : "";
 
             setRunningNodeId(node.id);
-            setNodes((current) => current.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, generationErrorCode: undefined, failedPromptFingerprint: undefined } } : item)));
+            setNodes((current) => current.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, generationErrorCode: undefined, failedPromptFingerprint: undefined, ...(desktopVideoWorkflow ? { taskId: undefined, taskStatus: undefined, taskUpdatedAt: undefined, desktopVideoProvider: desktopProvider, desktopVideoResultProvider: undefined, desktopVideoTaskId: desktopTaskId, desktopVideoAccountId: undefined, desktopVideoAccountName: undefined, desktopVideoSourceFileName: undefined, taskStage: "等待网页工作台操作", taskProgress: 0, taskCreatedAt: new Date().toISOString() } : retryMode === "video" ? { desktopVideoProvider: undefined, desktopVideoResultProvider: undefined, desktopVideoTaskId: undefined, desktopVideoAccountId: undefined, desktopVideoAccountName: undefined, desktopVideoSourceFileName: undefined } : {}) } } : item)));
             const controller = startGenerationRequest(node.id, sourceNode.id, node.id);
 
             try {
@@ -146,11 +150,18 @@ export function useCanvasGenerationRetry({ projectId, domainProjectId, activated
                 }
                 if (node.type === CanvasNodeType.Video) {
                     const videoGenerationMetadata = buildVideoGenerationMetadata(node, videoContext);
-                    const result = await runBackendCanvasGenerationTask({ projectId, nodeId: node.id, mode: "video", prompt, config: generationConfig, referenceImages: videoContext?.referenceImages || [], referenceVideos: videoContext?.referenceVideos || [], referenceAudios: videoContext?.referenceAudios || [], signal: controller.signal, metadata: { retry: true, sourceNodeId: sourceNode.id, resolvedCharacterVersions: context?.resolvedCharacterVersions || [], resolvedCharacterVoices: context?.resolvedCharacterVoices || [], ...videoGenerationMetadata }, onTaskCreated: (task) => bindGenerationTask(node.id, task) });
-                    if (!result.video?.dataUrl) throw new Error("后端任务没有返回视频");
-                    const video = await storeGeneratedVideo({ url: result.video.dataUrl, mimeType: result.video.mimeType || "video/mp4" });
+                    let desktopResult: DesktopVideoGenerationResult | null = null;
+                    let video: Awaited<ReturnType<typeof storeGeneratedVideo>>;
+                    if (desktopVideoWorkflow && videoContext) {
+                        desktopResult = await requestDesktopVideoGeneration({ taskId: desktopTaskId, projectId, nodeId: node.id, provider: desktopProvider, title: node.title, prompt, config: generationConfig, context: videoContext, signal: controller.signal });
+                        video = await storeGeneratedVideo({ blob: desktopResult.blob });
+                    } else {
+                        const result = await runBackendCanvasGenerationTask({ projectId, nodeId: node.id, mode: "video", prompt, config: generationConfig, referenceImages: videoContext?.referenceImages || [], referenceVideos: videoContext?.referenceVideos || [], referenceAudios: videoContext?.referenceAudios || [], signal: controller.signal, metadata: { retry: true, sourceNodeId: sourceNode.id, resolvedCharacterVersions: context?.resolvedCharacterVersions || [], resolvedCharacterVoices: context?.resolvedCharacterVoices || [], ...videoGenerationMetadata }, onTaskCreated: (task) => bindGenerationTask(node.id, task) });
+                        if (!result.video?.dataUrl) throw new Error("后端任务没有返回视频");
+                        video = await storeGeneratedVideo({ url: result.video.dataUrl, mimeType: result.video.mimeType || "video/mp4" });
+                    }
                     const videoSize = fitNodeSize(video.width || node.width, video.height || node.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
-                    setNodes((current) => current.map((item) => (item.id === node.id ? { ...item, width: videoSize.width, height: videoSize.height, position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 }, metadata: { ...item.metadata, ...videoMetadata(video), prompt, model: generationConfig.model, size: generationConfig.size, seconds: generationConfig.videoSeconds, vquality: generationConfig.vquality, generateAudio: generationConfig.videoGenerateAudio, watermark: generationConfig.videoWatermark, ...videoGenerationMetadata, references: videoContext ? generationReferenceUrls(videoContext) : item.metadata?.references } } : item)));
+                    setNodes((current) => current.map((item) => (item.id === node.id ? { ...item, width: videoSize.width, height: videoSize.height, position: { x: item.position.x + item.width / 2 - videoSize.width / 2, y: item.position.y + item.height / 2 - videoSize.height / 2 }, metadata: { ...item.metadata, ...videoMetadata(video), prompt, model: generationConfig.model, size: generationConfig.size, seconds: generationConfig.videoSeconds, vquality: generationConfig.vquality, generateAudio: generationConfig.videoGenerateAudio, watermark: generationConfig.videoWatermark, ...videoGenerationMetadata, references: videoContext ? generationReferenceUrls(videoContext) : item.metadata?.references, ...(desktopResult ? { desktopVideoProvider: desktopResult.provider, desktopVideoResultProvider: desktopResult.provider, desktopVideoTaskId: desktopResult.taskId, desktopVideoAccountId: desktopResult.accountId, desktopVideoAccountName: desktopResult.accountName, desktopVideoSourceFileName: desktopResult.fileName, taskStage: undefined, taskProgress: undefined } : {}) } } : item)));
                     return;
                 }
                 if (node.type === CanvasNodeType.Audio) {

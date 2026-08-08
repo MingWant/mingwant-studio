@@ -6,7 +6,7 @@ import { CircleDot, Clapperboard, Eraser, FolderOpen, Grid2x2, Hand, Image as Im
 import { AnimatedThemeToggler } from "@/components/ui/animated-theme-toggler";
 import { FloatingDock, type FloatingDockEntry } from "@/components/ui/aceternity/floating-dock";
 import { SpotlightSurface } from "@/components/ui/aceternity/spotlight-surface";
-import { CanvasCreateCommandGrid, type CanvasCreateCommand } from "@/components/canvas/canvas-create-command-grid";
+import { CanvasCreateMenu, type CanvasCreateCommand } from "@/components/canvas/canvas-create-menu";
 import { aceternityMotion } from "@/lib/aceternity-motion";
 import { canvasDockStyle } from "@/lib/canvas/canvas-aceternity-style";
 import { canvasThemes, type CanvasBackgroundMode, type CanvasColorTheme, type CanvasTheme } from "@/lib/canvas-theme";
@@ -192,34 +192,31 @@ function AddNodeMenu({ x, theme, workspaceMode, isProjectLinked, onAddText, onCh
 }) {
     const simpleMode = workspaceMode === "simple";
     const nodeCommands: CanvasCreateCommand[] = [
-        { id: "text", label: "文本", icon: <Type />, onClick: onAddText },
+        { id: "text", label: "文本", icon: <Type />, section: "node", onClick: onAddText },
         ...(!isProjectLinked ? [
-            { id: "style", label: "项目画风", icon: <Palette />, onClick: onChooseStyle },
+            { id: "style", label: "项目画风", icon: <Palette />, section: "node" as const, onClick: onChooseStyle },
         ] : []),
-        { id: "script", label: "分镜脚本", icon: <Clapperboard />, badge: "核心", onClick: onAddScript },
-        ...(!simpleMode ? [{ id: "frame", label: "背板", icon: <PanelTop />, onClick: onAddFrame }] : []),
-        { id: "drawing", label: "绘图", icon: <Pencil />, onClick: onAddDrawing },
-        { id: "image", label: "图片", icon: <ImageIcon />, onClick: onAddImage },
-        { id: "video", label: "视频", icon: <Video />, onClick: onAddVideo },
+        { id: "script", label: "分镜脚本", icon: <Clapperboard />, badge: "核心", section: "node", onClick: onAddScript },
+        ...(!simpleMode ? [{ id: "frame", label: "背板", icon: <PanelTop />, section: "node" as const, onClick: onAddFrame }] : []),
+        { id: "drawing", label: "绘图", icon: <Pencil />, section: "node", onClick: onAddDrawing },
+        { id: "image", label: "图片", icon: <ImageIcon />, section: "node", onClick: onAddImage },
+        { id: "video", label: "视频", icon: <Video />, section: "node", onClick: onAddVideo },
         ...(!simpleMode ? [
-            { id: "director", label: "导演台", icon: <Layers3 />, badge: "3D", onClick: onOpenDirector },
-            { id: "audio", label: "音频", icon: <Music2 />, onClick: onAddAudio },
-            { id: "config", label: "生成配置", icon: <WandSparkles />, onClick: onAddConfig },
+            { id: "director", label: "导演台", icon: <Layers3 />, badge: "3D", section: "node" as const, onClick: onOpenDirector },
+            { id: "audio", label: "音频", icon: <Music2 />, section: "node" as const, onClick: onAddAudio },
+            { id: "config", label: "生成配置", icon: <WandSparkles />, section: "node" as const, onClick: onAddConfig },
         ] : []),
     ];
     const resourceCommands: CanvasCreateCommand[] = [
-        { id: "upload", label: "上传文件", icon: <UploadCloud />, onClick: onUpload },
-        ...(isProjectLinked ? [{ id: "project-character", label: "添加角色卡", icon: <UserRound />, onClick: onOpenProjectCharacters }] : []),
-        ...(!isProjectLinked ? [{ id: "assets", label: "素材库", icon: <FolderOpen />, onClick: onOpenAssets }] : []),
+        { id: "upload", label: "上传文件", icon: <UploadCloud />, section: "resource", onClick: onUpload },
+        ...(isProjectLinked ? [{ id: "project-character", label: "添加角色卡", icon: <UserRound />, section: "resource" as const, onClick: onOpenProjectCharacters }] : []),
+        ...(!isProjectLinked ? [{ id: "assets", label: "素材库", icon: <FolderOpen />, section: "resource" as const, onClick: onOpenAssets }] : []),
     ];
     return (
         <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: aceternityMotion.duration.instant }} className="pointer-events-auto absolute bottom-[50px] z-40 w-[260px] max-w-[calc(100vw-24px)] -translate-x-1/2" style={{ left: x || "50%" }}>
             <SpotlightSurface spotlightColor={theme.toolbar.itemHover} initial={{ y: 6, scale: 0.97 }} animate={{ y: 0, scale: 1 }} exit={{ y: 4, scale: 0.98 }} transition={{ duration: aceternityMotion.duration.instant, ease: aceternityMotion.easing.enter }} className="aceternity-floating-panel overflow-hidden rounded-[16px] border p-2 backdrop-blur-2xl" style={{ background: theme.spatial.elevated, borderColor: theme.toolbar.border, color: theme.node.text, boxShadow: `0 24px 64px ${theme.spatial.shadow}` }} onWheel={(event) => event.stopPropagation()}>
                 <PanelHeading icon={<Plus className="size-4" />} title="创建内容" subtitle="选择节点类型" theme={theme} />
-                <MenuSection title="创作节点" />
-                <CanvasCreateCommandGrid commands={nodeCommands} />
-                <MenuSection title="导入资源" />
-                <CanvasCreateCommandGrid commands={resourceCommands} variant="resource" />
+                <CanvasCreateMenu commands={[...nodeCommands, ...resourceCommands]} />
             </SpotlightSurface>
         </motion.div>
     );
@@ -232,10 +229,6 @@ function PanelHeading({ icon, title, subtitle, theme }: { icon: ReactNode; title
             <span className="min-w-0"><span className="block text-xs font-semibold">{title}</span><span className="mt-0.5 block text-[9px]" style={{ color: theme.node.muted }}>{subtitle}</span></span>
         </div>
     );
-}
-
-function MenuSection({ title }: { title: string }) {
-    return <div className="mb-1 mt-3 px-1 text-[9px] font-semibold uppercase opacity-42">{title}</div>;
 }
 
 function CanvasThemeButton({ colorTheme, targetTheme, onThemeChange, children }: { colorTheme: CanvasColorTheme; targetTheme: CanvasColorTheme; onThemeChange: (theme: CanvasColorTheme) => void; children: ReactNode }) {

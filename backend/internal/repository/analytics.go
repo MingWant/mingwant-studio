@@ -113,6 +113,30 @@ func (r *Repository) QueryAPICallLogs(filter APICallLogFilter) ([]model.ApiCallL
 	if filter.Limit <= 0 || filter.Limit > 200 {
 		filter.Limit = 50
 	}
+	var total int64
+	// 用户与渠道都是一对一关联，不需要 DISTINCT；计数和分页仍分别构造，避免 PostgreSQL 继承排序状态。
+	if err := r.filteredAPICallLogQuery(filter).Model(&model.ApiCallLog{}).Count(&total).Error; err != nil {
+		return nil, 0, err
+	}
+	var logs []model.ApiCallLog
+	err := r.filteredAPICallLogQuery(filter).Select("api_call_logs.*").Order("api_call_logs.created_at desc, api_call_logs.id desc").Offset((filter.Page - 1) * filter.Limit).Limit(filter.Limit).Find(&logs).Error
+	return logs, total, err
+}
+
+func (r *Repository) ExportAPICallLogs(filter APICallLogFilter, limit int) ([]model.ApiCallLog, error) {
+	if limit <= 0 || limit > 10_000 {
+		limit = 10_000
+	}
+	query := r.filteredAPICallLogQuery(filter)
+	if len(filter.IDs) > 0 {
+		query = query.Where("api_call_logs.id IN ?", filter.IDs)
+	}
+	var logs []model.ApiCallLog
+	err := query.Select("api_call_logs.*").Order("api_call_logs.created_at desc, api_call_logs.id desc").Limit(limit).Find(&logs).Error
+	return logs, err
+}
+
+func (r *Repository) filteredAPICallLogQuery(filter APICallLogFilter) *gorm.DB {
 	query := r.apiCallLogQuery(filter.AnalyticsFilter)
 	if value := strings.TrimSpace(filter.Keyword); value != "" {
 		pattern := "%" + strings.ToLower(value) + "%"
@@ -127,36 +151,21 @@ func (r *Repository) QueryAPICallLogs(filter APICallLogFilter) ([]model.ApiCallL
 	if filter.Status != "" {
 		query = query.Where("api_call_logs.status = ?", filter.Status)
 	}
-	var total int64
-	if err := query.Model(&model.ApiCallLog{}).Distinct("api_call_logs.id").Count(&total).Error; err != nil {
-		return nil, 0, err
-	}
-	var logs []model.ApiCallLog
-	err := query.Select("api_call_logs.*").Order("api_call_logs.created_at desc").Offset((filter.Page - 1) * filter.Limit).Limit(filter.Limit).Find(&logs).Error
-	return logs, total, err
+	return query
 }
 
-func (r *Repository) ExportAPICallLogs(filter APICallLogFilter, limit int) ([]model.ApiCallLog, error) {
-	if limit <= 0 || limit > 10_000 {
-		limit = 10_000
+func (r *Repository) LatestProviderRequestIDForTaskAttempt(taskID string, billingOrderID string, startedAt *time.Time) (string, error) {
+	var log model.ApiCallLog
+	query := r.db.Select("provider_request_id").Where("task_id = ? AND provider_request_id <> ''", taskID)
+	if strings.TrimSpace(billingOrderID) != "" {
+		query = query.Where("billing_order_id = ?", strings.TrimSpace(billingOrderID))
+	} else if startedAt != nil && !startedAt.IsZero() {
+		query = query.Where("created_at >= ?", *startedAt)
+	} else {
+		return "", gorm.ErrRecordNotFound
 	}
-	query := r.apiCallLogQuery(filter.AnalyticsFilter)
-	if len(filter.IDs) > 0 {
-		query = query.Where("api_call_logs.id IN ?", filter.IDs)
-	}
-	if value := strings.TrimSpace(filter.Keyword); value != "" {
-		pattern := "%" + strings.ToLower(value) + "%"
-		query = query.Joins("LEFT JOIN users ON users.id = api_call_logs.user_id").Joins("LEFT JOIN model_channels ON model_channels.id = api_call_logs.channel_id").Where(
-			"lower(api_call_logs.user_id) LIKE ? OR lower(users.username) LIKE ? OR lower(users.display_name) LIKE ? OR lower(api_call_logs.channel_id) LIKE ? OR lower(model_channels.name) LIKE ? OR lower(api_call_logs.model) LIKE ? OR lower(api_call_logs.path) LIKE ? OR lower(api_call_logs.provider_request_id) LIKE ?",
-			pattern, pattern, pattern, pattern, pattern, pattern, pattern, pattern,
-		)
-	}
-	if filter.Status != "" {
-		query = query.Where("api_call_logs.status = ?", filter.Status)
-	}
-	var logs []model.ApiCallLog
-	err := query.Select("api_call_logs.*").Order("api_call_logs.created_at desc").Limit(limit).Find(&logs).Error
-	return logs, err
+	err := query.Order("created_at desc, id desc").First(&log).Error
+	return strings.TrimSpace(log.ProviderRequestID), err
 }
 
 func (r *Repository) apiCallLogQuery(filter AnalyticsFilter) *gorm.DB {
@@ -198,6 +207,14 @@ func (r *Repository) ModelPricing(channelID string, modelName string, capability
 func (r *Repository) ModelPricingByID(id string) (*model.ModelPricing, error) {
 	var pricing model.ModelPricing
 	if err := r.db.First(&pricing, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	return &pricing, nil
+}
+
+func (r *Repository) ModelPricingByIDForUpdate(id string) (*model.ModelPricing, error) {
+	var pricing model.ModelPricing
+	if err := r.db.Clauses(clause.Locking{Strength: "UPDATE"}).First(&pricing, "id = ?", id).Error; err != nil {
 		return nil, err
 	}
 	return &pricing, nil

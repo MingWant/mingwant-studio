@@ -12,12 +12,15 @@ import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type Canvas
 const CANVAS_WORKSPACE_MODE_STORAGE_KEY = "canvas-workspace-mode-v1";
 
 export function readCanvasWorkspaceMode(): CanvasWorkspaceMode {
-    if (typeof window === "undefined") return "professional";
+    // 新用户先走“手动交付”：它只整理分镜提示词，不会把慢模型直接送进长任务或视频计费链路。
+    // 已保存过模式的用户仍然沿用自己的选择，专业模式可随时从画布顶部切回。
+    if (typeof window === "undefined") return "manual";
     try {
-        return scopedLocalStorage.getItem(CANVAS_WORKSPACE_MODE_STORAGE_KEY) === "simple" ? "simple" : "professional";
+        const saved = scopedLocalStorage.getItem(CANVAS_WORKSPACE_MODE_STORAGE_KEY);
+        return saved === "simple" || saved === "professional" || saved === "manual" ? saved : "manual";
     } catch (error) {
-        console.warn("读取画布工作模式失败，已使用专业模式", error);
-        return "professional";
+        console.warn("读取画布工作模式失败，已使用手动交付模式", error);
+        return "manual";
     }
 }
 
@@ -58,6 +61,10 @@ export function createStoryboardRow(shotNumber: number, patch: Partial<Storyboar
         plotDescription: "",
         dialogue: "",
         characters: [],
+        purpose: "",
+        informationChange: "",
+        sourceRefs: [],
+        assetBindings: [],
         shotSize: "",
         emotion: "",
         lightingAndAtmosphere: "",
@@ -74,6 +81,100 @@ export function createStoryboardRow(shotNumber: number, patch: Partial<Storyboar
     };
 }
 
+const AGENT_STORYBOARD_COLUMNS: StoryboardColumn[] = [
+    "shotNumber",
+    "durationSeconds",
+    "plotDescription",
+    "dialogue",
+    "shotSize",
+    "emotion",
+    "lightingAndAtmosphere",
+    "audioEffects",
+    "camera",
+    "motion",
+    "timeBeats",
+    "imageGenerationPrompt",
+    "videoMotionPrompt",
+    "negativePrompt",
+];
+
+/**
+ * Agent 写入的脚本不是经过后端分镜解析的可信数据，必须在进入画布状态前补齐行身份和默认字段。
+ * 保留合法且不重复的 id，避免同一批操作经过不同 Agent 桥接层时改变已建立的行引用。
+ */
+export function normalizeAgentStoryboardMetadata(metadata?: Record<string, unknown>): CanvasNodeMetadata {
+    if (!metadata) return {};
+    const storyboard = recordValue(metadata.storyboard);
+    const rawRows = Array.isArray(storyboard?.rows) ? storyboard.rows : [];
+    if (!rawRows.length) return metadata as CanvasNodeMetadata;
+    const usedIds = new Set<string>();
+    const rows = rawRows.slice(0, 20).map((value, index) => {
+        const row = recordValue(value) || {};
+        const rawId = stringValue(row.id);
+        const id = rawId && !usedIds.has(rawId) ? rawId : undefined;
+        if (id) usedIds.add(id);
+        return createStoryboardRow(index + 1, {
+            ...(id ? { id } : {}),
+            shotNumber: index + 1,
+            durationSeconds: Math.min(60, Math.max(1, Math.round(numberValue(row.durationSeconds, 6)))),
+            plotDescription: stringValue(row.plotDescription),
+            dialogue: stringValue(row.dialogue),
+            purpose: stringValue(row.purpose),
+            informationChange: stringValue(row.informationChange),
+            shotSize: stringValue(row.shotSize),
+            emotion: stringValue(row.emotion),
+            lightingAndAtmosphere: stringValue(row.lightingAndAtmosphere),
+            audioEffects: stringValue(row.audioEffects),
+            camera: stringValue(row.camera),
+            motion: stringValue(row.motion),
+            timeBeats: stringValue(row.timeBeats),
+            imageGenerationPrompt: stringValue(row.imageGenerationPrompt),
+            videoMotionPrompt: stringValue(row.videoMotionPrompt),
+            negativePrompt: stringValue(row.negativePrompt),
+            referenceNodeIds: stringArrayValue(row.referenceNodeIds),
+        });
+    });
+    const requestedColumns = Array.isArray(storyboard?.visibleColumns)
+        ? storyboard.visibleColumns.filter((value): value is StoryboardColumn => AGENT_STORYBOARD_COLUMNS.includes(value as StoryboardColumn))
+        : [];
+    const defaultColumns: StoryboardColumn[] = [
+        "shotNumber",
+        "durationSeconds",
+        "plotDescription",
+        "dialogue",
+        "camera",
+        "motion",
+        "imageGenerationPrompt",
+        "videoMotionPrompt",
+        "negativePrompt",
+    ];
+    return {
+        ...metadata,
+        storyboard: {
+            ...storyboard,
+            rows,
+            visibleColumns: requestedColumns.length ? requestedColumns : defaultColumns,
+            referenceNodeIds: stringArrayValue(storyboard?.referenceNodeIds),
+        },
+    };
+}
+
+function recordValue(value: unknown) {
+    return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : undefined;
+}
+
+function stringValue(value: unknown) {
+    return typeof value === "string" ? value : "";
+}
+
+function numberValue(value: unknown, fallback: number) {
+    return typeof value === "number" && Number.isFinite(value) ? value : fallback;
+}
+
+function stringArrayValue(value: unknown) {
+    return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string") : [];
+}
+
 export function cinematicStoryboardColumns(columns?: StoryboardColumn[]): StoryboardColumn[] {
     return Array.from(new Set([
         ...(columns || ["shotNumber", "durationSeconds", "plotDescription", "dialogue"]),
@@ -87,10 +188,11 @@ export function cinematicStoryboardColumns(columns?: StoryboardColumn[]): Storyb
 }
 
 export function storyboardRowsFromTask(task: GenerationTask) {
-    const result = JSON.parse(task.resultJson || "{}") as { title?: string; rows?: Array<Partial<StoryboardRow>> };
+    const result = JSON.parse(task.resultJson || "{}") as { title?: string; rows?: Array<Partial<StoryboardRow>>; structureRepairUsed?: boolean };
     if (!Array.isArray(result.rows) || !result.rows.length) throw new Error("分镜任务没有返回镜头行");
     return {
         title: result.title?.trim(),
+        structureRepairUsed: result.structureRepairUsed === true,
         rows: result.rows.map((row, index) => createStoryboardRow(index + 1, { ...row, id: `shot-${Date.now()}-${index + 1}-${Math.random().toString(36).slice(2, 6)}`, shotNumber: index + 1, status: "idle", referenceNodeIds: Array.isArray(row.referenceNodeIds) ? row.referenceNodeIds : [] })),
     };
 }
@@ -191,11 +293,27 @@ export function storyboardRowFromHandle(nodes: CanvasNodeData[], nodeId: string,
 export function expandStoryboardTextMentions(prompt: string, references: CanvasResourceReference[]) {
     let expanded = prompt;
     references.filter((reference) => reference.active && reference.kind === "text" && reference.text?.trim()).forEach((reference) => {
-        const token = `@${reference.label}`;
-        if (!expanded.includes(token)) return;
-        expanded = expanded.split(token).join(`【项目设定：${reference.title}】\n${reference.text!.trim()}`);
+        const replacement = `【项目设定：${reference.title}】\n${reference.text!.trim()}`;
+        [`@${reference.label}`, `@[node:${reference.nodeId}]`].forEach((token) => {
+            expanded = expanded.split(token).join(replacement);
+        });
     });
     return expanded;
+}
+
+export function buildStoryboardPromptWithContext(prompt: string, references: CanvasResourceReference[]) {
+    const textReferences = references.filter((reference) => reference.active && reference.kind === "text" && reference.text?.trim());
+    const expanded = expandStoryboardTextMentions(prompt, textReferences);
+    const automaticContext = textReferences
+        .filter((reference) => !storyboardReferenceMentioned(prompt, reference))
+        .map((reference) => `【已连接项目设定：${reference.title}】\n${reference.text!.trim()}`);
+    if (!automaticContext.length) return expanded;
+    // 默认流水线的上下文连线代表“自动纳入”，不能要求用户先猜到 @文本编号；显式引用仍只展开一次。
+    return [expanded.trim(), ...automaticContext].filter(Boolean).join("\n\n");
+}
+
+function storyboardReferenceMentioned(prompt: string, reference: CanvasResourceReference) {
+    return [`@${reference.label}`, `@[node:${reference.nodeId}]`].some((token) => prompt.includes(token));
 }
 
 export function getInputSummary(inputs: NodeGenerationInput[]) {
@@ -292,6 +410,52 @@ export function sameNodeSemanticData(left: CanvasNodeData, right: CanvasNodeData
     return left.id === right.id && left.type === right.type && left.title === right.title && left.parentId === right.parentId && left.width === right.width && left.height === right.height && left.metadata === right.metadata;
 }
 
+export function applyBatchPrimaryImage(root: CanvasNodeData, primary: CanvasNodeData): CanvasNodeData {
+    // 主图是根节点对媒体的完整代理；可选字段也必须显式覆盖，避免残留上一张图的存储身份。
+    return {
+        ...root,
+        width: primary.width,
+        height: primary.height,
+        metadata: {
+            ...root.metadata,
+            primaryImageId: primary.id,
+            content: primary.metadata?.content,
+            storageKey: primary.metadata?.storageKey,
+            status: primary.metadata?.status,
+            naturalWidth: primary.metadata?.naturalWidth,
+            naturalHeight: primary.metadata?.naturalHeight,
+            bytes: primary.metadata?.bytes,
+            mimeType: primary.metadata?.mimeType,
+            errorDetails: primary.metadata?.errorDetails,
+            generationErrorCode: primary.metadata?.generationErrorCode,
+            failedPromptFingerprint: primary.metadata?.failedPromptFingerprint,
+            freeResize: primary.metadata?.freeResize,
+        },
+    };
+}
+
+function clearBatchPrimaryImage(root: CanvasNodeData): CanvasNodeData {
+    // 图片组已无可代理子图时必须清除媒体身份，否则根节点会继续引用已删除资源。
+    return {
+        ...root,
+        metadata: {
+            ...root.metadata,
+            primaryImageId: undefined,
+            content: undefined,
+            storageKey: undefined,
+            status: undefined,
+            naturalWidth: undefined,
+            naturalHeight: undefined,
+            bytes: undefined,
+            mimeType: undefined,
+            errorDetails: undefined,
+            generationErrorCode: undefined,
+            failedPromptFingerprint: undefined,
+            freeResize: undefined,
+        },
+    };
+}
+
 export function removeCanvasNodes(nodes: CanvasNodeData[], requestedIds: Set<string>) {
     const removedIds = new Set(requestedIds);
     nodes.forEach((node) => {
@@ -323,17 +487,8 @@ export function removeCanvasNodes(nodes: CanvasNodeData[], requestedIds: Set<str
         if (!cleaned.metadata?.isBatchRoot || childIds?.length === cleaned.metadata.batchChildIds?.length) return cleaned;
         const primaryImageId = childIds?.includes(cleaned.metadata.primaryImageId || "") ? cleaned.metadata.primaryImageId : childIds?.[0];
         const primaryNode = remainingNodes.find((item) => item.id === primaryImageId);
-        return {
-            ...cleaned,
-            metadata: {
-                ...cleaned.metadata,
-                batchChildIds: childIds,
-                primaryImageId,
-                content: primaryNode?.metadata?.content || cleaned.metadata?.content,
-                naturalWidth: primaryNode?.metadata?.naturalWidth || cleaned.metadata?.naturalWidth,
-                naturalHeight: primaryNode?.metadata?.naturalHeight || cleaned.metadata?.naturalHeight,
-            },
-        };
+        const batchRoot = { ...cleaned, metadata: { ...cleaned.metadata, batchChildIds: childIds, primaryImageId } };
+        return primaryNode ? applyBatchPrimaryImage(batchRoot, primaryNode) : clearBatchPrimaryImage(batchRoot);
     });
     return { removedIds, nodes: nextNodes };
 }

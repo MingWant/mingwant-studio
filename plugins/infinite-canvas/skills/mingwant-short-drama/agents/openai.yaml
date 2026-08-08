@@ -1,0 +1,11 @@
+interface:
+  display_name: "明想短剧制作"
+  short_description: "用项目数据与已配置模型 API 完成短剧资产、分镜、视频与审查"
+  default_prompt: "使用 $mingwant-short-drama 从当前明想短剧项目的下一可执行阶段继续制作。"
+
+dependencies:
+  tools:
+    - type: "mcp"
+      value: "infinite-canvas"
+      description: "读取和写入 MingWant Studio 项目、画布与视频生成任务"
+      transport: "stdio"

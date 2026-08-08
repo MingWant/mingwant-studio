@@ -2,18 +2,31 @@
 out/
 node_modules/
 docs/
-# 待验证清单需要与功能改动一并交付，其余本地文档仍保持忽略。
+# 正式索引、教程和项目参考需要随代码交付，其余本地文档仍保持忽略。
 !docs/
 docs/*
+!docs/index.md
 !docs/content/
 docs/content/*
 !docs/content/docs/
 docs/content/docs/*
+!docs/content/docs/getting-started.mdx
+!docs/content/docs/commerce-video-complete-example.mdx
+!docs/content/docs/administration-deployment.mdx
+!docs/content/docs/features.mdx
+!docs/content/docs/reference-video-remake-workflow.mdx
+!docs/content/docs/code-map.mdx
+!docs/content/docs/todo.mdx
 !docs/content/docs/pending-test.mdx
+!docs/content/docs/backend/
+docs/content/docs/backend/*
+!docs/content/docs/backend/backend-database.mdx
 .env*
 !.env.example
 data/
 .local/
+/backups/
+/.backup-server.lock/
 /.local/docker-compose.postgres.yml
 coverage/
 dist/

@@ -5,12 +5,14 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"log"
 	"net/mail"
 	"regexp"
 	"strings"
 	"time"
 
 	"infinite-canvas/backend/internal/model"
+	"infinite-canvas/backend/internal/repository"
 
 	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
@@ -19,6 +21,7 @@ import (
 const SessionCookieName = "open_ai_canvas_session"
 
 const sessionMaxAge = 30 * 24 * time.Hour
+const maxActiveAuthSessions = 20
 
 var usernamePattern = regexp.MustCompile(`^[a-zA-Z0-9_-]{3,32}$`)
 
@@ -76,6 +79,14 @@ func Unauthorized(message string) *AuthError {
 
 func Forbidden(message string) *AuthError {
 	return &AuthError{Status: 403, Message: message}
+}
+
+func Conflict(message string) *AuthError {
+	return &AuthError{Status: 409, Message: message}
+}
+
+func Unavailable(message string) *AuthError {
+	return &AuthError{Status: 503, Message: message}
 }
 
 func (s *Service) PublicAuthSettings() (*PublicAuthSettings, error) {
@@ -167,7 +178,10 @@ func (s *Service) Register(req RegisterRequest) (*AuthSessionResult, error) {
 		user.Role = model.UserRoleAdmin
 	}
 	if verifiedCode != nil {
-		if err := s.repo.CreateUserWithEmailVerification(&user, verifiedCode.ID, time.Now()); err != nil {
+		if err := s.repo.CreateUserWithEmailVerification(&user, verifiedCode.ID, registrationEmailPurpose, registrationCodeMaxAttempts, time.Now()); err != nil {
+			if errors.Is(err, repository.ErrEmailVerificationUnavailable) {
+				return nil, BadAuthRequest("邮箱验证码已失效，请重新获取")
+			}
 			return nil, err
 		}
 	} else if err := s.repo.Create(&user); err != nil {
@@ -215,6 +229,18 @@ func (s *Service) Logout(cookieValue string) error {
 	return s.repo.DeleteAuthSession(sessionID)
 }
 
+func (s *Service) RevokeOtherAuthSessions(cookieValue string) (int64, error) {
+	user, err := s.CurrentUser(cookieValue)
+	if err != nil {
+		return 0, err
+	}
+	sessionID, _ := parseSessionCookie(cookieValue)
+	if sessionID == "" {
+		return 0, Unauthorized("登录状态已失效")
+	}
+	return s.repo.DeleteOtherUserAuthSessions(user.ID, sessionID)
+}
+
 func (s *Service) CurrentUser(cookieValue string) (*model.User, error) {
 	sessionID, token := parseSessionCookie(cookieValue)
 	if sessionID == "" || token == "" {
@@ -228,7 +254,9 @@ func (s *Service) CurrentUser(cookieValue string) (*model.User, error) {
 		return nil, err
 	}
 	if time.Now().After(session.ExpiresAt) || session.TokenHash != hashToken(token) {
-		_ = s.repo.DeleteAuthSession(sessionID)
+		if err := s.repo.DeleteAuthSession(sessionID); err != nil {
+			log.Printf("expired auth session cleanup failed: %v", err)
+		}
 		return nil, Unauthorized("登录状态已失效")
 	}
 	user, err := s.repo.User(session.UserID)
@@ -273,7 +301,7 @@ func (s *Service) createAuthSession(user *model.User) (*AuthSessionResult, error
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	if err := s.repo.Create(&session); err != nil {
+	if err := s.repo.CreateAuthSession(&session, maxActiveAuthSessions); err != nil {
 		return nil, err
 	}
 	return &AuthSessionResult{User: publicUser, Session: session.ID + "." + token, MaxAgeSecs: int(sessionMaxAge.Seconds())}, nil

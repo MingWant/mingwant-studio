@@ -1,26 +1,26 @@
 {
   "name": "infinite-canvas",
-  "version": "0.1.0",
-  "description": "Use Codex to read and operate MingWant Studio through the local Canvas Agent MCP server.",
+  "version": "0.2.0",
+  "description": "Operate MingWant Studio canvases and structured short-drama production through the local Canvas Agent MCP server.",
   "author": {
-    "name": "ddcat"
+    "name": "MingWant Studio"
   },
-  "repository": "https://github.com/ddcat-ai/open-ai-canvas",
+  "repository": "https://github.com/MingWant/mingwant-studio",
   "license": "AGPL-3.0",
-  "keywords": ["infinite-canvas", "canvas", "mcp", "agent"],
+  "keywords": ["mingwant", "canvas", "mcp", "short-drama", "video-workflow"],
   "skills": "./skills/",
   "mcpServers": "./.mcp.json",
   "interface": {
     "displayName": "明想 MingWant Studio",
-    "shortDescription": "Use Codex to operate the current MingWant canvas.",
-    "longDescription": "Connects Codex to the local Canvas Agent MCP server so Codex can inspect the current MingWant Studio canvas, create nodes, connect commerce workflows, and trigger generation through the web canvas confirmation flow.",
+    "shortDescription": "Operate canvases and structured short-drama workflows.",
+    "longDescription": "Connects Codex to MingWant Studio so it can preserve structured short-drama facts, create media workflows, and call the models configured in the canvas. Manual-delivery mode can stop at storyboard images and readable video prompts for user-controlled submission elsewhere.",
     "developerName": "MingWant Studio",
     "category": "Productivity",
-    "capabilities": ["Canvas", "MCP", "Creative Workflow"],
+    "capabilities": ["Canvas", "MCP", "Short Drama", "Configured Model API", "Manual Delivery"],
     "defaultPrompt": [
       "打开明想 MingWant Studio",
       "读取当前画布并总结节点结构",
-      "根据选中节点创建一组生图提示词"
+      "使用明想短剧制作继续当前项目"
     ],
     "brandColor": "#2563EB",
     "composerIcon": "./assets/logo.svg",

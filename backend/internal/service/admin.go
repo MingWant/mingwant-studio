@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 
@@ -104,11 +105,21 @@ type PublicModelChannel struct {
 }
 
 type PublicChannelModelPrice struct {
-	Model                 string `json:"model"`
-	DisplayName           string `json:"displayName"`
-	Capability            string `json:"capability"`
-	BillingMode           string `json:"billingMode"`
-	UnitPriceMicrocredits int64  `json:"unitPriceMicrocredits"`
+	Model                 string                     `json:"model"`
+	DisplayName           string                     `json:"displayName"`
+	Capability            string                     `json:"capability"`
+	Protocol              model.ChannelInterfaceType `json:"protocol"`
+	CapabilityVersion     int64                      `json:"capabilityVersion,omitempty"`
+	CapabilityConfig      map[string]any             `json:"capabilityConfig,omitempty"`
+	BillingMode           string                     `json:"billingMode"`
+	UnitPriceMicrocredits int64                      `json:"unitPriceMicrocredits"`
+	ProbeStatus           string                     `json:"probeStatus,omitempty"`
+	ProbeTransport        string                     `json:"probeTransport,omitempty"`
+	ProbeDurationMs       int64                      `json:"probeDurationMs,omitempty"`
+	ProbeCheckedAt        *time.Time                 `json:"probeCheckedAt,omitempty"`
+	ToolProbeStatus       string                     `json:"toolProbeStatus,omitempty"`
+	ToolProbeCheckedAt    *time.Time                 `json:"toolProbeCheckedAt,omitempty"`
+	ToolProbeVerifierVersion string                  `json:"toolProbeVerifierVersion,omitempty"`
 }
 
 func (s *Service) RequireAdmin(user *model.User) error {
@@ -187,57 +198,16 @@ func (s *Service) UpdateUser(actor *model.User, userID string, req UpdateUserReq
 	if err := s.RequireAdmin(actor); err != nil {
 		return nil, err
 	}
-	user, err := s.repo.User(userID)
-	if err != nil {
-		return nil, err
-	}
-	if actor.ID == user.ID && req.Status == model.UserStatusDisabled {
-		return nil, BadAuthRequest("不能禁用当前管理员账号")
-	}
-	nextRole := user.Role
-	if req.Role == model.UserRoleAdmin || req.Role == model.UserRoleUser {
-		nextRole = req.Role
-	}
-	nextStatus := user.Status
-	if req.Status == model.UserStatusActive || req.Status == model.UserStatusDisabled {
-		nextStatus = req.Status
-	}
-	if user.Role == model.UserRoleAdmin && nextRole != model.UserRoleAdmin {
-		count, err := s.repo.ActiveAdminCountExcluding(user.ID)
-		if err != nil {
-			return nil, err
-		}
-		if count == 0 {
-			return nil, BadAuthRequest("至少需要保留一个管理员")
-		}
-	}
-	if user.Role == model.UserRoleAdmin && nextStatus != model.UserStatusActive {
-		count, err := s.repo.ActiveAdminCountExcluding(user.ID)
-		if err != nil {
-			return nil, err
-		}
-		if count == 0 {
-			return nil, BadAuthRequest("至少需要保留一个可用管理员")
-		}
-	}
-	if strings.TrimSpace(req.DisplayName) != "" {
-		user.DisplayName = normalizeDisplayName(req.DisplayName, user.Username)
-	}
+	normalizedEmail := ""
 	if req.Email != "" {
-		email := normalizeEmail(req.Email)
-		if err := validateEmail(email); err != nil {
+		normalizedEmail = normalizeEmail(req.Email)
+		if err := validateEmail(normalizedEmail); err != nil {
 			return nil, err
 		}
-		existing, err := s.repo.UserByEmail(email)
-		if err == nil && existing.ID != user.ID {
-			return nil, BadAuthRequest("邮箱已被注册")
-		}
-		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, err
-		}
-		user.Email = email
 	}
-	if req.Password != "" {
+	passwordChanged := req.Password != ""
+	passwordHash := ""
+	if passwordChanged {
 		if err := validatePassword(req.Password); err != nil {
 			return nil, err
 		}
@@ -245,51 +215,120 @@ func (s *Service) UpdateUser(actor *model.User, userID string, req UpdateUserReq
 		if err != nil {
 			return nil, err
 		}
-		user.PasswordHash = hash
-		_ = s.repo.DeleteUserAuthSessions(user.ID)
+		passwordHash = hash
 	}
-	user.Role = nextRole
-	user.Status = nextStatus
-	user.UpdatedAt = time.Now()
-	if err := s.repo.Save(user); err != nil {
+	var updated *model.User
+	err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		activeAdminIDs, err := txRepo.ActiveAdminIDsForUpdate()
+		if err != nil {
+			return err
+		}
+		user, err := txRepo.UserForUpdate(userID)
+		if err != nil {
+			return err
+		}
+		if actor.ID == user.ID && req.Status == model.UserStatusDisabled {
+			return BadAuthRequest("不能禁用当前管理员账号")
+		}
+		nextRole := user.Role
+		if req.Role == model.UserRoleAdmin || req.Role == model.UserRoleUser {
+			nextRole = req.Role
+		}
+		nextStatus := user.Status
+		if req.Status == model.UserStatusActive || req.Status == model.UserStatusDisabled {
+			nextStatus = req.Status
+		}
+		remainingActiveAdmins := 0
+		for _, adminID := range activeAdminIDs {
+			if adminID != user.ID {
+				remainingActiveAdmins++
+			}
+		}
+		if user.Role == model.UserRoleAdmin && nextRole != model.UserRoleAdmin && remainingActiveAdmins == 0 {
+			return BadAuthRequest("至少需要保留一个管理员")
+		}
+		if user.Role == model.UserRoleAdmin && nextStatus != model.UserStatusActive && remainingActiveAdmins == 0 {
+			return BadAuthRequest("至少需要保留一个可用管理员")
+		}
+		if strings.TrimSpace(req.DisplayName) != "" {
+			user.DisplayName = normalizeDisplayName(req.DisplayName, user.Username)
+		}
+		if req.Email != "" {
+			existing, lookupErr := txRepo.UserByEmail(normalizedEmail)
+			if lookupErr == nil && existing.ID != user.ID {
+				return BadAuthRequest("邮箱已被注册")
+			}
+			if lookupErr != nil && !errors.Is(lookupErr, gorm.ErrRecordNotFound) {
+				return lookupErr
+			}
+			user.Email = normalizedEmail
+		}
+		if passwordChanged {
+			user.PasswordHash = passwordHash
+		}
+		securityChanged := passwordChanged || nextRole != user.Role || nextStatus != user.Status
+		if securityChanged {
+			// 会话撤销、账号安全字段和审计必须一起提交；任一步失败都不能留下半生效状态。
+			if err := txRepo.DeleteUserAuthSessions(user.ID); err != nil {
+				return err
+			}
+		}
+		user.Role = nextRole
+		user.Status = nextStatus
+		user.UpdatedAt = time.Now()
+		if err := txRepo.Save(user); err != nil {
+			return err
+		}
+		if err := appendAdminAuditWithRepository(txRepo, actor, "user.update", "user", user.ID, "更新用户账号状态或资料", map[string]any{"role": user.Role, "status": user.Status, "passwordChanged": passwordChanged, "sessionsRevoked": securityChanged}); err != nil {
+			return err
+		}
+		updated = user
+		return nil
+	})
+	if err != nil {
 		return nil, err
 	}
-	if err := s.appendAdminAudit(actor, "user.update", "user", user.ID, "更新用户账号状态或资料", map[string]any{"role": user.Role, "status": user.Status}); err != nil {
-		return nil, err
-	}
-	return user, nil
+	return updated, nil
 }
 
 func (s *Service) DeleteUser(actor *model.User, userID string) error {
 	if err := s.RequireAdmin(actor); err != nil {
 		return err
 	}
-	if actor.ID == userID {
-		return BadAuthRequest("不能删除当前登录的管理员账号")
-	}
-	user, err := s.repo.User(userID)
-	if err != nil {
-		return err
-	}
-	if user.Role == model.UserRoleAdmin {
-		count, err := s.repo.ActiveAdminCountExcluding(user.ID)
+	return s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		activeAdminIDs, err := txRepo.ActiveAdminIDsForUpdate()
 		if err != nil {
 			return err
 		}
-		if count == 0 {
-			return BadAuthRequest("至少需要保留一个管理员")
+		user, err := txRepo.UserForUpdate(userID)
+		if err != nil {
+			return err
 		}
-	}
-	if err := s.repo.DeleteUserAuthSessions(user.ID); err != nil {
-		return err
-	}
-	// 有资金流水后必须保留用户主体，删除入口改为停用并清除全部登录态。
-	user.Status = model.UserStatusDisabled
-	user.UpdatedAt = time.Now()
-	if err := s.repo.Save(user); err != nil {
-		return err
-	}
-	return s.appendAdminAudit(actor, "user.disable", "user", user.ID, "停用用户并清除登录态", nil)
+		if actor.ID == user.ID {
+			return BadAuthRequest("不能删除当前登录的管理员账号")
+		}
+		if user.Role == model.UserRoleAdmin {
+			remainingActiveAdmins := 0
+			for _, adminID := range activeAdminIDs {
+				if adminID != user.ID {
+					remainingActiveAdmins++
+				}
+			}
+			if remainingActiveAdmins == 0 {
+				return BadAuthRequest("至少需要保留一个管理员")
+			}
+		}
+		if err := txRepo.DeleteUserAuthSessions(user.ID); err != nil {
+			return err
+		}
+		// 有资金流水后必须保留用户主体，停用、会话撤销和审计必须原子提交。
+		user.Status = model.UserStatusDisabled
+		user.UpdatedAt = time.Now()
+		if err := txRepo.Save(user); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "user.disable", "user", user.ID, "停用用户并清除登录态", map[string]any{"sessionsRevoked": true})
+	})
 }
 
 func (s *Service) BulkDisableUsers(actor *model.User, req BulkDisableUsersRequest) (*BulkDisableUsersResult, error) {
@@ -347,7 +386,8 @@ func (s *Service) PublicSystemChannels() ([]PublicModelChannel, error) {
 	}
 	result := make([]PublicModelChannel, 0, len(channels))
 	for _, channel := range channels {
-		items, itemErr := s.repo.ChannelModels(channel.ID, false)
+		// 必须同时读取停用行，publicChannel 才能区分“旧库尚未迁移”和“管理员明确停用全部模型”。
+		items, itemErr := s.repo.ChannelModels(channel.ID, true)
 		if itemErr != nil {
 			return nil, itemErr
 		}
@@ -398,14 +438,25 @@ func (s *Service) CreateSystemChannel(actor *model.User, req ChannelRequest) (*P
 	if err != nil {
 		return nil, err
 	}
-	if err := s.repo.Create(&channel); err != nil {
-		return nil, err
-	}
-	if err := s.syncInitialChannelModels(&channel, req.Models); err != nil {
-		return nil, err
-	}
-	items, err := s.repo.ChannelModels(channel.ID, true)
-	if err != nil {
+	var items []model.ChannelModel
+	if err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		if err := txRepo.Create(&channel); err != nil {
+			return err
+		}
+		if err := syncInitialChannelModelsWithRepository(txRepo, &channel, req.Models); err != nil {
+			return err
+		}
+		if err := syncChannelModelNamesWithRepository(txRepo, &channel); err != nil {
+			return err
+		}
+		items, err = txRepo.ChannelModels(channel.ID, true)
+		if err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "channel.create", "model_channel", channel.ID, "创建系统模型渠道", map[string]any{
+			"name": channel.Name, "enabled": channel.Enabled, "interfaceType": channel.InterfaceType, "concurrencyLimit": channel.ConcurrencyLimit, "modelCount": len(items),
+		})
+	}); err != nil {
 		return nil, err
 	}
 	public := publicChannel(channel, true, items)
@@ -420,8 +471,18 @@ func (s *Service) UpdateSystemChannel(actor *model.User, id string, req ChannelR
 	if err != nil {
 		return nil, err
 	}
-	req = mergeChannelRequest(req, *channel)
-	next, err := channelFromRequest(req, *channel)
+	merged := mergeChannelRequest(req, *channel)
+	if req.Models == nil {
+		items, err := s.repo.ChannelModels(channel.ID, false)
+		if err != nil {
+			return nil, err
+		}
+		merged.Models = make([]string, 0, len(items))
+		for _, item := range items {
+			merged.Models = append(merged.Models, item.ModelKey)
+		}
+	}
+	next, err := channelFromRequest(merged, *channel)
 	if err != nil {
 		return nil, err
 	}
@@ -429,21 +490,55 @@ func (s *Service) UpdateSystemChannel(actor *model.User, id string, req ChannelR
 	next.UserID = channel.UserID
 	next.Scope = model.ChannelScopeSystem
 	next.CreatedAt = channel.CreatedAt
-	if req.APIKey == "" {
+	if merged.APIKey == "" {
 		next.APIKey = channel.APIKey
 	}
-	if err := s.repo.Save(&next); err != nil {
-		return nil, err
-	}
-	if err := s.syncInitialChannelModels(&next, req.Models); err != nil {
-		return nil, err
-	}
-	items, err := s.repo.ChannelModels(next.ID, true)
+	probeConfigChanged := strings.TrimRight(strings.TrimSpace(next.BaseURL), "/") != strings.TrimRight(strings.TrimSpace(channel.BaseURL), "/") ||
+		next.APIKey != channel.APIKey || next.APIFormat != channel.APIFormat || next.InterfaceType != channel.InterfaceType
+	var items []model.ChannelModel
+	err = s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		current, err := txRepo.AdminSystemChannelForUpdate(id)
+		if err != nil {
+			return err
+		}
+		if !sameSystemChannelConfiguration(*channel, *current) {
+			return Conflict("系统渠道已被其他管理员修改，本次未覆盖新配置，请刷新后重试")
+		}
+		if err := txRepo.Save(&next); err != nil {
+			return err
+		}
+		if err := syncInitialChannelModelsWithRepository(txRepo, &next, merged.Models); err != nil {
+			return err
+		}
+		if probeConfigChanged {
+			if err := txRepo.ClearChannelModelProbes(next.ID); err != nil {
+				return err
+			}
+		}
+		if err := syncChannelModelNamesWithRepository(txRepo, &next); err != nil {
+			return err
+		}
+		items, err = txRepo.ChannelModels(next.ID, true)
+		if err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "channel.update", "model_channel", next.ID, "更新系统模型渠道", map[string]any{
+			"name": next.Name, "enabled": next.Enabled, "interfaceType": next.InterfaceType, "concurrencyLimit": next.ConcurrencyLimit,
+			"modelCount": len(items), "probeConfigurationChanged": probeConfigChanged,
+		})
+	})
 	if err != nil {
 		return nil, err
 	}
 	public := publicChannel(next, true, items)
 	return &public, nil
+}
+
+func sameSystemChannelConfiguration(left model.ModelChannel, right model.ModelChannel) bool {
+	return left.ID == right.ID && left.UserID == right.UserID && left.Scope == right.Scope &&
+		left.Enabled == right.Enabled && left.Name == right.Name && left.BaseURL == right.BaseURL &&
+		left.APIKey == right.APIKey && left.APIFormat == right.APIFormat && left.InterfaceType == right.InterfaceType &&
+		left.ConcurrencyLimit == right.ConcurrencyLimit && left.ModelsJSON == right.ModelsJSON
 }
 
 func (s *Service) DeleteSystemChannel(actor *model.User, id string) error {
@@ -458,7 +553,16 @@ func (s *Service) DeleteSystemChannel(actor *model.User, id string) error {
 		return err
 	}
 	// 保留主体供历史账单和调用日志关联，但从所有业务查询中隐藏并清除密钥。
-	err = s.repo.DeleteSystemChannel(channel.ID)
+	err = s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		current, err := txRepo.AdminSystemChannelForUpdate(channel.ID)
+		if err != nil {
+			return err
+		}
+		if err := txRepo.DeleteSystemChannel(current.ID); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "channel.delete", "model_channel", current.ID, "删除系统模型渠道", map[string]any{"name": current.Name})
+	})
 	if errors.Is(err, gorm.ErrRecordNotFound) {
 		return BadAuthRequest("系统渠道不存在或已删除")
 	}
@@ -473,9 +577,10 @@ func (s *Service) LogAPICall(log model.ApiCallLog) error {
 		log.CreatedAt = time.Now()
 	}
 	s.estimateCallCost(&log)
+	var providerStateErr error
 	if log.BillingOrderID != "" && log.ProviderRequestID != "" {
 		if err := s.repo.UpdateBillingProviderRequestID(log.BillingOrderID, log.ProviderRequestID); err != nil {
-			return err
+			providerStateErr = err
 		}
 	}
 	if log.TaskID != "" {
@@ -489,17 +594,19 @@ func (s *Service) LogAPICall(log model.ApiCallLog) error {
 			next := time.Now().Add(5 * time.Second)
 			nextPollAt = &next
 		}
-		if err := s.repo.UpdateTaskProviderState(log.TaskID, log.ProviderRequestID, stage, nextPollAt); err != nil {
-			return err
+		if err := s.repo.UpdateTaskProviderStateForAttempt(log.TaskID, log.BillingOrderID, log.CreatedAt, log.ProviderRequestID, stage, nextPollAt); err != nil {
+			if providerStateErr == nil {
+				providerStateErr = err
+			}
 		}
 	}
 	policy, err := s.RuntimePolicy()
 	if err != nil {
 		return err
 	}
-	s.storageMu.Lock()
-	defer s.storageMu.Unlock()
-	usage, err := s.repo.UserStorageUsage(log.UserID)
+	unlockStorage := s.lockUserStorage(log.UserID)
+	defer unlockStorage()
+	usage, err := s.repo.UserTaskStorageUsage(log.UserID)
 	if err != nil {
 		return err
 	}
@@ -507,7 +614,10 @@ func (s *Service) LogAPICall(log model.ApiCallLog) error {
 	if err := validateAPICallLogQuotaWithPolicy(usage, incomingBytes, policy.Resource); err != nil {
 		return err
 	}
-	return s.repo.Create(&log)
+	if err := s.repo.Create(&log); err != nil {
+		return err
+	}
+	return providerStateErr
 }
 
 func (s *Service) APICallLogs(actor *model.User, limit int) ([]model.ApiCallLog, error) {
@@ -533,15 +643,21 @@ func channelFromRequest(req ChannelRequest, channel model.ModelChannel) (model.M
 	if _, err := ValidateOutboundURL(baseURL); err != nil {
 		return channel, err
 	}
-	models := uniqueNonEmpty(req.Models)
-	modelsJSON, _ := json.Marshal(models)
+	models, err := validatedChannelModelNames(req.Models)
+	if err != nil {
+		return channel, BadAuthRequest(err.Error())
+	}
+	modelsJSON, err := json.Marshal(models)
+	if err != nil {
+		return channel, errors.Join(&AuthError{Status: 500, Message: "渠道模型列表无法安全保存"}, fmt.Errorf("serialize channel models: %w", err))
+	}
 	channel.Name = name
 	channel.BaseURL = strings.TrimRight(baseURL, "/")
 	if req.APIKey != "" {
 		channel.APIKey = req.APIKey
 	}
-	// 系统渠道均由后端按已声明的接口类型分发，调用格式固定为 Bearer/OpenAI 兼容鉴权。
-	channel.APIFormat = "openai"
+	// Gemini 原生文本与 Veo 使用 x-goog-api-key；协议是鉴权格式的唯一来源。
+	channel.APIFormat = apiFormatForProtocol(interfaceType, "")
 	channel.InterfaceType = interfaceType
 	if req.UseGlobalConcurrency != nil && *req.UseGlobalConcurrency {
 		channel.ConcurrencyLimit = 0
@@ -581,7 +697,7 @@ func mergeChannelRequest(req ChannelRequest, channel model.ModelChannel) Channel
 
 func validChannelInterfaceType(value model.ChannelInterfaceType) bool {
 	switch value {
-	case model.ChannelInterfaceChatCompletion, model.ChannelInterfaceOpenAIResponse, model.ChannelInterfaceOpenAIImage, model.ChannelInterfaceNewAPIVideo, model.ChannelInterfaceNewAPIChannel1, model.ChannelInterfaceNewAPIChannel2, model.ChannelInterfaceXAIVideo:
+	case model.ChannelInterfaceChatCompletion, model.ChannelInterfaceOpenAIResponse, model.ChannelInterfaceGeminiContent, model.ChannelInterfaceOpenAIImage, model.ChannelInterfaceOpenAIAudio, model.ChannelInterfaceNewAPIVideo, model.ChannelInterfaceNewAPIChannel1, model.ChannelInterfaceNewAPIChannel2, model.ChannelInterfaceXAIVideo, model.ChannelInterfaceGeminiVeo:
 		return true
 	default:
 		return false
@@ -613,11 +729,40 @@ func publicChannel(channel model.ModelChannel, admin bool, channelModels []model
 		}
 		models = append(models, item.ModelKey)
 		if item.Enabled && item.PriceConfigured {
-			modelCosts = append(modelCosts, PublicChannelModelPrice{Model: item.ModelKey, DisplayName: item.DisplayName, Capability: item.Capability, BillingMode: item.BillingMode, UnitPriceMicrocredits: item.UnitPriceMicrocredits})
+			protocol := item.Protocol
+			if protocol == "" {
+				protocol = channel.InterfaceType
+			}
+			probeStatus := ""
+			probeTransport := ""
+			probeDurationMs := int64(0)
+			var probeCheckedAt *time.Time
+			toolProbeStatus := ""
+			var toolProbeCheckedAt *time.Time
+			toolProbeVerifierVersion := ""
+			if channelModelProbeMatches(channel, item) {
+				probeStatus = item.ProbeStatus
+				probeTransport = item.ProbeTransport
+				probeDurationMs = item.ProbeDurationMs
+				probeCheckedAt = item.ProbeCheckedAt
+			}
+			if channelModelToolProbeMatches(channel, item) {
+				toolProbeStatus = item.ToolProbeStatus
+				toolProbeCheckedAt = item.ToolProbeCheckedAt
+				toolProbeVerifierVersion = item.ToolProbeVerifierVersion
+			}
+			capabilitySource := item
+			if capabilitySource.Protocol == "" {
+				capabilitySource.Protocol = protocol
+			}
+			modelCosts = append(modelCosts, PublicChannelModelPrice{
+				Model: item.ModelKey, DisplayName: item.DisplayName, Capability: item.Capability, Protocol: protocol,
+				CapabilityVersion: item.CapabilityVersion, CapabilityConfig: capabilityConfigForModel(capabilitySource),
+				BillingMode: item.BillingMode, UnitPriceMicrocredits: item.UnitPriceMicrocredits,
+				ProbeStatus: probeStatus, ProbeTransport: probeTransport, ProbeDurationMs: probeDurationMs, ProbeCheckedAt: probeCheckedAt,
+				ToolProbeStatus: toolProbeStatus, ToolProbeCheckedAt: toolProbeCheckedAt, ToolProbeVerifierVersion: toolProbeVerifierVersion,
+			})
 		}
-	}
-	if len(models) == 0 {
-		_ = json.Unmarshal([]byte(channel.ModelsJSON), &models)
 	}
 	apiKey := ""
 	baseURL := channel.BaseURL

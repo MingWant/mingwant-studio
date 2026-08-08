@@ -46,15 +46,15 @@ type CharacterRepresentationSummary struct {
 }
 
 type VoiceProfileSummary struct {
-	ID                   string   `json:"id"`
-	Name                 string   `json:"name"`
-	Provider             string   `json:"provider"`
-	VoiceKey             string   `json:"voiceKey"`
-	Language             string   `json:"language"`
-	Timbre               string   `json:"timbre"`
-	SampleResourceID     string   `json:"sampleResourceId,omitempty"`
-	CompatibleModels     []string `json:"compatibleModels"`
-	Status               string   `json:"status"`
+	ID               string   `json:"id"`
+	Name             string   `json:"name"`
+	Provider         string   `json:"provider"`
+	VoiceKey         string   `json:"voiceKey"`
+	Language         string   `json:"language"`
+	Timbre           string   `json:"timbre"`
+	SampleResourceID string   `json:"sampleResourceId,omitempty"`
+	CompatibleModels []string `json:"compatibleModels"`
+	Status           string   `json:"status"`
 }
 
 type CharacterVoiceSummary struct {
@@ -255,8 +255,14 @@ func (s *Service) finalizeCharacterTurnaroundTask(task model.Task, result map[st
 	if err != nil || resource.Kind != "image" || resource.Status != model.ResourceStatusReady {
 		return false, BadAuthRequest("三视图任务生成的图片资源不可用")
 	}
-	sheetMetadata, _ := json.Marshal(map[string]any{"prompt": task.Prompt, "source": "character_turnaround"})
-	primaryMetadata, _ := json.Marshal(map[string]any{"source": "turnaround_sheet"})
+	sheetMetadata, err := json.Marshal(map[string]any{"prompt": task.Prompt, "source": "character_turnaround"})
+	if err != nil {
+		return false, fmt.Errorf("三视图工作流元数据序列化失败：%w", err)
+	}
+	primaryMetadata, err := json.Marshal(map[string]any{"source": "turnaround_sheet"})
+	if err != nil {
+		return false, fmt.Errorf("三视图主图元数据序列化失败：%w", err)
+	}
 	now := time.Now()
 	representations := []model.AssetRepresentation{
 		{ID: newID(), TaskID: task.ID, ResourceID: resourceID, MediaType: "image", Role: "turnaround_sheet", MetadataJSON: string(sheetMetadata), CreatedAt: now},
@@ -308,7 +314,7 @@ func (s *Service) reconcileCharacterTurnaroundTasks(userID string, projectID str
 		}
 		if applied {
 			recovered = true
-			_ = s.log(userID, task.ID, "info", "已将历史三视图任务恢复到角色卡", "")
+			s.logTaskEventBestEffort(userID, task.ID, "info", "已将历史三视图任务恢复到角色卡", "")
 		}
 	}
 	return recovered

@@ -55,13 +55,14 @@ export class CanvasSession {
             if (!input.projectId) throw new Error("当前画布没有关联制作项目");
             return await this.requestCanvasTool(tool, input);
         }
-        const readTool = ["canvas_get_state", "canvas_get_selection", "canvas_export_snapshot"].includes(tool);
+        const readTool = ["canvas_get_state", "canvas_get_selection", "canvas_get_image_annotations", "canvas_export_snapshot"].includes(tool);
         if (readTool && (!this.clients.size || !this.canvasState)) throw new Error("当前没有已连接画布");
         if (tool === "canvas_get_state" || tool === "canvas_export_snapshot") return compactCanvasState(this.canvasState);
         if (tool === "canvas_get_selection") {
             const ids = new Set(this.canvasState?.selectedNodeIds || []);
             return { nodes: (this.canvasState?.nodes || []).filter((node) => ids.has(node.id)).map(compactNode) };
         }
+        if (tool === "canvas_get_image_annotations") return await this.requestCanvasTool(tool, input);
         if (tool === "canvas_create_node") {
             const data = input as { nodeType: CanvasNodeType; title?: string; x?: number; y?: number; width?: number; height?: number; metadata?: Record<string, unknown> };
             input = { ops: [{ type: "add_node", nodeType: data.nodeType, title: data.title, position: { x: data.x ?? nextCanvasX(this.canvasState), y: data.y ?? 0 }, width: data.width, height: data.height, metadata: data.metadata }] };
@@ -149,6 +150,11 @@ export class CanvasSession {
         if (tool === "canvas_run_generation") {
             const data = input as { nodeId: string; mode?: string; prompt?: string };
             input = { ops: [runGenerationOp(data.nodeId, generationMode(data.mode), data.prompt)] };
+            tool = "canvas_apply_ops";
+        }
+        if (tool === "canvas_edit_image_annotation") {
+            const data = input as { annotationNodeId: string; prompt?: string };
+            input = { ops: [{ type: "run_image_annotation", annotationNodeId: data.annotationNodeId, prompt: data.prompt }] };
             tool = "canvas_apply_ops";
         }
         if (tool !== "canvas_apply_ops") throw new Error(`未知工具：${tool}`);

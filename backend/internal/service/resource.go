@@ -2,10 +2,10 @@ package service
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha1"
 	"encoding/base64"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -13,6 +13,7 @@ import (
 	_ "image/jpeg"
 	_ "image/png"
 	"io"
+	"log"
 	"mime"
 	"mime/multipart"
 	"net/http"
@@ -153,7 +154,11 @@ func (s *Service) ImportResourceURL(userID string, rawURL string, kind string, w
 }
 
 func (s *Service) OpenResource(userID string, id string) (*model.Resource, io.ReadCloser, error) {
-	stream, err := s.OpenResourceRange(userID, id, "")
+	return s.OpenResourceContext(context.Background(), userID, id)
+}
+
+func (s *Service) OpenResourceContext(ctx context.Context, userID string, id string) (*model.Resource, io.ReadCloser, error) {
+	stream, err := s.OpenResourceRangeContext(ctx, userID, id, "")
 	if err != nil {
 		return nil, nil, err
 	}
@@ -161,6 +166,10 @@ func (s *Service) OpenResource(userID string, id string) (*model.Resource, io.Re
 }
 
 func (s *Service) OpenResourceRange(userID string, id string, rangeHeader string) (*ResourceStream, error) {
+	return s.OpenResourceRangeContext(context.Background(), userID, id, rangeHeader)
+}
+
+func (s *Service) OpenResourceRangeContext(ctx context.Context, userID string, id string, rangeHeader string) (*ResourceStream, error) {
 	resource, err := s.repo.ResourceForUser(userID, id)
 	if err != nil {
 		return nil, err
@@ -185,7 +194,7 @@ func (s *Service) OpenResourceRange(userID string, id string, rangeHeader string
 	setting.Provider = firstNonEmpty(resource.Provider, setting.Provider)
 	setting.Endpoint = firstNonEmpty(resource.Endpoint, setting.Endpoint)
 	setting.Bucket = firstNonEmpty(resource.Bucket, setting.Bucket)
-	stream, err := getOSSObjectRange(setting, resource.ObjectKey, normalizeSingleByteRange(rangeHeader))
+	stream, err := getOSSObjectRange(ctx, setting, resource.ObjectKey, normalizeSingleByteRange(rangeHeader))
 	if err != nil {
 		return nil, err
 	}
@@ -193,6 +202,10 @@ func (s *Service) OpenResourceRange(userID string, id string, rangeHeader string
 }
 
 func (s *Service) storeResource(userID string, kind string, fileName string, mimeType string, size int64, width int, height int, durationMs int64, body io.Reader) (*model.Resource, error) {
+	return s.storeResourceWithSource(userID, kind, fileName, mimeType, size, width, height, durationMs, body, generatedResourceSource{})
+}
+
+func (s *Service) storeResourceWithSource(userID string, kind string, fileName string, mimeType string, size int64, width int, height int, durationMs int64, body io.Reader, source generatedResourceSource) (*model.Resource, error) {
 	now := time.Now()
 	kind = normalizeResourceKind(kind, mimeType)
 	setting, storageSettingID, useOSS, err := s.activeResourceOSSSetting(userID)
@@ -201,7 +214,12 @@ func (s *Service) storeResource(userID string, kind string, fileName string, mim
 	}
 	provider := "local"
 	objectKey := localObjectKey(userID, kind, fileName, now)
-	resource := model.Resource{ID: newID(), UserID: userID, Kind: kind, Status: model.ResourceStatusPending, Provider: provider, ObjectKey: objectKey, MimeType: mimeType, Size: size, Width: width, Height: height, DurationMs: durationMs, CreatedAt: now, UpdatedAt: now}
+	resource := model.Resource{
+		ID: newID(), UserID: userID, Kind: kind, Status: model.ResourceStatusPending, Provider: provider, ObjectKey: objectKey,
+		MimeType: mimeType, Size: size, Width: width, Height: height, DurationMs: durationMs,
+		SourceTaskID: source.TaskID, SourceAttempt: source.Attempt, SourcePath: source.Path, ContentSHA256: source.ContentSHA256, QuotaDay: source.QuotaDay,
+		CreatedAt: now, UpdatedAt: now,
+	}
 	if useOSS {
 		provider = setting.Provider
 		objectKey = ossObjectKey(setting, userID, kind, fileName, now)
@@ -214,186 +232,59 @@ func (s *Service) storeResource(userID string, kind string, fileName string, mim
 	if err := s.repo.CreateResource(&resource); err != nil {
 		return nil, err
 	}
-	var etag string
-	if provider == "local" {
-		filePath := filepath.Join(s.dataDir, "resources", filepath.FromSlash(objectKey))
-		if err = os.MkdirAll(filepath.Dir(filePath), 0o750); err == nil {
-			var file *os.File
-			file, err = os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
-			if err == nil {
-				_, err = io.Copy(file, body)
-				closeErr := file.Close()
-				if err == nil {
-					err = closeErr
-				}
-			}
-		}
-	} else {
-		etag, err = putOSSObject(setting, objectKey, mimeType, size, body)
-	}
+	etag, err := s.writeResourceBody(userID, &resource, body)
 	resource.UpdatedAt = time.Now()
 	if err != nil {
 		resource.Status = model.ResourceStatusFailed
-		resource.Error = err.Error()
-		_ = s.repo.SaveResource(&resource)
-		return nil, err
+		resource.Error = "资源写入失败，请联系管理员按资源 ID 核对服务端日志"
+		if source.TaskID != "" {
+			// 供应商结果无法重新获取；任务生成资源保留 pending 身份，后续只覆写同一对象而不再次调用供应商。
+			resource.Status = model.ResourceStatusPending
+			resource.Error = "任务生成资源写入中断，可从任务详情恢复已保存结果"
+		}
+		log.Printf("resource upload failed resource=%s user=%s provider=%s: %v", resource.ID, userID, provider, err)
+		saveErr := s.repo.SaveResource(&resource)
+		if saveErr != nil {
+			log.Printf("resource failure state write failed resource=%s: %v", resource.ID, saveErr)
+		}
+		return &resource, errors.Join(err, saveErr)
 	}
 	resource.Status = model.ResourceStatusReady
 	resource.ETag = etag
 	if err := s.repo.SaveResource(&resource); err != nil {
-		return nil, err
+		return &resource, err
 	}
 	s.recordActivity(userID, "resource", 1)
 	return &resource, nil
 }
 
+func (s *Service) writeResourceBody(userID string, resource *model.Resource, body io.Reader) (string, error) {
+	if resource == nil {
+		return "", errors.New("资源不存在")
+	}
+	if resource.Provider == "local" {
+		filePath := filepath.Join(s.dataDir, "resources", filepath.FromSlash(resource.ObjectKey))
+		if err := os.MkdirAll(filepath.Dir(filePath), 0o750); err != nil {
+			return "", err
+		}
+		file, err := os.OpenFile(filePath, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o640)
+		if err != nil {
+			return "", err
+		}
+		_, copyErr := io.Copy(file, body)
+		closeErr := file.Close()
+		return "", errors.Join(copyErr, closeErr)
+	}
+	setting, err := s.ossSettingForResource(userID, resource)
+	if err != nil {
+		return "", err
+	}
+	return putOSSObject(setting, resource.ObjectKey, resource.MimeType, resource.Size, body)
+}
+
 func localObjectKey(userID string, kind string, fileName string, now time.Time) string {
 	ext := strings.ToLower(filepath.Ext(fileName))
 	return path.Join("users", safeObjectSegment(userID), kind, now.Format("2006/01/02"), newID()+ext)
-}
-
-func (s *Service) persistGeneratedMediaResult(userID string, result map[string]interface{}) (map[string]interface{}, error) {
-	return s.persistGeneratedMediaResultMode(userID, result, false, true)
-}
-
-func (s *Service) persistLegacyGeneratedMediaResult(userID string, result map[string]interface{}) (map[string]interface{}, error) {
-	return s.persistGeneratedMediaResultMode(userID, result, true, false)
-}
-
-func (s *Service) persistGeneratedMediaResultMode(userID string, result map[string]interface{}, skipInvalidDataURL bool, enforceQuota bool) (map[string]interface{}, error) {
-	if result == nil {
-		return map[string]interface{}{}, nil
-	}
-	encoded, err := json.Marshal(result)
-	if err != nil {
-		return nil, err
-	}
-	var normalized map[string]interface{}
-	if err := json.Unmarshal(encoded, &normalized); err != nil {
-		return nil, err
-	}
-	value, err := s.persistGeneratedMediaValueMode(userID, normalized, skipInvalidDataURL, enforceQuota)
-	if err != nil {
-		return nil, err
-	}
-	return value.(map[string]interface{}), nil
-}
-
-func (s *Service) persistGeneratedMediaValue(userID string, value interface{}) (interface{}, error) {
-	return s.persistGeneratedMediaValueMode(userID, value, false, true)
-}
-
-func (s *Service) persistGeneratedMediaValueMode(userID string, value interface{}, skipInvalidDataURL bool, enforceQuota bool) (interface{}, error) {
-	switch item := value.(type) {
-	case []interface{}:
-		for index, child := range item {
-			stored, err := s.persistGeneratedMediaValueMode(userID, child, skipInvalidDataURL, enforceQuota)
-			if err != nil {
-				return nil, err
-			}
-			item[index] = stored
-		}
-		return item, nil
-	case map[string]interface{}:
-		if raw := inlineMediaValue(item); raw != "" {
-			mimeType, data, err := s.decodeDataURL(raw)
-			if err != nil && !skipInvalidDataURL {
-				return nil, err
-			}
-			if err == nil {
-				kind := normalizeResourceKind("", mimeType)
-				width, height := intValue(item["width"]), intValue(item["height"])
-				if kind == "image" && (width <= 0 || height <= 0) {
-					width, height = imageDimensions(data)
-				}
-				quotaDay := ""
-				if enforceQuota {
-					quotaDay, err = s.reserveGeneratedResourceQuota(userID, int64(len(data)))
-					if err != nil {
-						return nil, err
-					}
-				}
-				resource, err := s.storeResource(userID, kind, "generated."+extensionFromMimeType(mimeType), mimeType, int64(len(data)), width, height, int64(intValue(item["durationMs"])), bytes.NewReader(data))
-				if err != nil {
-					if enforceQuota {
-						s.releaseUserUploadQuota(userID, quotaDay, int64(len(data)))
-					}
-					return nil, fmt.Errorf("生成内容写入资源存储失败：%w", err)
-				}
-				if enforceQuota {
-					s.commitUserUploadQuota(userID, int64(len(data)))
-				}
-				resourceURL := "/api/resources/" + resource.ID + "/file"
-				for _, key := range []string{"dataUrl", "content", "url", "coverUrl"} {
-					if text, ok := item[key].(string); ok && (text == raw || strings.HasPrefix(text, "blob:")) {
-						item[key] = resourceURL
-					}
-				}
-				if _, ok := item["dataUrl"]; ok {
-					item["dataUrl"] = resourceURL
-				}
-				item["url"] = resourceURL
-				item["storageKey"] = "resource:" + resource.ID
-				item["resourceId"] = resource.ID
-				item["bytes"] = resource.Size
-				item["mimeType"] = resource.MimeType
-				item["width"] = resource.Width
-				item["height"] = resource.Height
-			}
-		}
-		for key, child := range item {
-			stored, err := s.persistGeneratedMediaValueMode(userID, child, skipInvalidDataURL, enforceQuota)
-			if err != nil {
-				return nil, err
-			}
-			item[key] = stored
-		}
-		return item, nil
-	default:
-		return value, nil
-	}
-}
-
-func inlineMediaValue(item map[string]interface{}) string {
-	for _, key := range []string{"dataUrl", "content", "url", "coverUrl"} {
-		if text, ok := item[key].(string); ok && (strings.HasPrefix(text, "data:image/") || strings.HasPrefix(text, "data:video/") || strings.HasPrefix(text, "data:audio/")) {
-			return text
-		}
-	}
-	return ""
-}
-
-func (s *Service) decodeDataURL(value string) (string, []byte, error) {
-	header, encoded, ok := strings.Cut(value, ",")
-	if !ok || !strings.HasPrefix(header, "data:") || !strings.HasSuffix(strings.ToLower(header), ";base64") {
-		return "", nil, fmt.Errorf("%w：格式无效", errInvalidGeneratedDataURL)
-	}
-	mimeType := strings.TrimSuffix(strings.TrimPrefix(header, "data:"), ";base64")
-	data, err := base64.StdEncoding.DecodeString(encoded)
-	if err != nil {
-		return "", nil, fmt.Errorf("%w：base64 解码失败：%v", errInvalidGeneratedDataURL, err)
-	}
-	policy, err := s.RuntimePolicy()
-	if err != nil {
-		return "", nil, err
-	}
-	if int64(len(data)) > megabytes(policy.Resource.GeneratedFileMB) {
-		return "", nil, fmt.Errorf("单个生成资源超过 %dMB", policy.Resource.GeneratedFileMB)
-	}
-	return mimeType, data, nil
-}
-
-func intValue(value interface{}) int {
-	switch number := value.(type) {
-	case float64:
-		return int(number)
-	case int:
-		return number
-	case int64:
-		return int(number)
-	default:
-		return 0
-	}
 }
 
 type remoteResourcePayload struct {
@@ -618,8 +509,8 @@ type ossObjectStream struct {
 	acceptRanges  string
 }
 
-func getOSSObjectRange(setting ossSettingValue, objectKey string, rangeHeader string) (*ossObjectStream, error) {
-	req, err := newOSSRequest(http.MethodGet, setting, objectKey, "", nil)
+func getOSSObjectRange(ctx context.Context, setting ossSettingValue, objectKey string, rangeHeader string) (*ossObjectStream, error) {
+	req, err := newOSSRequestWithContext(ctx, http.MethodGet, setting, objectKey, "", nil)
 	if err != nil {
 		return nil, err
 	}
@@ -685,12 +576,16 @@ func signedOSSObjectURL(setting ossSettingValue, objectKey string, expiresAt tim
 }
 
 func newOSSRequest(method string, setting ossSettingValue, objectKey string, contentType string, body io.Reader) (*http.Request, error) {
+	return newOSSRequestWithContext(context.Background(), method, setting, objectKey, contentType, body)
+}
+
+func newOSSRequestWithContext(ctx context.Context, method string, setting ossSettingValue, objectKey string, contentType string, body io.Reader) (*http.Request, error) {
 	baseURL, err := ossBucketBaseURL(setting)
 	if err != nil {
 		return nil, err
 	}
 	baseURL.Path = strings.TrimRight(baseURL.Path, "/") + "/" + escapeObjectKey(objectKey)
-	req, err := http.NewRequest(method, baseURL.String(), body)
+	req, err := http.NewRequestWithContext(ctx, method, baseURL.String(), body)
 	if err != nil {
 		return nil, err
 	}

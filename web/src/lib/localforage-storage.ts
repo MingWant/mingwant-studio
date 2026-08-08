@@ -15,7 +15,12 @@ export const localForageStorage: StateStorage = {
         try {
             return (await localforage.getItem<string>(key)) || null;
         } catch {
-            return window.localStorage.getItem(key);
+            try {
+                return window.localStorage.getItem(key);
+            } catch {
+                // 本地缓存不可用时按空缓存启动，服务端数据和当前内存状态仍可继续使用。
+                return null;
+            }
         }
     },
     setItem: async (name, value) => {
@@ -24,7 +29,11 @@ export const localForageStorage: StateStorage = {
         try {
             await localforage.setItem(key, value);
         } catch {
-            window.localStorage.setItem(key, value);
+            try {
+                window.localStorage.setItem(key, value);
+            } catch {
+                // 本地缓存属于可选持久化；不可写时不阻断当前会话的业务操作。
+            }
         }
     },
     removeItem: async (name) => {
@@ -33,7 +42,11 @@ export const localForageStorage: StateStorage = {
         try {
             await localforage.removeItem(key);
         } catch {
-            window.localStorage.removeItem(key);
+            try {
+                window.localStorage.removeItem(key);
+            } catch {
+                // 清理缓存失败不影响内存中的当前状态。
+            }
         }
     },
 };

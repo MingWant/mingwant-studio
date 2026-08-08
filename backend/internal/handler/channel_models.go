@@ -10,6 +10,12 @@ import (
 	"github.com/gin-gonic/gin"
 )
 
+const (
+	maxChannelCatalogRequestBytes    int64 = 32 << 10
+	maxAdminChannelRequestBytes      int64 = 1 << 20
+	maxAdminChannelModelRequestBytes int64 = 32 << 10
+)
+
 func RegisterChannelModelRoutes(r *gin.RouterGroup, svc *service.Service) {
 	r.POST("/ai/models", func(c *gin.Context) {
 		user, err := currentUser(c, svc)
@@ -20,6 +26,7 @@ func RegisterChannelModelRoutes(r *gin.RouterGroup, svc *service.Service) {
 		if !enforceRateLimit(c, "channel-models:"+user.ID, 30, time.Minute) {
 			return
 		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxChannelCatalogRequestBytes)
 		var input service.ChannelModelsRequest
 		if err := c.ShouldBindJSON(&input); err != nil {
 			fail(c, http.StatusBadRequest, errors.New("模型渠道参数格式错误"))

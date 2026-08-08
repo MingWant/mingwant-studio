@@ -7,7 +7,7 @@ export function useCanvasActiveTasks(projectId: string, enabled: boolean) {
     const query = useQuery<GenerationTask[]>({
         queryKey: ["canvas-active-tasks", projectId],
         queryFn: async () => {
-            const tasks = await listGenerationTasks(5, { projectId, activeOnly: true });
+            const tasks = await listGenerationTasks(20, { projectId, activeOnly: true });
             return Array.isArray(tasks) ? tasks : [];
         },
         enabled: enabled && Boolean(projectId),

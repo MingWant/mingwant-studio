@@ -61,6 +61,18 @@ export type ProjectAsset = {
     character?: CharacterCardSummary;
 };
 
+export type ProjectAssetVersion = {
+    id: string;
+    assetId: string;
+    version: number;
+    status: string;
+    definitionJson: string;
+    prompt: string;
+    note: string;
+    createdAt: string;
+    updatedAt: string;
+};
+
 export type CharacterRepresentation = {
     id: string;
     resourceId: string;
@@ -115,6 +127,7 @@ export type ProjectShot = {
     unitId?: string;
     title: string;
     description: string;
+    definitionJson: string;
     position: number;
     durationMs: number;
     status: string;
@@ -138,6 +151,8 @@ export type WorkflowStep = {
     name: string;
     position: number;
     status: "pending" | "ready" | "running" | "review" | "completed" | "failed" | "skipped" | string;
+    inputJson: string;
+    outputJson: string;
     error?: string;
     updatedAt: string;
 };
@@ -248,8 +263,12 @@ export function updateProjectAssetCategory(projectId: string, assetId: string, c
     return request<{ asset: ProjectAsset }>(api.patch(`/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}`, { category }));
 }
 
-export function createProjectAssetVersion(projectId: string, assetId: string, input: { prompt?: string; definitionJson?: string; note?: string }) {
+export function createProjectAssetVersion(projectId: string, assetId: string, input: { prompt?: string; definitionJson?: string; note?: string; status?: "draft" | "review" | "confirmed" }) {
     return request<{ version: { id: string; assetId: string; version: number; status: string } }>(api.post(`/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}/versions`, input));
+}
+
+export function listProjectAssetVersions(projectId: string, assetId: string) {
+    return request<{ versions: ProjectAssetVersion[] }>(api.get(`/projects/${encodeURIComponent(projectId)}/assets/${encodeURIComponent(assetId)}/versions`));
 }
 
 export function listVoiceProfiles() {
@@ -284,11 +303,11 @@ export function createUnitWorkflow(projectId: string, unitId: string) {
     return request<{ workflow: ProjectWorkflow }>(api.post(`/projects/${encodeURIComponent(projectId)}/workflows`, { unitId }));
 }
 
-export function saveProjectShot(projectId: string, input: { id?: string; unitId?: string; title: string; description?: string; position?: number; durationMs?: number; status?: string }) {
+export function saveProjectShot(projectId: string, input: { id?: string; unitId?: string; title: string; description?: string; definitionJson?: string; position?: number; durationMs?: number; status?: string }) {
     return request<{ shot: ProjectShot }>(api.post(`/projects/${encodeURIComponent(projectId)}/shots`, input));
 }
 
-export function replaceProjectUnitShots(projectId: string, unitId: string, shots: Array<{ title: string; description: string; durationMs: number }>) {
+export function replaceProjectUnitShots(projectId: string, unitId: string, shots: Array<{ title: string; description: string; definitionJson?: string; durationMs: number }>) {
     return request<{ shots: ProjectShot[] }>(api.put(`/projects/${encodeURIComponent(projectId)}/units/${encodeURIComponent(unitId)}/shots`, { shots }));
 }
 

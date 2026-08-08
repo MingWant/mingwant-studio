@@ -34,21 +34,56 @@ type AdminAuditPage struct {
 }
 
 func (s *Service) appendAdminAudit(actor *model.User, action string, targetType string, targetID string, summary string, metadata any) error {
+	return appendAdminAuditWithRepository(s.repo, actor, action, targetType, targetID, summary, metadata)
+}
+
+func appendAdminAuditWithRepository(repo *repository.Repository, actor *model.User, action string, targetType string, targetID string, summary string, metadata any) error {
+	event, err := newAdminAuditEvent(actor, action, targetType, targetID, summary, metadata)
+	if err != nil {
+		return err
+	}
+	return repo.AppendAdminAudit(event)
+}
+
+func newAdminAuditEvent(actor *model.User, action string, targetType string, targetID string, summary string, metadata any) (*model.AdminAuditEvent, error) {
 	if actor == nil {
-		return Unauthorized("请先登录")
+		return nil, Unauthorized("请先登录")
 	}
 	encoded := ""
 	if metadata != nil {
 		data, err := json.Marshal(metadata)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		encoded = string(data)
 	}
-	return s.repo.AppendAdminAudit(&model.AdminAuditEvent{
+	return &model.AdminAuditEvent{
 		ID: newID(), ActorUserID: actor.ID, Action: strings.TrimSpace(action), TargetType: strings.TrimSpace(targetType),
 		TargetID: strings.TrimSpace(targetID), Summary: truncateRunes(strings.TrimSpace(summary), 500), MetadataJSON: encoded, CreatedAt: time.Now(),
-	})
+	}, nil
+}
+
+// saveSystemSettingUnchanged 通过单条条件写入复核页面读取版本，不能把凭据留空的旧快照覆盖到新配置上。
+func saveSystemSettingUnchanged(repo *repository.Repository, setting *model.SystemSetting, initial *model.SystemSetting) error {
+	saved, err := repo.SaveSystemSettingIfUnchanged(setting, initial)
+	if err != nil {
+		return err
+	}
+	if !saved {
+		return Conflict("系统设置已被其他管理员修改、创建或重置，本次未覆盖新配置，请刷新后重试")
+	}
+	return nil
+}
+
+func deleteSystemSettingUnchanged(repo *repository.Repository, key string, initial *model.SystemSetting) error {
+	deleted, err := repo.DeleteSystemSettingIfUnchanged(key, initial)
+	if err != nil {
+		return err
+	}
+	if !deleted {
+		return Conflict("系统设置已被其他管理员修改、创建或重置，本次未覆盖新配置，请刷新后重试")
+	}
+	return nil
 }
 
 func (s *Service) AdminUserDetail(actor *model.User, userID string) (*AdminUserDetail, error) {
@@ -117,6 +152,11 @@ func (s *Service) AdminUserTasks(actor *model.User, userID string, page int, lim
 	}
 	page, limit = normalizeAdminPage(page, limit)
 	tasks, total, err := s.repo.AdminUserTasks(userID, limit, (page-1)*limit)
+	for index := range tasks {
+		if tasks[index].Type == channelProbeTaskType {
+			tasks[index].Error = redactSystemChannelProbeText(tasks[index].Error)
+		}
+	}
 	return &AdminTaskPage{Tasks: tasks, Total: total, Page: page, Limit: limit}, err
 }
 

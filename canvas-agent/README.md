@@ -30,6 +30,8 @@ Codex app 插件会读取启动输出里的 Local URL 和 Connect token，并直
 
 Canvas Agent 默认只监听 `127.0.0.1`。网页第一次带正确 token 连接后，Canvas Agent 会记录该网页 Origin；之后其他 Origin 不能复用这个本地 Agent，除非用户清理 `~/.infinite-canvas/canvas-agent.json` 里的 `origins`。
 
+网页只允许连接 `127.0.0.1`、`localhost` 或 `::1`，并通过 `X-Canvas-Agent-Token` 请求头提交 Token；本地 Agent 不接受 `?token=` 查询参数。自动打开画布时应把启动凭据放在 URL fragment（`#agentUrl=...&agentToken=...`），网页读取后立即清除；Token 只保留在当前浏览器会话，不写入 `localStorage`。工具写操作仍默认要求网页侧确认，自动连接不会关闭确认。
+
 ## 发布
 
 `canvas-agent` 使用自己的 `package.json` 版本号，不跟仓库根目录 `VERSION` 绑定。发布包名为 `@ddcat666/open-ai-canvas-agent`。
@@ -87,10 +89,24 @@ default_tools_approval_mode = "approve"
 
 - `canvas_get_state`
 - `canvas_get_selection`
+- `canvas_get_image_annotations`（返回标注指令和可供 MCP 视觉读取的带标记图片）
 - `canvas_export_snapshot`
 - `canvas_apply_ops`
 - `canvas_create_text_node`
 - `canvas_create_image_prompt_flow`
+- `canvas_generate_video`（使用画布已配置的视频模型和后端任务队列）
+- `canvas_edit_image_annotation`（使用标注节点保存的原图和遮罩执行局部改图）
+- `project_get_context`、`project_list_units`（读取当前制作项目和章节摘要）
+- `project_get_unit`（按 ID 读取章节/分集完整正文与逐字台词）
+- `project_list_asset_versions`（读取项目资产的精确版本与结构化设定）
+- `project_create_unit`、`project_update_unit`（保存短剧分集/章节正文）
+- `project_extract_asset_candidates`、`project_confirm_asset_candidate`、`project_upsert_asset_version`（管理待确认资产与精确版本）
+- `project_create_or_update_shots`、`project_link_shot_asset`（直接提交结构化镜头对象、首尾边界与精确资产绑定；长分镜每批 3 到 5 镜，不经文本模型中转 JSON）
+- `project_start_workflow_step`、`project_update_workflow_step`、`project_register_task_output`（推进阶段并登记审查/任务产物）
+
+上述项目工具已在本仓库 Canvas Agent 源码中提供。Codex 插件当前默认启动已发布的 npm 包；在新包发布前，需要按上文让 HTTP Agent 与 MCP 都改用本仓库构建产物，旧包不会自动获得新工具语义。
+
+图片标注改图需要先在图片节点工具栏点击“标注”，画出区域、填写修改要求并保存标注节点。Agent 读取标注图只是为了理解彩色圈画，真正生成会使用干净原图和单独保存的遮罩，不会把笔迹直接送进结果图。
 
 `canvas_apply_ops` 示例：
 

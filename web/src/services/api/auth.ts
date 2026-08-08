@@ -47,7 +47,7 @@ export type ApiCallLog = {
     source: string;
     capability: "text" | "image" | "video" | "audio" | "";
     operation?: string;
-    requestKind: "create" | "poll" | "download" | "repair" | "";
+    requestKind: "create" | "poll" | "download" | "repair" | "health_check" | "";
     billable: boolean;
     apiFormat: string;
     method: string;
@@ -71,6 +71,13 @@ export type ApiCallLog = {
     concurrencyLimit: number;
     upstreamUrl: string;
     createdAt: string;
+};
+
+export type ProviderTaskRecoveryResult = {
+    task: { id: string; status: string; nextPollAt?: string };
+    providerStatus: string;
+    recovered: boolean;
+    billingSettled: boolean;
 };
 
 export type AdminAuditEvent = {
@@ -318,6 +325,10 @@ export function logout() {
     return request<{ ok: boolean }>(api.post("/auth/logout"));
 }
 
+export function revokeOtherAuthSessions() {
+    return request<{ revoked: number }>(api.post("/auth/logout-others"));
+}
+
 export type AdminListParams = { keyword?: string; status?: string; role?: string; interfaceType?: string; page?: number; limit?: number };
 
 export function listAdminUsers(params: AdminListParams = {}) {
@@ -418,6 +429,10 @@ export function listAdminApiLogs(params: AdminListParams = {}) {
 
 export function getAdminApiLog(id: string) {
     return request<{ log: ApiCallLog }>(api.get(`/admin/api-logs/${encodeURIComponent(id)}`));
+}
+
+export function queryAdminApiLogTask(id: string) {
+    return request<ProviderTaskRecoveryResult>(api.post(`/admin/api-logs/${encodeURIComponent(id)}/query-task`));
 }
 
 export async function exportAdminApiLogs(params: AdminListParams & { ids?: string[] } = {}) {

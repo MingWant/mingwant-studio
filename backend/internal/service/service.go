@@ -3,14 +3,17 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log"
 	"mime/multipart"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -18,46 +21,71 @@ import (
 
 	"infinite-canvas/backend/internal/model"
 	"infinite-canvas/backend/internal/repository"
+
+	"gorm.io/gorm"
 )
 
 type Service struct {
-	repo            *repository.Repository
-	dataDir         string
-	cancelMu        sync.Mutex
-	registrationMu  sync.Mutex
-	emailCodeMu     sync.Mutex
-	redeemBatchMu   sync.Mutex
-	storageMu       sync.Mutex
-	characterTaskMu sync.Mutex
-	activeCancels   map[string]context.CancelFunc
-	pendingStorage  map[string]int64
-	coordinator     *runtimeCoordinator
-	runtimeErr      error
-	workerID        string
+	repo                 *repository.Repository
+	dataDir              string
+	cancelMu             sync.Mutex
+	registrationMu       sync.Mutex
+	emailCodeMu          sync.Mutex
+	redeemBatchMu        sync.Mutex
+	storageMu            sync.Mutex
+	storageLocks         map[string]*userStorageLock
+	characterTaskMu      sync.Mutex
+	activeCancels        map[string]context.CancelFunc
+	pendingStorage       map[string]int64
+	coordinator          *runtimeCoordinator
+	runtimeErr           error
+	shutdownDrainTimeout time.Duration
+	workerID             string
+	workerHealthMu    sync.RWMutex
+	workerHeartbeat   time.Time
+	workerError       string
+	workerLifecycleMu sync.Mutex
+	workerStarted     bool
+	workerStopping    bool
+	workerStop        chan struct{}
+	workerDone        chan struct{}
+	workerTasks       sync.WaitGroup
+	workerSlotMu      sync.RWMutex
+	workerSlotIssue   map[string]struct{}
+	runtimeHealthMu   sync.Mutex
+	runtimeHealthAt   time.Time
+	runtimeHealth     RuntimeHealth
 }
 
-const taskWorkerConcurrency = 3
 const taskLogPayloadLimit = 4000
 
+var sessionRequestKeyPattern = regexp.MustCompile(`^[A-Za-z0-9_-]+$`)
+
 type CreateSessionRequest struct {
-	ProjectID      string            `json:"projectId"`
-	Prompt         string            `json:"prompt"`
-	CanvasSnapshot map[string]any    `json:"canvasSnapshot"`
-	References     []string          `json:"references"`
-	Requirements   string            `json:"requirements"`
-	CanvasAssets   []storyboardAsset `json:"canvasAssets"`
-	Config         providerConfig    `json:"config"`
+	RequestKey               string            `json:"requestKey"`
+	ProjectID                string            `json:"projectId"`
+	Prompt                   string            `json:"prompt"`
+	CanvasSnapshot           map[string]any    `json:"canvasSnapshot"`
+	References               []string          `json:"references"`
+	Requirements             string            `json:"requirements"`
+	CanvasAssets             []storyboardAsset `json:"canvasAssets"`
+	Config                   providerConfig    `json:"config"`
+	ChannelProbeTaskID       string            `json:"channelProbeTaskId"`
+	ToolProbeTaskID          string            `json:"toolProbeTaskId"`
+	AllowPaidStructureRepair bool              `json:"allowPaidStructureRepair"`
 }
 
 type CreateTaskRequest struct {
-	SessionID string         `json:"sessionId"`
-	ProjectID string         `json:"projectId"`
-	Type      string         `json:"type"`
-	Operation string         `json:"operation"`
-	Prompt    string         `json:"prompt"`
-	Provider  string         `json:"provider"`
-	Model     string         `json:"model"`
-	Input     map[string]any `json:"input"`
+	SessionID                 string         `json:"sessionId"`
+	ProjectID                 string         `json:"projectId"`
+	Type                      string         `json:"type"`
+	Operation                 string         `json:"operation"`
+	Prompt                    string         `json:"prompt"`
+	Provider                  string         `json:"provider"`
+	Model                     string         `json:"model"`
+	SourceTaskID              string         `json:"sourceTaskId"`
+	ConfirmNewProviderRequest bool           `json:"confirmNewProviderRequest"`
+	Input                     map[string]any `json:"input"`
 }
 
 type SessionDetail struct {
@@ -68,31 +96,40 @@ type SessionDetail struct {
 }
 
 type TaskSummary struct {
-	ID          string              `json:"id"`
-	SessionID   string              `json:"sessionId,omitempty"`
-	ProjectID   string              `json:"projectId,omitempty"`
-	Type        string              `json:"type"`
-	Status      model.TaskStatus    `json:"status"`
-	Stage       string              `json:"stage"`
-	Progress    int                 `json:"progress"`
-	Prompt      string              `json:"prompt"`
-	Operation   string              `json:"operation,omitempty"`
-	Provider    string              `json:"provider,omitempty"`
-	Model       string              `json:"model,omitempty"`
-	ErrorCode   string              `json:"errorCode,omitempty"`
-	PreviewURL  string              `json:"previewUrl,omitempty"`
-	PreviewKind string              `json:"previewKind,omitempty"`
-	Attempts    int                 `json:"attempts"`
-	StartedAt   *time.Time          `json:"startedAt"`
-	CompletedAt *time.Time          `json:"completedAt"`
-	CreatedAt   time.Time           `json:"createdAt"`
-	UpdatedAt   time.Time           `json:"updatedAt"`
-	Billing     *TaskBillingSummary `json:"billing,omitempty"`
+	ID                  string              `json:"id"`
+	SessionID           string              `json:"sessionId,omitempty"`
+	ProjectID           string              `json:"projectId,omitempty"`
+	Type                string              `json:"type"`
+	Status              model.TaskStatus    `json:"status"`
+	Stage               string              `json:"stage"`
+	Progress            int                 `json:"progress"`
+	Prompt              string              `json:"prompt"`
+	Operation           string              `json:"operation,omitempty"`
+	Provider            string              `json:"provider,omitempty"`
+	Model               string              `json:"model,omitempty"`
+	ProviderRequestID   string              `json:"providerRequestId,omitempty"`
+	Error               string              `json:"error,omitempty"`
+	ErrorCode           string              `json:"errorCode,omitempty"`
+	PreviewURL          string              `json:"previewUrl,omitempty"`
+	PreviewKind         string              `json:"previewKind,omitempty"`
+	DeliveryRecoverable bool                `json:"deliveryRecoverable,omitempty"`
+	Attempts            int                 `json:"attempts"`
+	NextPollAt          *time.Time          `json:"nextPollAt,omitempty"`
+	StartedAt           *time.Time          `json:"startedAt"`
+	CompletedAt         *time.Time          `json:"completedAt"`
+	CreatedAt           time.Time           `json:"createdAt"`
+	UpdatedAt           time.Time           `json:"updatedAt"`
+	Billing             *TaskBillingSummary `json:"billing,omitempty"`
 }
 
 type TaskBillingSummary struct {
 	AmountMicrocredits int64               `json:"amountMicrocredits"`
 	Status             model.BillingStatus `json:"status"`
+}
+
+type TaskDetail struct {
+	model.Task
+	Billing *TaskBillingSummary `json:"billing,omitempty"`
 }
 
 type TaskListOptions struct {
@@ -102,13 +139,17 @@ type TaskListOptions struct {
 }
 
 type agentStoryboardInput struct {
-	References     []string          `json:"references"`
-	CanvasSnapshot map[string]any    `json:"canvasSnapshot"`
-	Requirements   string            `json:"requirements"`
-	CanvasAssets   []storyboardAsset `json:"canvasAssets"`
-	Config         providerConfig    `json:"config"`
-	ShotDuration   int               `json:"shotDurationSeconds"`
-	ShotCount      int               `json:"shotCount"`
+	References               []string          `json:"references"`
+	CanvasSnapshot           map[string]any    `json:"canvasSnapshot"`
+	Requirements             string            `json:"requirements"`
+	CanvasAssets             []storyboardAsset `json:"canvasAssets"`
+	Config                   providerConfig    `json:"config"`
+	ChannelProbeTaskID       string            `json:"channelProbeTaskId"`
+	ToolProbeTaskID          string            `json:"toolProbeTaskId"`
+	ShotDuration             int               `json:"shotDurationSeconds"`
+	ShotCount                int               `json:"shotCount"`
+	ManualDelivery           bool              `json:"manualDelivery"`
+	AllowPaidStructureRepair bool              `json:"allowPaidStructureRepair"`
 }
 
 type storyboardAsset struct {
@@ -130,105 +171,106 @@ type agentStoryboardPlan struct {
 }
 
 type agentStoryboardShot struct {
-	Title        string   `json:"title"`
-	Description  string   `json:"description"`
-	Duration     int      `json:"durationSeconds"`
-	Dialogue     string   `json:"dialogue"`
-	ShotSize     string   `json:"shotSize"`
-	Emotion      string   `json:"emotion"`
-	Lighting     string   `json:"lightingAndAtmosphere"`
-	AudioEffects string   `json:"audioEffects"`
-	VisualPrompt string   `json:"visualPrompt"`
-	VideoPrompt  string   `json:"videoPrompt"`
-	Camera       string   `json:"camera"`
-	Motion       string   `json:"motion"`
-	TimeBeats    string   `json:"timeBeats"`
-	Negative     string   `json:"negativePrompt"`
-	AssetTags    []string `json:"assetTags"`
+	Title             string               `json:"title"`
+	Description       string               `json:"description"`
+	Purpose           string               `json:"purpose"`
+	InformationChange string               `json:"informationChange"`
+	StartBoundary     *projectShotBoundary `json:"startBoundary"`
+	EndBoundary       *projectShotBoundary `json:"endBoundary"`
+	Duration          int                  `json:"durationSeconds"`
+	Dialogue          string               `json:"dialogue"`
+	ShotSize          string               `json:"shotSize"`
+	Emotion           string               `json:"emotion"`
+	Lighting          string               `json:"lightingAndAtmosphere"`
+	AudioEffects      string               `json:"audioEffects"`
+	VisualPrompt      string               `json:"visualPrompt"`
+	VideoPrompt       string               `json:"videoPrompt"`
+	Camera            string               `json:"camera"`
+	Motion            string               `json:"motion"`
+	TimeBeats         string               `json:"timeBeats"`
+	Negative          string               `json:"negativePrompt"`
+	AssetTags         []string             `json:"assetTags"`
 }
 
 func New(repo *repository.Repository, dataDir string) *Service {
 	coordinator, err := newRuntimeCoordinator(repo.Dialect())
-	return &Service{repo: repo, dataDir: dataDir, activeCancels: make(map[string]context.CancelFunc), coordinator: coordinator, runtimeErr: err, workerID: newID()}
-}
-
-func (s *Service) StartWorker() {
-	go func() {
-		slots := make(chan struct{}, maxChannelConcurrencyLimit)
-		dispatch := func() {
-			setting, err := s.runtimeConcurrencySetting()
-			if err != nil {
-				return
-			}
-			workerConcurrency := setting.WorkerConcurrency
-			for len(slots) < workerConcurrency {
-				releaseGlobal, acquired, err := s.coordinator.acquire(context.Background(), "workers", workerConcurrency, 45*time.Minute)
-				if err != nil || !acquired {
-					return
-				}
-				task, err := s.repo.ClaimNextTask(s.workerID, 45*time.Second)
-				if err != nil || task == nil {
-					releaseGlobal()
-					return
-				}
-				slots <- struct{}{}
-				go func(task *model.Task) {
-					defer func() { <-slots; releaseGlobal() }()
-					_ = s.processClaimedTask(task)
-				}(task)
-			}
-		}
-
-		dispatch()
-		ticker := time.NewTicker(2 * time.Second)
-		defer ticker.Stop()
-		for range ticker.C {
-			dispatch()
-		}
-	}()
+	return &Service{
+		repo: repo, dataDir: dataDir, activeCancels: make(map[string]context.CancelFunc), storageLocks: make(map[string]*userStorageLock),
+		coordinator: coordinator, runtimeErr: err, workerID: newID(), workerStop: make(chan struct{}), workerDone: make(chan struct{}),
+		workerSlotIssue: make(map[string]struct{}),
+	}
 }
 
 func (s *Service) CreateSession(userID string, req CreateSessionRequest) (*SessionDetail, error) {
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {
-		return nil, errors.New("prompt is required")
+		return nil, BadAuthRequest("请输入影视分镜需求")
+	}
+	requestKey, err := normalizeSessionRequestKey(req.RequestKey)
+	if err != nil {
+		return nil, err
+	}
+	if requestKey != "" {
+		existing, err := s.repo.SessionForRequestKey(userID, requestKey)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			if existing.ProjectID != strings.TrimSpace(req.ProjectID) || existing.Prompt != prompt {
+				return nil, BadAuthRequest("影视会话请求键已用于另一项创建请求")
+			}
+			return s.resumeOrReadStoryboardSession(userID, *existing, req, prompt, compactPersistedValue(req.CanvasSnapshot))
+		}
 	}
 	compactedSnapshot := compactPersistedValue(req.CanvasSnapshot)
-	snapshotJSON, _ := json.Marshal(compactedSnapshot)
-	session := model.Session{ID: newID(), UserID: userID, ProjectID: req.ProjectID, Status: model.SessionStatusActive, Prompt: prompt, CanvasSnapshotJSON: string(snapshotJSON)}
+	snapshotJSON, err := json.Marshal(compactedSnapshot)
+	if err != nil {
+		return nil, errors.Join(&AuthError{Status: 500, Message: "会话快照无法安全保存，本次未创建会话或任务"}, fmt.Errorf("serialize session snapshot: %w", err))
+	}
+	session := model.Session{ID: newID(), UserID: userID, ProjectID: strings.TrimSpace(req.ProjectID), RequestKey: requestKey, Status: model.SessionStatusActive, Prompt: prompt, CanvasSnapshotJSON: string(snapshotJSON)}
 	policy, err := s.RuntimePolicy()
 	if err != nil {
 		return nil, err
 	}
-	s.storageMu.Lock()
+	unlockStorage := s.lockUserStorage(userID)
 	usage, err := s.repo.UserStorageUsage(userID)
 	if err != nil {
-		s.storageMu.Unlock()
+		unlockStorage()
 		return nil, err
 	}
 	incomingBytes := int64(len([]byte(prompt))*2 + len(snapshotJSON))
 	if err := validateStructuredStorageQuotaWithPolicy(usage, "session", true, incomingBytes, policy.Resource); err != nil {
-		s.storageMu.Unlock()
+		unlockStorage()
 		return nil, err
 	}
-	if err := s.repo.Create(&session); err != nil {
-		s.storageMu.Unlock()
+	if err := s.repo.CreateSessionDraft(&session); err != nil {
+		unlockStorage()
+		if errors.Is(err, repository.ErrDuplicateSessionRequest) {
+			existing, lookupErr := s.repo.SessionForRequestKey(userID, requestKey)
+			if lookupErr != nil {
+				return nil, lookupErr
+			}
+			if existing != nil && existing.ProjectID == session.ProjectID && existing.Prompt == prompt {
+				return s.resumeOrReadStoryboardSession(userID, *existing, req, prompt, compactedSnapshot)
+			}
+			return nil, BadAuthRequest("影视会话创建请求正在处理中，请继续跟踪原请求")
+		}
 		return nil, err
 	}
-	if err := s.repo.Create(&model.Message{ID: newID(), UserID: userID, SessionID: session.ID, Role: "user", Content: prompt}); err != nil {
+	if err := s.repo.EnsureInitialSessionMessage(&model.Message{ID: session.ID, UserID: userID, SessionID: session.ID, Role: "user", Content: prompt}); err != nil {
 		cleanupErr := s.repo.DeleteSessionDraft(userID, session.ID)
-		s.storageMu.Unlock()
+		unlockStorage()
 		if cleanupErr != nil {
 			return nil, fmt.Errorf("创建会话消息失败：%v；清理会话失败：%w", err, cleanupErr)
 		}
 		return nil, err
 	}
-	s.storageMu.Unlock()
-	taskReq := CreateTaskRequest{SessionID: session.ID, ProjectID: req.ProjectID, Type: "agent_storyboard", Operation: "storyboard", Prompt: prompt, Provider: "openai-compatible", Model: req.Config.Model, Input: map[string]any{"references": req.References, "canvasSnapshot": compactedSnapshot, "requirements": req.Requirements, "canvasAssets": req.CanvasAssets, "config": req.Config}}
+	unlockStorage()
+	taskReq := storyboardSessionTaskRequest(session, req, prompt, compactedSnapshot)
 	if _, err := s.CreateTask(userID, taskReq); err != nil {
-		s.storageMu.Lock()
+		unlockCleanup := s.lockUserStorage(userID)
 		cleanupErr := s.repo.DeleteSessionDraft(userID, session.ID)
-		s.storageMu.Unlock()
+		unlockCleanup()
 		if cleanupErr != nil {
 			return nil, fmt.Errorf("创建会话任务失败：%v；清理会话失败：%w", err, cleanupErr)
 		}
@@ -238,10 +280,60 @@ func (s *Service) CreateSession(userID string, req CreateSessionRequest) (*Sessi
 	return s.SessionDetail(userID, session.ID)
 }
 
+func (s *Service) resumeOrReadStoryboardSession(userID string, session model.Session, req CreateSessionRequest, prompt string, compactedSnapshot any) (*SessionDetail, error) {
+	detail, err := s.SessionDetail(userID, session.ID)
+	if err != nil {
+		return nil, err
+	}
+	if session.Status != model.SessionStatusActive || len(detail.Tasks) > 0 {
+		return detail, nil
+	}
+	// 进程可能在会话落库后、任务创建前中断；固定消息 ID 与任务请求键让多实例恢复仍只产生一条消息和一张订单。
+	if err := s.repo.EnsureInitialSessionMessage(&model.Message{ID: session.ID, UserID: userID, SessionID: session.ID, Role: "user", Content: prompt}); err != nil {
+		return nil, err
+	}
+	if _, err := s.CreateTask(userID, storyboardSessionTaskRequest(session, req, prompt, compactedSnapshot)); err != nil {
+		return nil, err
+	}
+	return s.SessionDetail(userID, session.ID)
+}
+
+func storyboardSessionTaskRequest(session model.Session, req CreateSessionRequest, prompt string, compactedSnapshot any) CreateTaskRequest {
+	return CreateTaskRequest{SessionID: session.ID, ProjectID: session.ProjectID, Type: "agent_storyboard", Operation: "storyboard", Prompt: prompt, Provider: "openai-compatible", Model: req.Config.Model, Input: map[string]any{"references": req.References, "canvasSnapshot": compactedSnapshot, "requirements": req.Requirements, "canvasAssets": req.CanvasAssets, "config": req.Config, "channelProbeTaskId": req.ChannelProbeTaskID, "toolProbeTaskId": req.ToolProbeTaskID, "allowPaidStructureRepair": req.AllowPaidStructureRepair}}
+}
+
+func normalizeSessionRequestKey(value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if len(value) < 8 || len(value) > 64 || !sessionRequestKeyPattern.MatchString(value) {
+		return "", BadAuthRequest("影视会话请求键格式无效")
+	}
+	return value, nil
+}
+
 func channelModelNames(channel model.ModelChannel) []string {
 	models := []string{}
 	_ = json.Unmarshal([]byte(channel.ModelsJSON), &models)
-	return uniqueNonEmpty(models)
+	return normalizedChannelModelNames(models)
+}
+
+func normalizedChannelModelNames(values []string) []string {
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		value = strings.TrimSpace(strings.TrimPrefix(strings.TrimSpace(value), "models/"))
+		if value == "" {
+			continue
+		}
+		if _, exists := seen[value]; exists {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
 }
 
 func (s *Service) SessionDetail(userID string, id string) (*SessionDetail, error) {
@@ -249,11 +341,24 @@ func (s *Service) SessionDetail(userID string, id string) (*SessionDetail, error
 	if err != nil {
 		return nil, err
 	}
-	messages, err := s.repo.SessionMessages(userID, id)
+	tasks, err := s.repo.SessionTasks(userID, id)
 	if err != nil {
 		return nil, err
 	}
-	tasks, err := s.repo.SessionTasks(userID, id)
+	if session.Status == model.SessionStatusActive && len(tasks) > 0 {
+		latest := tasks[len(tasks)-1]
+		if latest.Status == model.TaskStatusFailed || latest.Status == model.TaskStatusCancelled {
+			// 兼容 Worker 在任务终态提交后、旧版会话状态写入前退出的窗口；条件更新会避开并发重试。
+			if err := s.repo.MarkSessionFailedForTask(latest, defaultString(latest.Error, "会话任务已结束，但没有保存失败说明。")); err != nil {
+				return nil, err
+			}
+			session, err = s.repo.SessionForUser(userID, id)
+			if err != nil {
+				return nil, err
+			}
+		}
+	}
+	messages, err := s.repo.SessionMessages(userID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -266,16 +371,57 @@ func (s *Service) SessionDetail(userID string, id string) (*SessionDetail, error
 }
 
 func (s *Service) CreateTask(userID string, req CreateTaskRequest) (*model.Task, error) {
+	taskType := strings.TrimSpace(req.Type)
+	if taskType == "" {
+		taskType = "video_image_to_video"
+	}
+	if taskType == channelProbeTaskType {
+		return nil, BadAuthRequest("渠道测活必须使用专用入口")
+	}
 	prompt := strings.TrimSpace(req.Prompt)
 	if prompt == "" {
-		return nil, errors.New("prompt is required")
+		return nil, BadAuthRequest("请输入生成提示词")
+	}
+	sourceTask, err := s.validateSourceTaskForNewRequest(userID, prompt, req)
+	if err != nil {
+		return nil, err
 	}
 	normalizedInput, err := normalizeTaskInput(req.Input)
 	if err != nil {
 		return nil, err
 	}
+	if strings.HasPrefix(taskType, "video_") {
+		if mode, _ := normalizedInput["mode"].(string); strings.TrimSpace(mode) == "" {
+			normalizedInput["mode"] = "video"
+		}
+	}
 	if containsInlineMediaDataURL(normalizedInput) {
 		return nil, BadAuthRequest("任务输入不能包含内嵌媒体，请先上传到资源存储")
+	}
+	requestKey, err := generationTaskRequestKey(taskType, req.SessionID, req.ProjectID, req.Operation, normalizedInput)
+	if err != nil {
+		return nil, err
+	}
+	if sourceTask != nil {
+		// 新任务不能覆盖旧任务；保留来源和确认事实，便于费用争议时还原用户操作链路。
+		normalizedInput["sourceTaskId"] = sourceTask.ID
+		normalizedInput["confirmNewProviderRequest"] = true
+	}
+	if requestKey != "" {
+		existing, err := s.repo.ActiveTaskForRequestKey(userID, requestKey)
+		if err != nil {
+			return nil, err
+		}
+		if existing != nil {
+			s.logTaskEventBestEffort(userID, existing.ID, "info", "重复提交已复用原任务", "同一画布节点与生成操作仍有排队或运行中的任务，未创建新订单")
+			return taskForOutput(*existing), nil
+		}
+	}
+	if err := validateLongTextTaskConfig(taskType, normalizedInput); err != nil {
+		return nil, err
+	}
+	if err := s.ValidateTaskCapability(userID, normalizedInput); err != nil {
+		return nil, err
 	}
 	policy, err := s.RuntimePolicy()
 	if err != nil {
@@ -288,27 +434,38 @@ func (s *Service) CreateTask(userID string, req CreateTaskRequest) (*model.Task,
 	if activeTasks >= int64(policy.Task.ActiveTaskLimit) {
 		return nil, BadAuthRequest(fmt.Sprintf("同时排队或运行的任务最多 %d 个，请等待已有任务完成", policy.Task.ActiveTaskLimit))
 	}
-	taskType := req.Type
-	if taskType == "" {
-		taskType = "video_image_to_video"
-	}
-	task := model.Task{ID: newID(), UserID: userID, SessionID: req.SessionID, ProjectID: req.ProjectID, Type: taskType, Status: model.TaskStatusQueued, Stage: "等待队列调度", Progress: 5, Prompt: prompt, Operation: req.Operation, Provider: req.Provider, Model: req.Model}
+	task := model.Task{ID: newID(), UserID: userID, SessionID: req.SessionID, ProjectID: req.ProjectID, Type: taskType, Status: model.TaskStatusQueued, Stage: "等待队列调度", Progress: 5, Prompt: prompt, Operation: req.Operation, Provider: req.Provider, Model: req.Model, RequestKey: requestKey}
 	if err := s.ensureTaskProjectActive(userID, req.ProjectID); err != nil {
 		return nil, err
+	}
+	// 先保护并序列化任务输入，再构造计费订单；密钥加密或 JSON 持久化失败时不能留下可预留积分的订单对象。
+	if err := s.protectTaskSecrets(normalizedInput); err != nil {
+		return nil, errors.Join(&AuthError{Status: 500, Message: "任务输入无法安全保存，本次未创建任务或计费订单"}, fmt.Errorf("protect task input secrets: %w", err))
+	}
+	inputJSON, err := json.Marshal(normalizedInput)
+	if err != nil {
+		return nil, errors.Join(&AuthError{Status: 500, Message: "任务输入无法安全保存，本次未创建任务或计费订单"}, fmt.Errorf("serialize task input: %w", err))
 	}
 	billingOrder, err := s.taskBillingOrder(userID, &task, normalizedInput)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.protectTaskSecrets(normalizedInput); err != nil {
-		return nil, err
-	}
-	inputJSON, _ := json.Marshal(normalizedInput)
 	task.InputJSON = string(inputJSON)
 	if billingOrder != nil {
 		task.BillingOrderID = billingOrder.ID
 	}
 	err = s.createTaskWithinStorageQuota(&task, billingOrder, policy)
+	if errors.Is(err, repository.ErrDuplicateActiveTask) {
+		existing, lookupErr := s.repo.ActiveTaskForRequestKey(userID, requestKey)
+		if lookupErr != nil {
+			return nil, lookupErr
+		}
+		if existing != nil {
+			s.logTaskEventBestEffort(userID, existing.ID, "info", "并发重复提交已复用原任务", "数据库唯一约束阻止了第二张任务与计费订单")
+			return taskForOutput(*existing), nil
+		}
+		return nil, BadAuthRequest("同一画布节点与生成操作已有活动任务，请从任务中心继续跟踪原任务")
+	}
 	if errors.Is(err, repository.ErrActiveTaskLimit) {
 		return nil, BadAuthRequest(fmt.Sprintf("同时排队或运行的任务最多 %d 个，请等待已有任务完成", policy.Task.ActiveTaskLimit))
 	}
@@ -319,8 +476,85 @@ func (s *Service) CreateTask(userID string, req CreateTaskRequest) (*model.Task,
 		return nil, err
 	}
 	s.recordActivity(userID, "task", 1)
-	_ = s.log(userID, task.ID, "info", "任务已进入队列", "")
+	logPayload := ""
+	if sourceTask != nil {
+		logPayload = "来源任务：" + sourceTask.ID + "；用户已确认创建新的供应商请求"
+	}
+	s.logTaskEventBestEffort(userID, task.ID, "info", "任务已进入队列", logPayload)
 	return taskForOutput(task), nil
+}
+
+// 画布“重试”实际会创建新任务；服务端必须验证旧任务终态和计费状态，不能只依赖可绕过的前端弹窗。
+func (s *Service) validateSourceTaskForNewRequest(userID string, prompt string, req CreateTaskRequest) (*model.Task, error) {
+	sourceTaskID := strings.TrimSpace(req.SourceTaskID)
+	if sourceTaskID == "" {
+		return nil, nil
+	}
+	if !req.ConfirmNewProviderRequest {
+		return nil, BadAuthRequest("重新生成会创建新的供应商请求并可能产生费用，请先核对原任务和账单，再明确确认")
+	}
+	source, err := s.repo.TaskForUser(userID, sourceTaskID)
+	if err != nil {
+		return nil, err
+	}
+	if source.Type == channelProbeTaskType {
+		return nil, BadAuthRequest("渠道测活不能作为普通生成任务的重试来源")
+	}
+	switch source.Status {
+	case model.TaskStatusSucceeded:
+		return nil, BadAuthRequest("原后台任务已经成功，请先从任务中心恢复结果，不要重复调用供应商")
+	case model.TaskStatusQueued, model.TaskStatusRunning:
+		return nil, BadAuthRequest("原后台任务仍在排队或运行，请继续跟踪原任务，不要重复提交")
+	case model.TaskStatusFailed, model.TaskStatusCancelled:
+	default:
+		return nil, BadAuthRequest("原任务状态不允许重新生成")
+	}
+	if source.ProjectID != "" && req.ProjectID != "" && source.ProjectID != req.ProjectID {
+		return nil, BadAuthRequest("重试来源任务与当前画布不一致")
+	}
+	if requestedType := strings.TrimSpace(req.Type); requestedType != "" && source.Type != requestedType {
+		return nil, BadAuthRequest("重试来源任务与当前生成类型不一致")
+	}
+	if source.Operation != "" && req.Operation != "" && source.Operation != req.Operation {
+		return nil, BadAuthRequest("重试来源任务与当前生成操作不一致")
+	}
+	if isContentModerationFailure(source.Error) && strings.TrimSpace(source.Prompt) == prompt {
+		return nil, BadAuthRequest(contentModerationRetryMessage)
+	}
+	s.hydrateTaskProviderRequestID(source)
+	// 自定义渠道可能没有平台计费订单，但调用日志仍能证明供应商已经成功收到一次付费请求；
+	// 这种来源不能被“没有订单”误判为安全重试，先恢复或人工核对原调用。
+	hasSuccessfulCall, err := s.repo.TaskHasSuccessfulBillableCall(source.ID)
+	if err != nil {
+		return nil, err
+	}
+	if hasSuccessfulCall {
+		return nil, BadAuthRequest("原任务已有成功的供应商调用记录（即使没有平台计费订单也可能已经产生费用），请先恢复结果或核对供应商账单；本次未创建新的供应商请求")
+	}
+	// 这是用户明确确认后的新任务入口：保留旧任务的费用状态，不再把 uncertain
+	// 变成只能找管理员的死循环；没有确认时仍在服务端拒绝，不能只靠前端弹窗。
+	billingReviewRisk := taskErrorRequiresBillingReview(source.Error)
+	if billingReviewRisk && !req.ConfirmNewProviderRequest {
+		return nil, BadAuthRequest("原任务费用状态可能待核对；请在确认可能重复计费后再创建新的供应商请求")
+	}
+	if source.BillingOrderID != "" {
+		order, err := s.repo.BillingOrder(source.BillingOrderID)
+		if err != nil {
+			return nil, err
+		}
+		if order.UserID != userID || order.TaskID != source.ID {
+			return nil, BadAuthRequest("来源任务与计费订单归属不一致")
+		}
+		if order.Status == model.BillingStatusReserved || order.Status == model.BillingStatusRunning || order.Status == model.BillingStatusUncertain {
+			if source.ProviderRequestID != "" && (strings.HasPrefix(source.Type, "canvas_video") || strings.HasPrefix(source.Type, "video_")) {
+				return nil, BadAuthRequest("原视频任务已有上游任务，请先使用“手动查询任务”；无法恢复时再联系管理员核对")
+			}
+			if !req.ConfirmNewProviderRequest {
+				return nil, BadAuthRequest("原任务费用尚待核对；请在确认可能重复计费后再创建新的供应商请求")
+			}
+		}
+	}
+	return source, nil
 }
 
 // 所有任务输入先收敛为 JSON 对象，确保计费与密钥保护不会因 Go 结构体类型不同而被绕过。
@@ -340,6 +574,38 @@ func normalizeTaskInput(input map[string]any) (map[string]any, error) {
 		normalized["canvasSnapshot"] = compactPersistedValue(snapshot)
 	}
 	return normalized, nil
+}
+
+// 画布任务键由服务端从业务身份计算，不能依赖容易被漏传或改写的浏览器运行状态。
+func generationTaskRequestKey(taskType string, sessionID string, projectID string, operation string, input map[string]any) (string, error) {
+	if taskType == "agent_storyboard" {
+		sessionID = strings.TrimSpace(sessionID)
+		if sessionID == "" {
+			return "", BadAuthRequest("影视分镜任务缺少会话 ID")
+		}
+		identity := strings.Join([]string{taskType, sessionID, strings.TrimSpace(operation)}, "\x00")
+		digest := sha256.Sum256([]byte(identity))
+		return hex.EncodeToString(digest[:]), nil
+	}
+	if !strings.HasPrefix(taskType, "canvas_") && taskType != "agent_storyboard_rows" {
+		return "", nil
+	}
+	projectID = strings.TrimSpace(projectID)
+	if projectID == "" {
+		return "", BadAuthRequest("画布生成任务缺少画布 ID")
+	}
+	metadata, ok := input["metadata"].(map[string]any)
+	if !ok {
+		return "", BadAuthRequest("画布生成任务缺少节点身份")
+	}
+	nodeID, _ := metadata["nodeId"].(string)
+	nodeID = strings.TrimSpace(nodeID)
+	if nodeID == "" {
+		return "", BadAuthRequest("画布生成任务缺少节点 ID")
+	}
+	identity := strings.Join([]string{taskType, projectID, strings.TrimSpace(operation), nodeID}, "\x00")
+	digest := sha256.Sum256([]byte(identity))
+	return hex.EncodeToString(digest[:]), nil
 }
 
 func compactPersistedValue(value interface{}) interface{} {
@@ -386,19 +652,146 @@ func (s *Service) Task(userID string, id string) (*model.Task, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.hydrateTaskProviderRequestID(task)
 	return taskForOutput(*task), nil
 }
 
-func (s *Service) RetryTask(userID string, id string) (*model.Task, error) {
+func (s *Service) TaskWithBilling(userID string, id string) (*TaskDetail, error) {
+	task, err := s.Task(userID, id)
+	if err != nil {
+		return nil, err
+	}
+	detail := &TaskDetail{Task: *task}
+	if task.BillingOrderID == "" {
+		return detail, nil
+	}
+	order, err := s.repo.BillingOrder(task.BillingOrderID)
+	if err != nil {
+		return nil, err
+	}
+	if order.UserID != userID || order.TaskID != task.ID {
+		return nil, BadAuthRequest("任务与计费订单归属不一致")
+	}
+	detail.Billing = &TaskBillingSummary{AmountMicrocredits: order.AmountMicrocredits, Status: order.Status}
+	return detail, nil
+}
+
+func (s *Service) hydrateTaskProviderRequestID(task *model.Task) {
+	if task == nil || task.ProviderRequestID != "" {
+		return
+	}
+	if task.BillingOrderID != "" {
+		if order, err := s.repo.BillingOrder(task.BillingOrderID); err == nil {
+			task.ProviderRequestID = strings.TrimSpace(order.ProviderRequestID)
+		}
+	}
+	if task.ProviderRequestID == "" {
+		if providerRequestID, err := s.repo.LatestProviderRequestIDForTaskAttempt(task.ID, task.BillingOrderID, task.StartedAt); err == nil {
+			task.ProviderRequestID = providerRequestID
+		}
+	}
+}
+
+// Worker 恢复任务时必须在任何上游调用前严格找回当前尝试的任务 ID，避免数据库短暂失败后重复创建计费任务。
+func (s *Service) hydrateClaimedTaskProviderRequestID(task *model.Task) error {
+	if task == nil || task.ID == "" || task.ProviderRequestID != "" {
+		return nil
+	}
+	if task.BillingOrderID != "" {
+		order, err := s.repo.BillingOrder(task.BillingOrderID)
+		if err != nil {
+			return fmt.Errorf("读取任务计费订单中的上游任务 ID 失败：%w", err)
+		}
+		if order.TaskID != task.ID || order.UserID != task.UserID {
+			return errors.New("任务与计费订单归属不一致")
+		}
+		task.ProviderRequestID = strings.TrimSpace(order.ProviderRequestID)
+	}
+	if task.ProviderRequestID == "" {
+		providerRequestID, err := s.repo.LatestProviderRequestIDForTaskAttempt(task.ID, task.BillingOrderID, task.StartedAt)
+		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("读取当前任务尝试的上游任务 ID 失败：%w", err)
+		}
+		task.ProviderRequestID = providerRequestID
+	}
+	if task.ProviderRequestID == "" {
+		return nil
+	}
+	if err := s.repo.UpdateClaimedTaskProviderState(task.ID, task.LeaseOwner, task.ProviderRequestID, task.PollStage, task.NextPollAt); err != nil {
+		return fmt.Errorf("保存恢复的上游任务 ID 失败：%w", err)
+	}
+	return nil
+}
+
+// 上游请求日志会在任务执行期间更新 provider 状态，终态保存前必须重新合并，避免旧任务对象覆盖可恢复 ID。
+func (s *Service) refreshTaskProviderState(task *model.Task) error {
+	if task == nil || task.ID == "" {
+		return errors.New("任务状态无效")
+	}
+	latest, err := s.repo.Task(task.ID)
+	if err != nil {
+		return fmt.Errorf("刷新任务上游状态失败：%w", err)
+	}
+	if latest.ProviderRequestID != "" {
+		task.ProviderRequestID = latest.ProviderRequestID
+	}
+	task.ProviderCallState = latest.ProviderCallState
+	task.PollStage = latest.PollStage
+	task.NextPollAt = latest.NextPollAt
+	return nil
+}
+
+func (s *Service) RetryTask(userID string, id string, confirmNewProviderRequest bool) (*model.Task, error) {
 	task, err := s.repo.TaskForUser(userID, id)
 	if err != nil {
 		return nil, err
 	}
+	if task.Type == channelProbeTaskType {
+		return nil, BadAuthRequest("请从渠道设置重新发起测活，不要重试旧探针")
+	}
 	if task.Status != model.TaskStatusFailed && task.Status != model.TaskStatusCancelled {
-		return nil, errors.New("only failed or cancelled tasks can be retried")
+		return nil, BadAuthRequest("只有失败或已取消的任务才能重新生成")
+	}
+	if taskHasDeliveryCheckpoint(*task) {
+		return nil, BadAuthRequest("该任务已有可恢复的本地结果检查点，请先恢复已保存结果；本次没有创建新的供应商请求")
 	}
 	if isContentModerationFailure(task.Error) {
 		return nil, BadAuthRequest(contentModerationRetryMessage)
+	}
+	s.hydrateTaskProviderRequestID(task)
+	// 不能只看当前任务是否绑定平台订单：自定义渠道可能没有订单，但成功调用日志仍证明原请求已经发出。
+	hasSuccessfulCall, err := s.repo.TaskHasSuccessfulBillableCall(task.ID)
+	if err != nil {
+		return nil, err
+	}
+	if hasSuccessfulCall {
+		return nil, BadAuthRequest("原任务已有成功的供应商调用记录（即使没有平台计费订单也可能已经产生费用），请先恢复结果或核对供应商账单；本次未创建新的供应商请求")
+	}
+	billingReviewRisk := taskErrorRequiresBillingReview(task.Error)
+	if billingReviewRisk && !confirmNewProviderRequest {
+		return nil, BadAuthRequest("原任务的错误说明表示请求状态或费用尚未核对；如果你已确认供应商不会再执行，请点击重试并明确确认可能重复计费，本次未创建新的供应商请求")
+	}
+	if task.BillingOrderID != "" {
+		order, err := s.repo.BillingOrder(task.BillingOrderID)
+		if err != nil {
+			return nil, err
+		}
+		if order.UserID != task.UserID || order.TaskID != task.ID {
+			return nil, BadAuthRequest("任务与计费订单归属不一致")
+		}
+		if order.Status == model.BillingStatusReserved || order.Status == model.BillingStatusRunning || order.Status == model.BillingStatusUncertain {
+			if task.ProviderRequestID != "" && (strings.HasPrefix(task.Type, "canvas_video") || strings.HasPrefix(task.Type, "video_")) {
+				return nil, BadAuthRequest("该任务已有上游任务且上一笔计费尚未结清，请先使用“手动查询任务”；仍无法恢复时请联系管理员核对")
+			}
+			if !confirmNewProviderRequest {
+				return nil, BadAuthRequest("该任务上一笔计费尚未结清；点击重试并明确确认可能重复计费即可创建新的尝试，本次未创建新的供应商请求")
+			}
+			billingReviewRisk = true
+		}
+	}
+	// 每次重试都会创建新的供应商请求；确认必须由调用方显式提交，不能依赖可绕过的页面提示。
+	if !confirmNewProviderRequest {
+		return nil, BadAuthRequest("重试将创建新的供应商请求；部分任务可能包含一次已授权的结构修复并产生额外费用，请先核对原任务和供应商账单，再明确确认重新生成")
 	}
 	decryptedInput, err := s.decryptTaskInputJSON(task.InputJSON)
 	if err != nil {
@@ -406,6 +799,9 @@ func (s *Service) RetryTask(userID string, id string) (*model.Task, error) {
 	}
 	var billingInput map[string]any
 	if err := json.Unmarshal([]byte(decryptedInput), &billingInput); err != nil {
+		return nil, err
+	}
+	if err := validateLongTextTaskConfig(task.Type, billingInput); err != nil {
 		return nil, err
 	}
 	billingOrder, err := s.taskBillingOrder(userID, task, billingInput)
@@ -419,7 +815,25 @@ func (s *Service) RetryTask(userID string, id string) (*model.Task, error) {
 	if err := s.ensureTaskProjectActive(userID, task.ProjectID); err != nil {
 		return nil, err
 	}
-	task, err = s.repo.RetryTaskWithBilling(userID, task.ID, billingOrder, policy.Task.ActiveTaskLimit)
+	retryLog := &model.TaskLog{
+		ID:      newID(),
+		UserID:  userID,
+		TaskID:  task.ID,
+		Level:   "info",
+		Message: "任务已重新入队",
+		Payload: func() string {
+			if billingReviewRisk {
+				return "用户已确认原任务费用可能仍待核对，并明确同意创建新的生成尝试；旧订单保留给管理员核账，不自动退款或结算"
+			}
+			return "用户已确认新的生成尝试及其可能包含的已授权结构修复会产生供应商费用"
+		}(),
+	}
+	// 走到这里代表用户已经显式确认；允许旧订单保持 uncertain/reserved，
+	// 但新尝试必须单独预留新订单，不能把旧订单的费用状态悄悄改掉。
+	task, err = s.repo.RetryTaskWithBillingConfirmed(userID, task.ID, billingOrder, policy.Task.ActiveTaskLimit, retryLog)
+	if errors.Is(err, repository.ErrDuplicateActiveTask) {
+		return nil, BadAuthRequest("同一画布节点与生成操作已有排队或运行中的任务，请继续跟踪原任务")
+	}
 	if errors.Is(err, repository.ErrInsufficientCredits) {
 		return nil, BadAuthRequest("积分不足，请先使用兑换码充值")
 	}
@@ -429,17 +843,18 @@ func (s *Service) RetryTask(userID string, id string) (*model.Task, error) {
 	if errors.Is(err, repository.ErrTaskNotRetryable) {
 		return nil, BadAuthRequest("任务已被其他请求重新入队，请勿重复重试")
 	}
+	if errors.Is(err, repository.ErrTaskSessionUnavailable) {
+		return nil, BadAuthRequest("任务关联的 Agent 会话不存在或已被删除，无法安全重试")
+	}
+	if errors.Is(err, repository.ErrTaskBillingPending) {
+		return nil, BadAuthRequest("该任务上一笔计费尚未结清，请先查询上游任务或联系管理员核对")
+	}
+	if errors.Is(err, repository.ErrTaskProviderRecoveryConflict) {
+		return nil, &AuthError{Status: 409, Message: "该任务正在查询上游状态，请等待查询完成后再重试"}
+	}
 	if err != nil {
 		return nil, err
 	}
-	if task.SessionID != "" {
-		if session, err := s.repo.SessionForUser(task.UserID, task.SessionID); err == nil {
-			session.Status = model.SessionStatusActive
-			session.CanvasOpsJSON = ""
-			_ = s.repo.Save(session)
-		}
-	}
-	_ = s.log(userID, task.ID, "info", "任务已重新入队", "")
 	return taskForOutput(*task), nil
 }
 
@@ -449,18 +864,17 @@ func (s *Service) CancelTask(userID string, id string) (*model.Task, error) {
 		return nil, err
 	}
 	if task.Status == model.TaskStatusSucceeded {
-		return nil, errors.New("completed task cannot be cancelled")
+		return nil, BadAuthRequest("已完成任务不能取消")
 	}
 	now := time.Now()
+	cancelNote := ""
 	if task.Status == model.TaskStatusQueued {
 		cancelled, err := s.repo.CancelTaskIfStatus(userID, task.ID, model.TaskStatusQueued, now)
 		if err != nil {
 			return nil, err
 		}
 		if cancelled {
-			if err := s.RefundBilling(task.BillingOrderID, "任务在调用上游前取消"); err != nil {
-				return nil, err
-			}
+			cancelNote = s.refundCancelledTaskBeforeProvider(*task)
 			task, err = s.repo.TaskForUser(userID, id)
 			if err != nil {
 				return nil, err
@@ -473,42 +887,96 @@ func (s *Service) CancelTask(userID string, id string) (*model.Task, error) {
 		}
 	}
 	if task.Status == model.TaskStatusRunning {
-		s.cancelActiveTask(task.ID)
-		cancelled, err := s.repo.CancelTaskIfStatus(userID, task.ID, model.TaskStatusRunning, now)
+		// preflight 与真正发送请求争抢同一任务行：取消先赢才能安全退款，发送检查点先赢则必须按费用待核对处理。
+		cancelledBeforeDispatch, err := s.repo.CancelTaskIfStatusAndProviderStates(
+			userID, task.ID, model.TaskStatusRunning,
+			[]model.TaskProviderCallState{model.TaskProviderCallPending, model.TaskProviderCallPreflight}, now,
+		)
 		if err != nil {
 			return nil, err
 		}
-		if !cancelled {
+		if cancelledBeforeDispatch {
+			s.cancelActiveTask(task.ID)
+			cancelNote = s.refundCancelledTaskBeforeProvider(*task)
+			task, err = s.repo.TaskForUser(userID, id)
+			if err != nil {
+				return nil, err
+			}
+		} else {
+			s.cancelActiveTask(task.ID)
+			cancelled, cancelErr := s.repo.CancelTaskIfStatus(userID, task.ID, model.TaskStatusRunning, now)
+			if cancelErr != nil {
+				return nil, cancelErr
+			}
 			latest, latestErr := s.repo.TaskForUser(userID, id)
 			if latestErr != nil {
 				return nil, latestErr
 			}
 			if latest.Status == model.TaskStatusSucceeded {
-				return nil, errors.New("completed task cannot be cancelled")
+				return nil, BadAuthRequest("任务已经完成，不能取消")
 			}
 			task = latest
-		} else {
-			if err := s.MarkBillingUncertain(task.BillingOrderID, "运行中的上游请求被用户取消，费用状态待核对"); err != nil {
-				return nil, err
-			}
-			task, err = s.repo.TaskForUser(userID, id)
-			if err != nil {
-				return nil, err
+			if cancelled || task.Status == model.TaskStatusCancelled {
+				if providerDispatchDefinitelyNotStarted(task.ProviderCallState) {
+					cancelNote = s.refundCancelledTaskBeforeProvider(*task)
+				} else {
+					cancelNote = providerRequestCancellationRiskMessage
+					if err := s.MarkBillingUncertain(task.BillingOrderID, "运行中的上游请求被用户取消，费用状态待核对"); err != nil {
+						cancelNote = "任务已取消；上游供应商可能仍在执行并产生费用，且计费状态更新失败，需管理员核对，请勿立即重试。"
+						s.logTaskInternalErrorBestEffort(userID, task.ID, "任务已取消但计费状态更新失败", err)
+					}
+				}
+				task, err = s.repo.TaskForUser(userID, id)
+				if err != nil {
+					return nil, err
+				}
 			}
 		}
 	}
 	if task.Status != model.TaskStatusCancelled {
-		return nil, errors.New("task cannot be cancelled in its current state")
+		return nil, BadAuthRequest("当前任务状态不能取消")
+	}
+	if cancelNote != "" {
+		// 即使风险说明落库失败，本次响应也必须把真实取消边界告诉用户。
+		task.Error = cancelNote
+		if err := s.repo.UpdateCancelledTaskError(userID, task.ID, cancelNote); err != nil {
+			// 取消已经生效，不能把附加说明写入失败伪装成“取消失败”并诱导用户重复操作。
+			s.logTaskInternalErrorBestEffort(userID, task.ID, "任务已取消但风险说明保存失败", err)
+		} else if latest, err := s.repo.TaskForUser(userID, id); err == nil {
+			task = latest
+		}
 	}
 	if task.SessionID != "" {
-		_ = s.markSessionFailed(*task, "会话任务已取消。")
+		if err := s.markSessionFailed(*task, defaultString(cancelNote, "会话任务已取消。")); err != nil {
+			s.logTaskInternalErrorBestEffort(userID, task.ID, "任务已取消但 Agent 会话终态保存失败", err)
+		}
 	}
-	_ = s.log(userID, task.ID, "warn", "任务已取消", "")
+	s.logTaskEventBestEffort(userID, task.ID, "warn", "任务已取消", cancelNote)
 	return taskForOutput(*task), nil
 }
 
+func (s *Service) refundCancelledTaskBeforeProvider(task model.Task) string {
+	if err := s.RefundBillingFromExecution(task.BillingOrderID, "任务在供应商请求发出前取消"); err != nil {
+		s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "任务已取消但积分退回失败", err)
+		return "任务已取消；本次没有发出供应商请求，但冻结积分退回失败，需管理员核对。"
+	}
+	return taskCancellationMessageWithBillingOutcome(true, task.BillingOrderID, false) + "。"
+}
+
 func (s *Service) TaskLogs(userID string, id string) ([]model.TaskLog, error) {
-	return s.repo.TaskLogs(userID, id)
+	task, err := s.repo.TaskForUser(userID, id)
+	if err != nil {
+		return nil, err
+	}
+	logs, err := s.repo.TaskLogs(userID, id)
+	if err != nil || !isSystemChannelProbeTask(*task) {
+		return logs, err
+	}
+	for index := range logs {
+		logs[index].Message = redactSystemChannelProbeText(logs[index].Message)
+		logs[index].Payload = redactSystemChannelProbeText(logs[index].Payload)
+	}
+	return logs, nil
 }
 
 func taskSummariesForOutput(tasks []model.Task) []TaskSummary {
@@ -521,6 +989,9 @@ func taskSummariesForOutputWithBilling(tasks []model.Task, orders map[string]mod
 		summary := taskSummaryForOutput(task)
 		if order, ok := orders[task.ID]; ok {
 			summary.Billing = &TaskBillingSummary{AmountMicrocredits: order.AmountMicrocredits, Status: order.Status}
+			if summary.ProviderRequestID == "" {
+				summary.ProviderRequestID = order.ProviderRequestID
+			}
 		}
 		result = append(result, summary)
 	}
@@ -544,31 +1015,39 @@ func taskBillingTaskIDs(tasks []model.Task) []string {
 }
 
 func taskSummaryForOutput(task model.Task) TaskSummary {
+	if task.Type == channelProbeTaskType {
+		// 列表无需展示任何渠道的探针正文摘要；自定义渠道可在专用测活详情中查看。
+		task.Error = redactSystemChannelProbeText(task.Error)
+	}
 	errorCode := ""
 	if isContentModerationFailure(task.Error) {
 		errorCode = contentModerationErrorCode
 	}
 	previewURL, previewKind := taskMediaPreview(task.ResultJSON, task.Type)
 	return TaskSummary{
-		ID:          task.ID,
-		SessionID:   task.SessionID,
-		ProjectID:   task.ProjectID,
-		Type:        task.Type,
-		Status:      task.Status,
-		Stage:       task.Stage,
-		Progress:    task.Progress,
-		Prompt:      truncateRunes(task.Prompt, 500),
-		Operation:   task.Operation,
-		Provider:    task.Provider,
-		Model:       task.Model,
-		ErrorCode:   errorCode,
-		PreviewURL:  previewURL,
-		PreviewKind: previewKind,
-		Attempts:    task.Attempts,
-		StartedAt:   task.StartedAt,
-		CompletedAt: task.CompletedAt,
-		CreatedAt:   task.CreatedAt,
-		UpdatedAt:   task.UpdatedAt,
+		ID:                  task.ID,
+		SessionID:           task.SessionID,
+		ProjectID:           task.ProjectID,
+		Type:                task.Type,
+		Status:              task.Status,
+		Stage:               task.Stage,
+		Progress:            task.Progress,
+		Prompt:              truncateRunes(task.Prompt, 500),
+		Operation:           task.Operation,
+		Provider:            task.Provider,
+		Model:               task.Model,
+		ProviderRequestID:   task.ProviderRequestID,
+		Error:               truncateRunes(task.Error, 500),
+		ErrorCode:           errorCode,
+		PreviewURL:          previewURL,
+		PreviewKind:         previewKind,
+		DeliveryRecoverable: taskDeliveryRecoverableForOutput(task),
+		Attempts:            task.Attempts,
+		NextPollAt:          task.NextPollAt,
+		StartedAt:           task.StartedAt,
+		CompletedAt:         task.CompletedAt,
+		CreatedAt:           task.CreatedAt,
+		UpdatedAt:           task.UpdatedAt,
 	}
 }
 
@@ -638,9 +1117,21 @@ func truncateRunes(value string, limit int) string {
 }
 
 func taskForOutput(task model.Task) *model.Task {
+	task.DeliveryRecoverable = taskDeliveryRecoverableForOutput(task)
+	redactSystemChannelProbeOutput(&task)
 	task.InputJSON = publicTaskInputJSON(task.InputJSON)
 	return &task
 }
+
+func taskHasDeliveryCheckpoint(task model.Task) bool {
+	return strings.TrimSpace(task.ResultJSON) != "" && strings.TrimSpace(task.DeliveryOpsJSON) != ""
+}
+
+func taskDeliveryRecoverableForOutput(task model.Task) bool {
+	return taskHasDeliveryCheckpoint(task) && (task.Status == model.TaskStatusFailed || task.Status == model.TaskStatusCancelled)
+}
+
+var publicTaskSizePattern = regexp.MustCompile(`(?i)^(auto|[0-9]{1,5}(?:\.[0-9]{1,3})?[x:][0-9]{1,5}(?:\.[0-9]{1,3})?(?:-[a-z0-9]{1,12})?)$`)
 
 func publicTaskInputJSON(raw string) string {
 	if strings.TrimSpace(raw) == "" {
@@ -655,6 +1146,18 @@ func publicTaskInputJSON(raw string) string {
 	for _, key := range []string{"mode", "metadata", "workflowStepId", "domainProjectId", "assetVersionId", "resourceId", "mediaType", "role"} {
 		if value, ok := input[key]; ok {
 			public[key] = value
+		}
+	}
+	if allowRepair, ok := input["allowPaidStructureRepair"].(bool); ok {
+		public["allowPaidStructureRepair"] = allowRepair
+	}
+	// 历史图片任务只需尺寸恢复节点比例；其余渠道配置可能含密钥、地址或提示词，禁止随任务详情返回。
+	if config, ok := input["config"].(map[string]any); ok {
+		if size, ok := config["size"].(string); ok {
+			size = strings.TrimSpace(size)
+			if publicTaskSizePattern.MatchString(size) {
+				public["config"] = map[string]any{"size": size}
+			}
 		}
 	}
 	if len(public) == 0 {
@@ -727,22 +1230,35 @@ func (s *Service) StoreUpload(userID string, sessionID string, header *multipart
 	return &item, nil
 }
 
-func (s *Service) ProcessNextTask() error {
-	task, err := s.repo.ClaimNextTask(s.workerID, 45*time.Second)
-	if err != nil || task == nil {
+func (s *Service) processClaimedTask(task *model.Task) error {
+	claimOwner := task.LeaseOwner
+	if strings.TrimSpace(claimOwner) == "" {
+		return repository.ErrTaskStateConflict
+	}
+	if err := s.hydrateClaimedTaskProviderRequestID(task); err != nil {
 		return err
 	}
-	return s.processClaimedTask(task)
-}
-
-func (s *Service) processClaimedTask(task *model.Task) error {
-	_ = s.log(task.UserID, task.ID, "info", "后端任务开始处理", "")
+	canContinue, recoveredOrder, err := s.recoveredTaskCanContinue(task)
+	if err != nil {
+		return err
+	}
+	if !canContinue {
+		return s.stopRecoveredTaskReplay(task, claimOwner, recoveredOrder)
+	}
 	policy, err := s.RuntimePolicy()
 	if err != nil {
 		return err
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), taskExecutionTimeoutWithPolicy(task.Type, policy.Task))
+	executionTimeout := taskExecutionTimeoutWithPolicy(task.Type, policy.Task)
+	executionDeadline := time.Now().Add(executionTimeout)
+	if task.StartedAt != nil && !task.StartedAt.IsZero() {
+		executionDeadline = task.StartedAt.Add(executionTimeout)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), executionDeadline)
 	defer cancel()
+	if ctx.Err() != nil && recoveredOrder != nil && recoveredOrder.Status == model.BillingStatusReserved {
+		return s.failClaimedTaskBeforeProvider(task, claimOwner, "任务在恢复时已经超过执行时限，本次没有发出供应商请求；系统已停止任务并退回预留积分。")
+	}
 	leaseDone := make(chan struct{})
 	leaseLost := make(chan error, 1)
 	go func() {
@@ -751,7 +1267,7 @@ func (s *Service) processClaimedTask(task *model.Task) error {
 		for {
 			select {
 			case <-ticker.C:
-				if err := s.repo.RenewTaskLease(task.ID, s.workerID, 45*time.Second); err != nil {
+				if err := s.repo.RenewTaskLease(task.ID, claimOwner, 45*time.Second); err != nil {
 					leaseLost <- err
 					cancel()
 					return
@@ -765,22 +1281,73 @@ func (s *Service) processClaimedTask(task *model.Task) error {
 	s.registerActiveTask(task.ID, cancel)
 	defer s.unregisterActiveTask(task.ID)
 
-	task.Stage = "调用生成模型"
-	task.Progress = 35
-	_ = s.repo.UpdateTaskProgress(task.ID, task.Stage, task.Progress)
+	if err := s.prepareClaimedTaskProviderCall(task, "调用生成模型", 35, "info", "供应商调用前检查已通过", "当前 Worker 租约、任务状态和调用阶段已原子确认；下一步进入计费运行边界"); err != nil {
+		return err
+	}
 	if err := s.MarkBillingRunning(task.BillingOrderID); err != nil {
 		task.Status = model.TaskStatusFailed
 		task.Stage = "计费准备失败"
-		task.Error = taskFailureMessage(err)
+		task.Error = "计费准备失败，本次未调用供应商；预留积分将退回，如未恢复请联系管理员按任务与订单核对"
+		task.PollStage = "failed"
+		task.NextPollAt = nil
+		task.LeaseOwner = ""
+		task.LeaseExpiresAt = nil
 		task.CompletedAt = ptr(time.Now())
-		_ = s.repo.Save(task)
-		_ = s.RefundBilling(task.BillingOrderID, "计费准备失败，上游请求未发出")
-		return err
+		terminalErr := s.repo.SaveClaimedTaskTerminal(task, model.TaskStatusRunning, claimOwner)
+		refundErr := s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, "退回计费准备阶段的预留积分", s.RefundBillingFromExecution(task.BillingOrderID, "计费准备失败，上游请求未发出"))
+		if terminalErr != nil {
+			if errors.Is(terminalErr, repository.ErrTaskStateConflict) {
+				if latest, latestErr := s.repo.Task(task.ID); latestErr == nil && latest.Status == model.TaskStatusCancelled {
+					return refundErr
+				}
+			}
+			return errors.Join(err, terminalErr, refundErr)
+		}
+		return errors.Join(err, refundErr)
 	}
+	previousPollStage := task.PollStage
 	result, canvasOps, err := s.processTask(ctx, *task)
+	if stateErr := s.refreshTaskProviderState(task); stateErr != nil {
+		return stateErr
+	}
+	if err != nil && task.ProviderRequestID != "" && (strings.HasPrefix(task.Type, "canvas_video") || strings.HasPrefix(task.Type, "video_")) {
+		if deferred := deferTransientProviderPoll(ctx, previousPollStage, err); deferred != nil {
+			if !errors.Is(deferred, context.DeadlineExceeded) {
+				s.logTaskEventBestEffort(task.UserID, task.ID, "warn", "上游任务查询暂时失败，已安排安全重试", taskFailureMessage(err))
+			}
+			err = deferred
+		}
+	}
+	var deferredPoll *providerPollDeferredError
+	if errors.As(err, &deferredPoll) {
+		select {
+		case leaseErr := <-leaseLost:
+			s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "任务租约失效，等待其他 Worker 恢复", leaseErr)
+			return leaseErr
+		default:
+		}
+		stage := "等待上游生成"
+		if deferredPoll.ProviderStatus != "" {
+			stage += " · " + deferredPoll.ProviderStatus
+		}
+		if err := s.repo.DeferTaskProviderPoll(task.ID, claimOwner, stage, deferredPoll.PollStage, deferredPoll.NextPollAt); err != nil {
+			if latest, latestErr := s.repo.Task(task.ID); latestErr == nil && latest.Status == model.TaskStatusCancelled {
+				return nil
+			}
+			return err
+		}
+		task.Stage = stage
+		task.Progress = 55
+		task.PollStage = deferredPoll.PollStage
+		task.NextPollAt = &deferredPoll.NextPollAt
+		task.LeaseOwner = ""
+		task.LeaseExpiresAt = nil
+		s.logTaskEventBestEffort(task.UserID, task.ID, "info", "已释放 Worker，等待下次上游查询", deferredPoll.NextPollAt.Format(time.RFC3339))
+		return nil
+	}
 	providerSucceeded := err == nil
 	if err == nil {
-		result, err = s.persistGeneratedMediaResult(task.UserID, result)
+		result, err = s.persistTaskGeneratedMediaResult(*task, result)
 	}
 	if err == nil {
 		_, err = s.finalizeCharacterTurnaroundTask(*task, result)
@@ -790,42 +1357,125 @@ func (s *Service) processClaimedTask(task *model.Task) error {
 		if code, _ := ChannelSlotFailureDetails(err); code != "" {
 			channelSlotFailedBeforeRequest = true
 		}
+		providerRequestFailedBeforeSend := providerRequestDefinitelyNotSent(err)
+		failedBeforeProviderRequest := channelSlotFailedBeforeRequest || providerRequestFailedBeforeSend
+		billingReviewRequired := providerSucceeded || s.BillingFailureRequiresReview(task.BillingOrderID, task.ID, err)
 		select {
 		case leaseErr := <-leaseLost:
-			_ = s.log(task.UserID, task.ID, "warn", "任务租约失效，等待其他 worker 恢复", leaseErr.Error())
+			s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "任务租约失效，等待其他 Worker 恢复", leaseErr)
 			return leaseErr
 		default:
+		}
+		deliveryCheckpointed := false
+		if providerSucceeded && result != nil {
+			deliveryCheckpointed = s.checkpointProviderResultAfterLocalFailure(task, result, canvasOps)
 		}
 		if errors.Is(err, context.Canceled) {
 			task.Status = model.TaskStatusCancelled
 			task.Stage = "任务已取消"
-			task.Error = "任务已取消"
-			task.CompletedAt = ptr(time.Now())
-			_ = s.repo.Save(task)
-			if channelSlotFailedBeforeRequest {
-				_ = s.RefundBilling(task.BillingOrderID, "等待渠道槽位期间取消，上游请求未发出")
-			} else {
-				_ = s.MarkBillingUncertain(task.BillingOrderID, "任务取消时上游费用状态不明确")
+			task.Error = taskCancellationMessageWithBillingOutcome(failedBeforeProviderRequest, task.BillingOrderID, billingReviewRequired)
+			if billingReviewRequired {
+				task.Stage = "任务已取消，费用待核对"
 			}
-			_ = s.markSessionFailed(*task, "会话任务已取消。")
-			_ = s.log(task.UserID, task.ID, "warn", "任务已取消", "")
-			return nil
+			if providerSucceeded {
+				task.Stage = "任务已取消，结果未交付"
+				task.Error = providerResultCancellationMessage
+			}
+			if deliveryCheckpointed {
+				task.Stage = "任务已取消，结果待恢复"
+				task.Error = providerResultDeliveryFailureMessage
+			}
+			task.PollStage = "cancelled"
+			task.NextPollAt = nil
+			task.LeaseOwner = ""
+			task.LeaseExpiresAt = nil
+			task.CompletedAt = ptr(time.Now())
+			if saveErr := s.repo.SaveClaimedTaskTerminal(task, model.TaskStatusRunning, claimOwner); saveErr != nil {
+				if errors.Is(saveErr, repository.ErrTaskStateConflict) {
+					if latest, latestErr := s.repo.Task(task.ID); latestErr == nil && latest.Status == model.TaskStatusCancelled {
+						return nil
+					}
+				}
+				billingErr := s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, "标记取消终态保存失败的费用待核对", s.MarkBillingUncertain(task.BillingOrderID, "任务取消时终态保存失败，费用状态待核对；底层诊断仅记录于 Backend 日志"))
+				return errors.Join(saveErr, billingErr)
+			}
+			var billingErr error
+			if failedBeforeProviderRequest && !billingReviewRequired {
+				refundReason := "供应商请求发出前任务已取消，上游请求未发出"
+				if channelSlotFailedBeforeRequest {
+					refundReason = "等待渠道槽位期间取消，上游请求未发出"
+				}
+				billingErr = s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, "退回调用前取消的预留积分", s.RefundBillingFromExecution(task.BillingOrderID, refundReason))
+			} else {
+				billingErr = s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, "标记取消任务的费用待核对", s.MarkBillingUncertain(task.BillingOrderID, task.Error))
+			}
+			if billingErr != nil {
+				if failedBeforeProviderRequest && !billingReviewRequired {
+					task.Error = "任务已在供应商请求发出前取消，本次没有调用供应商；但预留积分退回失败，需管理员按任务与订单核对"
+				} else {
+					task.Error = "任务已取消；供应商可能仍在执行并产生费用，且计费待核对状态更新失败，需管理员按任务与订单核对，请勿立即重试"
+				}
+				if updateErr := s.repo.UpdateCancelledTaskError(task.UserID, task.ID, task.Error); updateErr != nil {
+					s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "取消任务的计费失败说明保存失败", updateErr)
+					billingErr = errors.Join(billingErr, updateErr)
+				}
+				if task.SessionID != "" {
+					if sessionErr := s.markSessionFailed(*task, task.Error); sessionErr != nil {
+						s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "取消任务的 Agent 会话计费说明保存失败", sessionErr)
+						billingErr = errors.Join(billingErr, sessionErr)
+					}
+				}
+			}
+			s.logTaskEventBestEffort(task.UserID, task.ID, "warn", "任务已取消", task.Error)
+			return billingErr
 		}
 		if errors.Is(err, context.DeadlineExceeded) {
-			err = errors.New(taskTimeoutMessage(task.Type))
+			if channelSlotFailedBeforeRequest {
+				err = publicTaskError{message: taskChannelSlotTimeoutMessage(err), cause: err}
+			} else if !providerRequestFailedBeforeSend {
+				err = errors.New(taskTimeoutMessage(task.Type, task.ProviderRequestID != ""))
+			}
 		}
 		task.Status = model.TaskStatusFailed
 		task.Stage = "任务失败"
-		task.Error = taskFailureMessage(err)
-		task.CompletedAt = ptr(time.Now())
-		_ = s.repo.Save(task)
-		if providerSucceeded || (!channelSlotFailedBeforeRequest && s.BillingFailureRequiresReview(task.BillingOrderID, task.ID, err)) {
-			_ = s.MarkBillingUncertain(task.BillingOrderID, task.Error)
+		if providerSucceeded {
+			task.Error = providerResultPersistenceFailureMessage
+			if deliveryCheckpointed {
+				task.Stage = "任务交付失败"
+				task.Error = providerResultDeliveryFailureMessage
+			}
 		} else {
-			_ = s.RefundBilling(task.BillingOrderID, task.Error)
+			task.Error = taskFailureMessageWithBillingOutcome(err, failedBeforeProviderRequest, task.BillingOrderID, billingReviewRequired)
 		}
-		_ = s.markSessionFailed(*task, task.Error)
-		_ = s.log(task.UserID, task.ID, "error", "任务处理失败", task.Error)
+		task.PollStage = "failed"
+		task.NextPollAt = nil
+		task.LeaseOwner = ""
+		task.LeaseExpiresAt = nil
+		task.CompletedAt = ptr(time.Now())
+		if saveErr := s.repo.SaveClaimedTaskTerminal(task, model.TaskStatusRunning, claimOwner); saveErr != nil {
+			if errors.Is(saveErr, repository.ErrTaskStateConflict) {
+				if latest, latestErr := s.repo.Task(task.ID); latestErr == nil && latest.Status == model.TaskStatusCancelled {
+					return nil
+				}
+			}
+			billingErr := s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, "标记失败终态保存异常的费用待核对", s.MarkBillingUncertain(task.BillingOrderID, "任务失败时终态保存失败，费用状态待核对；底层诊断仅记录于 Backend 日志"))
+			return errors.Join(err, saveErr, billingErr)
+		}
+		billingAction := "标记费用待核对"
+		var billingErr error
+		if billingReviewRequired {
+			billingErr = s.MarkBillingUncertain(task.BillingOrderID, task.Error)
+		} else {
+			billingAction = "退回预留积分"
+			billingErr = s.RefundBillingFromExecution(task.BillingOrderID, task.Error)
+		}
+		billingErr = s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, billingAction, billingErr)
+		err = errors.Join(err, billingErr)
+		failureTitle := "任务处理失败"
+		if deliveryCheckpointed {
+			failureTitle = "任务结果已保存，但本地交付失败"
+		}
+		s.logTaskEventBestEffort(task.UserID, task.ID, "error", failureTitle, task.Error)
 		return err
 	}
 	latest, err := s.repo.Task(task.ID)
@@ -833,50 +1483,105 @@ func (s *Service) processClaimedTask(task *model.Task) error {
 		return err
 	}
 	if latest.Status == model.TaskStatusCancelled {
-		_ = s.MarkBillingUncertain(task.BillingOrderID, "上游已返回结果，但任务被取消")
-		_ = s.markSessionFailed(*latest, "会话任务已取消。")
-		_ = s.log(task.UserID, task.ID, "warn", "任务已取消，丢弃生成结果", "")
-		return nil
+		billingErr := s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, "标记结果返回后取消的费用待核对", s.MarkBillingUncertain(task.BillingOrderID, "上游已返回结果，但任务被取消"))
+		if sessionErr := s.markSessionFailed(*latest, "会话任务已取消。"); sessionErr != nil {
+			s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "任务取消后 Agent 会话终态保存失败", sessionErr)
+			billingErr = errors.Join(billingErr, sessionErr)
+		}
+		s.logTaskEventBestEffort(task.UserID, task.ID, "warn", "任务已取消，丢弃生成结果", "")
+		return billingErr
 	}
-	resultJSON, _ := json.Marshal(result)
-	opsJSON, _ := json.Marshal(canvasOps)
+	resultJSON, opsJSON, completionErr := marshalTaskCompletion(result, canvasOps)
 	task.Stage = "持久化生成结果"
 	task.Progress = 90
-	_ = s.repo.UpdateTaskProgress(task.ID, task.Stage, task.Progress)
-	if err := s.saveTaskCompletionWithinStorageQuota(task, resultJSON, opsJSON, len(canvasOps) > 0); err != nil {
+	if progressErr := s.repo.UpdateClaimedTaskProgress(task.ID, claimOwner, task.Stage, task.Progress); progressErr != nil {
+		log.Printf("task result persistence checkpoint failed task=%s: %v", task.ID, progressErr)
+	}
+	resultCheckpointed := false
+	if completionErr == nil {
+		completionErr = s.checkpointTaskResultWithinStorageQuota(task, resultJSON, opsJSON)
+		resultCheckpointed = completionErr == nil
+	}
+	if completionErr == nil {
+		completionErr = s.saveTaskCompletionWithinStorageQuota(task, resultJSON, opsJSON, len(canvasOps) > 0)
+	}
+	if completionErr != nil {
+		log.Printf("task result persistence failed task=%s: %v", task.ID, completionErr)
+		if errors.Is(completionErr, repository.ErrTaskStateConflict) {
+			billingErr := s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, "标记任务终态冲突的费用待核对", s.MarkBillingUncertain(task.BillingOrderID, "上游已返回结果，但任务终态已被其他操作修改"))
+			if latest, latestErr := s.repo.Task(task.ID); latestErr == nil && latest.Status == model.TaskStatusCancelled {
+				if sessionErr := s.markSessionFailed(*latest, "会话任务已取消。"); sessionErr != nil {
+					s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "任务终态冲突后 Agent 会话保存失败", sessionErr)
+					billingErr = errors.Join(billingErr, sessionErr)
+				}
+				s.logTaskEventBestEffort(task.UserID, task.ID, "warn", "任务已取消，丢弃生成结果", "")
+				return billingErr
+			}
+			s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "任务完成时租约或状态已变化", completionErr)
+			return errors.Join(completionErr, billingErr)
+		}
 		task.Status = model.TaskStatusFailed
 		task.Stage = "任务结果保存失败"
-		task.Error = taskFailureMessage(err)
-		task.CompletedAt = ptr(time.Now())
-		_ = s.repo.Save(task)
-		_ = s.MarkBillingUncertain(task.BillingOrderID, "上游已成功但任务结果未保存："+task.Error)
-		_ = s.markSessionFailed(*task, task.Error)
-		_ = s.log(task.UserID, task.ID, "error", "任务结果保存失败", task.Error)
-		return err
-	}
-	if completedTask, fetchErr := s.repo.Task(task.ID); fetchErr == nil {
-		if registerErr := s.RegisterTaskOutputFromTask(*completedTask); registerErr != nil {
-			// 任务成功与产物登记分开记账；登记失败保持步骤异常，允许项目页幂等补登记。
-			_ = s.log(task.UserID, task.ID, "error", "任务成功但项目产物登记失败", registerErr.Error())
+		task.Error = providerResultPersistenceFailureMessage
+		billingReviewMessage := "上游已成功但任务结果未保存：" + task.Error
+		billingAction := "标记任务结果保存失败的费用待核对"
+		failureTitle := "任务结果保存失败"
+		if resultCheckpointed {
+			task.Stage = "任务交付失败"
+			task.Error = providerResultDeliveryFailureMessage
+			billingReviewMessage = "上游已成功且结果检查点已保存，但任务交付事务未完成：" + task.Error
+			billingAction = "标记任务交付失败的费用待核对"
+			failureTitle = "任务结果已保存，但本地交付失败"
 		}
+		task.PollStage = "failed"
+		task.NextPollAt = nil
+		task.LeaseOwner = ""
+		task.LeaseExpiresAt = nil
+		task.CompletedAt = ptr(time.Now())
+		terminalErr := s.repo.SaveClaimedTaskTerminal(task, model.TaskStatusRunning, claimOwner)
+		billingErr := s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, billingAction, s.MarkBillingUncertain(task.BillingOrderID, billingReviewMessage))
+		s.logTaskEventBestEffort(task.UserID, task.ID, "error", failureTitle, task.Error)
+		if terminalErr != nil {
+			return errors.Join(completionErr, terminalErr, billingErr)
+		}
+		return errors.Join(completionErr, billingErr)
 	}
-	if err := s.SettleBilling(task.BillingOrderID, ""); err != nil {
-		_ = s.MarkBillingUncertain(task.BillingOrderID, "生成成功但积分结算失败："+err.Error())
-		_ = s.log(task.UserID, task.ID, "error", "积分结算失败，已进入待核对", err.Error())
+	if _, registerErr := s.RegisterTaskOutputFromTask(*task); registerErr != nil {
+		// 任务结果已经可靠持久化；项目产物登记失败会由项目详情读取时按任务唯一键补登记。
+		s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "任务成功但项目产物登记失败", registerErr)
 	}
-	_ = s.log(task.UserID, task.ID, "info", "任务完成，结果已持久化", "")
-	return nil
+	var completionBillingErr error
+	if err := s.SettleBillingFromExecution(task.BillingOrderID, ""); err != nil {
+		log.Printf("task billing settlement failed task=%s order=%s: %v", task.ID, task.BillingOrderID, err)
+		reviewMessage := "生成成功但积分结算失败；请按任务与订单核对服务端日志"
+		uncertainErr := s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, "标记结算失败的费用待核对", s.MarkBillingUncertain(task.BillingOrderID, reviewMessage))
+		message := "积分结算失败，订单保持待核对"
+		if uncertainErr != nil {
+			message = "积分结算失败，且待核对状态更新失败"
+		}
+		logErr := s.log(task.UserID, task.ID, "error", message, "订单："+firstNonEmpty(strings.TrimSpace(task.BillingOrderID), "未生成")+"。请联系管理员按任务与订单核对服务端日志")
+		completionBillingErr = errors.Join(fmt.Errorf("积分结算失败：%w", err), uncertainErr, logErr)
+	}
+	s.logTaskEventBestEffort(task.UserID, task.ID, "info", "任务完成，结果已持久化", "")
+	return completionBillingErr
 }
 
-func taskFailureMessage(err error) string {
-	if err == nil {
-		return "任务处理失败"
+func marshalTaskCompletion(result map[string]interface{}, canvasOps []map[string]interface{}) ([]byte, []byte, error) {
+	resultJSON, err := json.Marshal(result)
+	if err != nil {
+		return nil, nil, fmt.Errorf("serialize task result: %w", err)
 	}
-	return truncateRunes(err.Error(), 2_000)
+	opsJSON, err := json.Marshal(canvasOps)
+	if err != nil {
+		return nil, nil, fmt.Errorf("serialize canvas operations: %w", err)
+	}
+	return resultJSON, opsJSON, nil
 }
 
 func taskExecutionTimeoutWithPolicy(taskType string, policy RuntimeTaskPolicy) time.Duration {
 	switch {
+	case taskType == channelProbeTaskType:
+		return time.Duration(policy.TextTimeoutMinutes) * time.Minute
 	case taskType == "agent_storyboard" || taskType == "agent_storyboard_rows":
 		return time.Duration(policy.StoryboardTimeoutMinutes) * time.Minute
 	case strings.HasPrefix(taskType, "canvas_video") || strings.HasPrefix(taskType, "video_"):
@@ -892,14 +1597,31 @@ func taskExecutionTimeoutWithPolicy(taskType string, policy RuntimeTaskPolicy) t
 	}
 }
 
-func taskTimeoutMessage(taskType string) string {
+func taskTimeoutMessage(taskType string, hasProviderTaskID bool) string {
+	if taskType == channelProbeTaskType || taskType == "agent_storyboard" || taskType == "agent_storyboard_rows" || strings.HasPrefix(taskType, "canvas_text") {
+		return "文本生成等待超时：模型请求可能仍在供应商服务端执行并产生费用，请勿立即重试，请先核对供应商后台或账单。"
+	}
 	if strings.HasPrefix(taskType, "canvas_video") || strings.HasPrefix(taskType, "video_") {
-		return "视频生成等待超时，请稍后到任务中心查看或重试。"
+		if hasProviderTaskID {
+			return "视频生成等待超时：已记录上游任务 ID，供应商任务可能仍在执行并产生费用；请勿立即重试，请先到任务中心使用“手动查询任务”。"
+		}
+		return "视频生成等待超时：上游创建结果或费用状态不确定，供应商可能仍在执行并产生费用；请勿立即重试，请先核对任务详情、供应商后台或账单。"
 	}
 	if strings.HasPrefix(taskType, "canvas_image") {
-		return "图片生成等待超时，请稍后重试。"
+		return "图片生成等待超时：供应商请求可能仍在执行并产生费用；请勿立即重试，请先核对任务详情、供应商后台或账单。"
 	}
-	return "任务执行超时，请稍后重试。"
+	if strings.HasPrefix(taskType, "canvas_audio") {
+		return "音频生成等待超时：供应商请求可能仍在执行并产生费用；请勿立即重试，请先核对任务详情、供应商后台或账单。"
+	}
+	return "任务执行超时：上游请求状态和费用可能尚未确认；请勿立即重试，请先核对任务详情、供应商后台或账单。"
+}
+
+func taskChannelSlotTimeoutMessage(err error) string {
+	detail := "等待渠道并发槽位超时"
+	if _, failureDetail := ChannelSlotFailureDetails(err); failureDetail != "" {
+		detail = failureDetail
+	}
+	return detail + "：本次没有发出新的供应商请求，请等待已有任务完成后再重新提交。"
 }
 
 func (s *Service) processTask(ctx context.Context, task model.Task) (map[string]interface{}, []map[string]interface{}, error) {
@@ -909,6 +1631,10 @@ func (s *Service) processTask(ctx context.Context, task model.Task) (map[string]
 	}
 	task.InputJSON = decryptedInput
 	ctx = withProviderAnalytics(ctx, s, task)
+	if task.Type == channelProbeTaskType {
+		result, err := s.processChannelProbeTask(ctx, task)
+		return result, nil, err
+	}
 	if task.Type == "agent_storyboard_rows" {
 		return s.processStoryboardRowsTask(ctx, task)
 	}
@@ -954,24 +1680,26 @@ func (s *Service) processAgentStoryboardTask(ctx context.Context, task model.Tas
 	if len(assets) == 0 {
 		assets = extractStoryboardAssets(input.CanvasSnapshot)
 	}
-	plan := fallbackAgentStoryboardPlan(task.Prompt)
-	if providerConfigReady(input.Config) {
-		config, err := s.resolveProviderConfig(input.Config)
-		if err != nil {
-			return nil, nil, err
-		}
-		result, err := runTextTask(ctx, canvasGenerationInput{Mode: "text", Prompt: s.buildAgentStoryboardPlannerPrompt(task.Prompt, input.Requirements, assets, 0, 0), Config: config})
-		if err != nil {
-			return nil, nil, err
-		}
-		text, _ := result["text"].(string)
-		nextPlan, err := parseAgentStoryboardPlan(text)
-		if err != nil {
-			return nil, nil, err
-		}
-		plan = nextPlan
+	if !providerConfigReady(input.Config) {
+		// 影视 Agent 是真实模型生成入口；配置缺失时不能返回内置样例，
+		// 否则页面会把“未调用供应商”误显示成成功分镜。
+		return nil, nil, markProviderPreparationFailure(errors.New("请先配置可用的文本模型"))
 	}
-	return buildAgentStoryboardResult(task, plan, assets)
+	config, err := s.resolveProviderConfig(ctx, input.Config)
+	if err != nil {
+		return nil, nil, markProviderPreparationFailure(err)
+	}
+	plannerPrompt := s.buildAgentStoryboardPlannerPrompt(task.Prompt, input.Requirements, assets, 0, 0)
+	outcome, err := s.requestAgentStoryboardPlan(ctx, task, plannerPrompt, config, 0, 0, input.AllowPaidStructureRepair)
+	if err != nil {
+		return nil, nil, err
+	}
+	plan := outcome.Plan
+	result, ops, err := buildAgentStoryboardResult(task, plan, assets)
+	if err == nil {
+		result["structureRepairUsed"] = outcome.RepairUsed
+	}
+	return result, ops, err
 }
 
 func (s *Service) processStoryboardRowsTask(ctx context.Context, task model.Task) (map[string]interface{}, []map[string]interface{}, error) {
@@ -982,47 +1710,27 @@ func (s *Service) processStoryboardRowsTask(ctx context.Context, task model.Task
 		}
 	}
 	if !providerConfigReady(input.Config) {
-		return nil, nil, errors.New("请先配置可用的文本模型")
+		return nil, nil, markProviderPreparationFailure(errors.New("请先配置可用的文本模型"))
 	}
 	assets := input.CanvasAssets
 	if len(assets) == 0 {
 		assets = extractStoryboardAssets(input.CanvasSnapshot)
 	}
-	config, err := s.resolveProviderConfig(input.Config)
+	config, err := s.resolveProviderConfig(ctx, input.Config)
+	if err != nil {
+		return nil, nil, markProviderPreparationFailure(err)
+	}
+	plannerPrompt := s.buildAgentStoryboardPlannerPrompt(task.Prompt, input.Requirements, assets, input.ShotDuration, input.ShotCount)
+	if input.ManualDelivery {
+		// 手动交付要和 Agent 的短文本入口保持一致：兼容只支持基础文本请求的网关，
+		// 不强制 JSON MIME；返回的完整标签文本仍由后端结构解析器收敛为分镜行。
+		plannerPrompt = buildManualStoryboardPlannerPrompt(task.Prompt, input.Requirements, input.ShotDuration, input.ShotCount)
+	}
+	outcome, err := s.requestAgentStoryboardPlanWithMode(ctx, task, plannerPrompt, config, input.ShotDuration, input.ShotCount, input.AllowPaidStructureRepair, input.ManualDelivery)
 	if err != nil {
 		return nil, nil, err
 	}
-	result, err := runTextTask(ctx, canvasGenerationInput{Mode: "text", Prompt: s.buildAgentStoryboardPlannerPrompt(task.Prompt, input.Requirements, assets, input.ShotDuration, input.ShotCount), Config: config})
-	if err != nil {
-		return nil, nil, err
-	}
-	text, _ := result["text"].(string)
-	plan, err := parseAgentStoryboardPlan(text)
-	if err == nil {
-		err = validateStoryboardShotDuration(plan, input.ShotDuration)
-	}
-	if err == nil {
-		err = validateStoryboardShotCount(plan, input.ShotCount)
-	}
-	if err != nil {
-		_ = s.repo.UpdateTaskProgress(task.ID, "修复分镜结构", 55)
-		repairPrompt := fmt.Sprintf("请修复下面的分镜 JSON。原始校验错误：%s。必须保持原有剧情和镜头内容，补齐缺失字段并修复非法字段值；durationSeconds 必须是 1 到 60 的整数。\n\n%s\n\n只返回完整 JSON，不要 markdown 或解释。\n\n原始输出：\n%s", err.Error(), storyboardCinematicQualityContract(input.ShotDuration, input.ShotCount), text)
-		repaired, repairErr := runTextTask(withProviderRequestKind(ctx, "repair"), canvasGenerationInput{Mode: "text", Prompt: repairPrompt, Config: config})
-		if repairErr != nil {
-			return nil, nil, fmt.Errorf("分镜结构修复失败：%w", repairErr)
-		}
-		repairedText, _ := repaired["text"].(string)
-		plan, err = parseAgentStoryboardPlan(repairedText)
-		if err == nil {
-			err = validateStoryboardShotDuration(plan, input.ShotDuration)
-		}
-		if err == nil {
-			err = validateStoryboardShotCount(plan, input.ShotCount)
-		}
-		if err != nil {
-			return nil, nil, fmt.Errorf("分镜模型结构修复后仍不合法：%w", err)
-		}
-	}
+	plan := outcome.Plan
 	rows := make([]map[string]any, 0, len(plan.Shots))
 	for index, shot := range plan.Shots {
 		matchedAssets := matchStoryboardAssets(assets, shot.AssetTags)
@@ -1032,97 +1740,20 @@ func (s *Service) processStoryboardRowsTask(ctx context.Context, task model.Task
 		}
 		rows = append(rows, map[string]any{
 			"shotNumber": index + 1, "durationSeconds": shot.Duration, "plotDescription": shot.Description,
+			"purpose": shot.Purpose, "informationChange": shot.InformationChange,
+			"startBoundary": shot.StartBoundary, "endBoundary": shot.EndBoundary,
 			"dialogue": shot.Dialogue, "characters": []any{}, "shotSize": shot.ShotSize, "emotion": shot.Emotion,
 			"lightingAndAtmosphere": shot.Lighting, "audioEffects": shot.AudioEffects,
-			"imageGenerationPrompt": shot.VisualPrompt, "videoMotionPrompt": buildStoryboardVideoPrompt(plan.StyleGuide, shot),
+			"imageGenerationPrompt": buildStoryboardImagePrompt(plan.StyleGuide, shot), "videoMotionPrompt": buildStoryboardVideoPrompt(plan.StyleGuide, shot),
 			"camera": shot.Camera, "motion": shot.Motion, "timeBeats": shot.TimeBeats, "negativePrompt": shot.Negative,
 			"referenceNodeIds": referenceNodeIDs, "assetTags": shot.AssetTags,
 		})
 	}
-	return map[string]interface{}{"title": plan.Title, "rows": rows}, nil, nil
+	return map[string]interface{}{"title": plan.Title, "rows": rows, "structureRepairUsed": outcome.RepairUsed}, nil, nil
 }
 
 func providerConfigReady(config providerConfig) bool {
 	return strings.TrimSpace(config.Model) != "" && (strings.TrimSpace(config.ChannelID) != "" || (strings.TrimSpace(config.BaseURL) != "" && strings.TrimSpace(config.APIKey) != ""))
-}
-
-func parseAgentStoryboardPlan(raw string) (agentStoryboardPlan, error) {
-	jsonText, err := extractJSONText(raw)
-	if err != nil {
-		return agentStoryboardPlan{}, err
-	}
-	var plan agentStoryboardPlan
-	if err := json.Unmarshal([]byte(jsonText), &plan); err != nil {
-		return agentStoryboardPlan{}, fmt.Errorf("分镜 JSON 解析失败：%w", err)
-	}
-	plan.Title = defaultString(strings.TrimSpace(plan.Title), "影视分镜")
-	plan.Logline = defaultString(strings.TrimSpace(plan.Logline), "根据剧情生成的分镜方案")
-	plan.StyleGuide = defaultString(strings.TrimSpace(plan.StyleGuide), "真实电影机拍摄，保持角色、空间、道具、色彩和镜头语言一致。")
-	if len(plan.Shots) == 0 {
-		return agentStoryboardPlan{}, errors.New("分镜模型没有返回 shots")
-	}
-	if len(plan.Shots) > 12 {
-		plan.Shots = plan.Shots[:12]
-	}
-	for i := range plan.Shots {
-		if strings.TrimSpace(plan.Shots[i].Title) == "" {
-			plan.Shots[i].Title = fmt.Sprintf("镜头 %d", i+1)
-		}
-		if strings.TrimSpace(plan.Shots[i].VideoPrompt) == "" {
-			plan.Shots[i].VideoPrompt = defaultString(plan.Shots[i].VisualPrompt, plan.Shots[i].Description)
-		}
-		if strings.TrimSpace(plan.Shots[i].VisualPrompt) == "" {
-			return agentStoryboardPlan{}, fmt.Errorf("镜头 %d 缺少 visualPrompt", i+1)
-		}
-		if strings.TrimSpace(plan.Shots[i].Camera) == "" || strings.TrimSpace(plan.Shots[i].Motion) == "" || strings.TrimSpace(plan.Shots[i].TimeBeats) == "" {
-			return agentStoryboardPlan{}, fmt.Errorf("镜头 %d 缺少 camera、motion 或 timeBeats", i+1)
-		}
-		if plan.Shots[i].Duration <= 0 || plan.Shots[i].Duration > 60 {
-			return agentStoryboardPlan{}, fmt.Errorf("镜头 %d 的 durationSeconds 必须在 1 到 60 之间", i+1)
-		}
-	}
-	return plan, nil
-}
-
-func validateStoryboardShotDuration(plan agentStoryboardPlan, target int) error {
-	if target == 0 {
-		return nil
-	}
-	if target != 5 && target != 10 && target != 15 && target != 30 {
-		return fmt.Errorf("不支持的单镜头时长：%d 秒", target)
-	}
-	for index, shot := range plan.Shots {
-		if shot.Duration != target {
-			return fmt.Errorf("镜头 %d 的时长必须是 %d 秒", index+1, target)
-		}
-	}
-	return nil
-}
-
-func validateStoryboardShotCount(plan agentStoryboardPlan, target int) error {
-	if target == 0 {
-		return nil
-	}
-	if target < 1 || target > 10 {
-		return fmt.Errorf("分镜数量必须在 1 到 10 之间")
-	}
-	if len(plan.Shots) != target {
-		return fmt.Errorf("分镜数量必须是 %d，实际生成 %d", target, len(plan.Shots))
-	}
-	return nil
-}
-
-func extractJSONText(raw string) (string, error) {
-	trimmed := strings.TrimSpace(raw)
-	trimmed = strings.TrimPrefix(trimmed, "```json")
-	trimmed = strings.TrimPrefix(trimmed, "```")
-	trimmed = strings.TrimSuffix(trimmed, "```")
-	start := strings.Index(trimmed, "{")
-	end := strings.LastIndex(trimmed, "}")
-	if start < 0 || end < start {
-		return "", errors.New("分镜模型返回的不是 JSON")
-	}
-	return trimmed[start : end+1], nil
 }
 
 func fallbackAgentStoryboardPlan(prompt string) agentStoryboardPlan {
@@ -1130,33 +1761,57 @@ func fallbackAgentStoryboardPlan(prompt string) agentStoryboardPlan {
 	return agentStoryboardPlan{
 		Title:      title,
 		Logline:    "围绕用户 brief 拆解的影视短片工作流。",
-		StyleGuide: "真实电影机拍摄，自然曝光，低饱和色彩，保持角色、空间、道具和镜头语言一致。",
+		StyleGuide: "沿用项目已经选择的画风、媒介与制作形态，保持角色、空间、道具、色彩和表现方式一致。",
 		Characters: []string{"主角：根据 brief 保持服装、动作动机和情绪连续。"},
-		Locations:  []string{"主场景：根据 brief 建立前景、中景、远景和可信光源。"},
+		Locations:  []string{"主场景：根据 brief 建立可理解的空间关系和稳定环境状态。"},
 		Shots: []agentStoryboardShot{
 			{
-				Title:        "开场建立",
-				Description:  "建立故事空间、主角状态和情绪基调。",
-				VisualPrompt: "以真实电影机语言建立主要空间和角色状态，前景、中景、远景层次清晰。",
-				VideoPrompt:  "8 秒连续镜头，从故事空间中的人类尺度前景开始，摄影机缓慢前推，先展示环境细节和主角状态，中段让关键冲突迹象进入画面，结尾停在主角反应。自然曝光，真实高光滚降，空气介质和轻微胶片颗粒，避免廉价特效感、均匀平光和无尺度参照。",
-				Camera:       "中景，平视到轻微低机位，中等焦段",
-				Motion:       "缓慢前推，结尾停住",
+				Title:             "开场建立",
+				Description:       "建立故事空间、主角状态和即将出现的冲突线索。",
+				Purpose:           "让观众理解主角此刻在哪里、处于什么状态。",
+				InformationChange: "未知人物与空间 -> 明确主角、空间和冲突线索。",
+				StartBoundary:     &projectShotBoundary{Positions: []string{"主角位于主场景的既定起始位置"}, VisibleState: []string{"环境维持章节开头状态"}},
+				EndBoundary:       &projectShotBoundary{Positions: []string{"主角仍位于可承接下一镜的位置"}, Gaze: []string{"注意力落向冲突线索"}, VisibleState: []string{"冲突线索已经可见"}},
+				Duration:          8,
+				ShotSize:          "按空间建立需要选择",
+				Emotion:           "由平稳转为警觉",
+				VisualPrompt:      "冻结在故事开始瞬间：主角位于主场景既定位置，环境状态、人物外观和持物与项目设定一致，冲突线索尚未完成变化。",
+				VideoPrompt:       "从已定义的开始位置出发，先建立人物与空间，再让冲突线索进入可见状态，最后让主角的注意力落向该线索并到达结束边界。",
+				Camera:            "根据项目媒介和空间关系选择能清楚建立场面的机位",
+				Motion:            "仅在有助于揭示冲突线索时移动，否则保持稳定",
+				TimeBeats:         "0-3秒：建立开始边界；3-6秒：冲突线索出现；6-8秒：主角反应并到达结束边界",
 			},
 			{
-				Title:        "冲突推进",
-				Description:  "推进动作、关系变化和核心冲突。",
-				VisualPrompt: "主体动作、道具和环境反馈同时出现，空间调度明确。",
-				VideoPrompt:  "10 秒连续镜头，摄影机从主角侧后方跟随移动，开始画面聚焦人物动作和关键道具，中段冲突升级，环境中的灯光、尘埃、水汽或人群反应随动作发生变化，结尾用中近景压住情绪。真实电影机拍摄，受控冷暖对比，运动处保留自然模糊，避免过度锐化、过亮轮廓和塑料表面。",
-				Camera:       "中近景，侧后方跟拍，中长焦压缩空间",
-				Motion:       "跟拍加轻微抬镜",
+				Title:             "冲突推进",
+				Description:       "主角采取可见行动，关系或局势因此发生变化。",
+				Purpose:           "让观众看清主角如何回应冲突以及行动造成的结果。",
+				InformationChange: "只看到冲突线索 -> 看见主角行动及其阶段结果。",
+				StartBoundary:     &projectShotBoundary{Positions: []string{"主角从上一镜结束位置开始"}, Gaze: []string{"注意力锁定冲突对象"}},
+				EndBoundary:       &projectShotBoundary{Positions: []string{"主角完成阶段行动并停在结果位置"}, VisibleState: []string{"行动结果已经可见"}},
+				Duration:          10,
+				ShotSize:          "按动作可读性选择",
+				Emotion:           "冲突升级",
+				VisualPrompt:      "冻结在冲突行动开始前：主角从上一镜结束位置面对冲突对象，人物、道具和环境状态连续，尚未出现阶段结果。",
+				VideoPrompt:       "从上一镜的结束状态开始，按因果顺序完成主角行动、对象反馈和环境反应，最后停在阶段结果已经可见的结束边界。",
+				Camera:            "选择能同时读清主体动作、接触关系和结果的机位",
+				Motion:            "跟随关键动作保持空间关系可读，不添加无动机的额外技法",
+				TimeBeats:         "0-2秒：确认开始边界；2-7秒：执行主要行动与反馈；7-10秒：结果显现并到达结束边界",
 			},
 			{
-				Title:        "结果与钩子",
-				Description:  "交代结果并留下下一段钩子。",
-				VisualPrompt: "主角反应、环境后果和悬念信息同框。",
-				VideoPrompt:  "8 秒连续镜头，从冲突后的环境细节开始，摄影机缓慢横移揭示结果，中段主角进入画面并完成关键反应，结尾停在一个可延续的悬念物或空间方向。真实电影摄影质感，暗部保留层次，高光不过曝，低饱和色彩，避免海报式摆拍、干净空白背景和主体完整居中平铺。",
-				Camera:       "中景到近景，横移构图",
-				Motion:       "缓慢横移，结尾定格",
+				Title:             "结果与钩子",
+				Description:       "交代冲突结果，并把注意力引向可承接下一段的信息。",
+				Purpose:           "让观众确认本段结果，同时形成继续观看的问题。",
+				InformationChange: "阶段结果刚出现 -> 结果被确认并出现下一段钩子。",
+				StartBoundary:     &projectShotBoundary{Positions: []string{"人物与物件沿用上一镜的结果位置"}, VisibleState: []string{"冲突结果刚刚形成"}},
+				EndBoundary:       &projectShotBoundary{Positions: []string{"主体停在能承接下一镜的位置"}, Gaze: []string{"注意力落向钩子信息"}, VisibleState: []string{"钩子信息清晰可见"}},
+				Duration:          8,
+				ShotSize:          "按结果与钩子的注意层级选择",
+				Emotion:           "结果落定并留下悬念",
+				VisualPrompt:      "冻结在阶段结果刚形成的瞬间：人物、道具和环境后果与上一镜连续，下一段钩子尚未完成揭示。",
+				VideoPrompt:       "从冲突结果刚形成的开始边界出发，先确认人物反应与环境后果，再揭示钩子信息，最后让主体注意力和画面焦点共同落到结束边界。",
+				Camera:            "选择能从结果自然转移到钩子信息的机位",
+				Motion:            "只执行一次有明确揭示目的的注意力转移，或保持固定完成揭示",
+				TimeBeats:         "0-3秒：确认结果；3-6秒：揭示钩子；6-8秒：注意力落点并保持结束边界",
 			},
 		},
 	}
@@ -1168,16 +1823,53 @@ func buildAgentStoryboardResult(task model.Task, plan agentStoryboardPlan, asset
 	sceneID := prefix + "-scenes"
 	styleID := prefix + "-style"
 	referenceID := prefix + "-assets"
+	storyboardID := prefix + "-storyboard"
 	finalID := prefix + "-final"
 	sceneX := 380
 	styleX := sceneX + 380
+	storyboardRows := make([]map[string]any, 0, len(plan.Shots))
+	for index, shot := range plan.Shots {
+		matchedAssets := matchStoryboardAssets(assets, shot.AssetTags)
+		referenceNodeIDs := make([]string, 0, len(matchedAssets))
+		for _, asset := range matchedAssets {
+			referenceNodeIDs = append(referenceNodeIDs, asset.ID)
+		}
+		storyboardRows = append(storyboardRows, map[string]any{
+			"id": fmt.Sprintf("%s-row-%d", prefix, index+1), "shotNumber": index + 1, "durationSeconds": shot.Duration,
+			"plotDescription": shot.Description, "dialogue": shot.Dialogue, "characters": []map[string]any{},
+			"purpose": shot.Purpose, "informationChange": shot.InformationChange,
+			"startBoundary": shot.StartBoundary, "endBoundary": shot.EndBoundary,
+			"shotSize": shot.ShotSize, "emotion": shot.Emotion, "lightingAndAtmosphere": shot.Lighting,
+			"audioEffects": shot.AudioEffects, "camera": shot.Camera, "motion": shot.Motion, "timeBeats": shot.TimeBeats,
+			"imageGenerationPrompt": buildStoryboardImagePrompt(plan.StyleGuide, shot),
+			"videoMotionPrompt": buildStoryboardVideoPrompt(plan.StyleGuide, shot), "negativePrompt": shot.Negative,
+			"referenceNodeIds": referenceNodeIDs, "status": "idle",
+		})
+	}
+	allReferenceNodeIDs := make([]string, 0, len(assets))
+	for _, asset := range assets {
+		allReferenceNodeIDs = append(allReferenceNodeIDs, asset.ID)
+	}
 	ops := []map[string]any{
 		nodeOpWithMetadata(scriptID, "text", "剧本 · "+shortTitle(plan.Title, 24), 0, 0, map[string]any{"workflowKind": "script", "workflowTitle": "剧本", "status": "success", "content": strings.Join([]string{plan.Title, "", plan.Logline, "", task.Prompt}, "\n")}),
 		nodeOpWithMetadata(sceneID, "text", "场景设定", sceneX, 0, map[string]any{"workflowKind": "scene", "workflowTitle": "场景", "status": "success", "content": listContent("场景", plan.Locations)}),
 		nodeOpWithMetadata(styleID, "text", "风格板", styleX, 0, map[string]any{"workflowKind": "styleboard", "workflowTitle": "风格板", "status": "success", "content": plan.StyleGuide}),
 		nodeOpWithMetadata(referenceID, "text", "参考素材组", 0, 270, map[string]any{"workflowKind": "reference_set", "workflowTitle": "参考素材组", "status": "success", "content": storyboardAssetsContent(assets)}),
+		nodeOpWithMetadata(storyboardID, "script", "分镜脚本 · "+shortTitle(plan.Title, 24), 0, 560, map[string]any{
+			"workflowKind": "storyboard", "workflowTitle": "分镜脚本", "workflowDescription": "由影视 Agent 生成的结构化分镜，可继续生成分镜图或复制视频提示词。", "status": "success",
+			"storyboard": map[string]any{
+				"rows": storyboardRows,
+				"visibleColumns": []string{"shotNumber", "durationSeconds", "plotDescription", "dialogue", "shotSize", "emotion", "camera", "motion", "imageGenerationPrompt", "videoMotionPrompt", "negativePrompt"},
+				"referenceNodeIds": allReferenceNodeIDs,
+			},
+		}),
 		nodeOpWithMetadata(finalID, "video", "成片 · 待生成", styleX, 270, map[string]any{"workflowKind": "final", "workflowTitle": "成片", "status": "idle"}),
 		connectOp(scriptID, sceneID),
+		connectOp(scriptID, storyboardID),
+		connectOp(sceneID, storyboardID),
+		connectOp(styleID, storyboardID),
+		connectOp(referenceID, storyboardID),
+		connectOp(storyboardID, finalID),
 	}
 	resultShots := make([]map[string]any, 0, len(plan.Shots))
 	for index, shot := range plan.Shots {
@@ -1188,7 +1880,7 @@ func buildAgentStoryboardResult(task model.Task, plan agentStoryboardPlan, asset
 			assetIDs = append(assetIDs, asset.ID)
 		}
 		ops = append(ops,
-			nodeOpWithMetadata(shotID, "config", fmt.Sprintf("镜头 %d · %s", index+1, shortTitle(shot.Title, 18)), index*360, 560, map[string]any{
+			nodeOpWithMetadata(shotID, "config", fmt.Sprintf("镜头 %d · %s", index+1, shortTitle(shot.Title, 18)), index*360, 1040, map[string]any{
 				"workflowKind":          "shot",
 				"workflowTitle":         shot.Title,
 				"workflowDescription":   shotDescription(shot),
@@ -1209,7 +1901,7 @@ func buildAgentStoryboardResult(task model.Task, plan agentStoryboardPlan, asset
 		}
 		resultShots = append(resultShots, map[string]any{"title": shot.Title, "description": shot.Description, "assetTags": shot.AssetTags, "referenceAssetNodeIds": assetIDs})
 	}
-	ops = append(ops, map[string]any{"type": "select_nodes", "ids": shotIDs(prefix, len(plan.Shots))})
+	ops = append(ops, map[string]any{"type": "select_nodes", "ids": append([]string{storyboardID}, shotIDs(prefix, len(plan.Shots))...)})
 	result := map[string]any{
 		"taskId":     task.ID,
 		"operation":  task.Operation,
@@ -1386,23 +2078,69 @@ func shotDescription(shot agentStoryboardShot) string {
 }
 
 func buildStoryboardVideoPrompt(styleGuide string, shot agentStoryboardShot) string {
-	camera := defaultString(strings.TrimSpace(shot.Camera), strings.TrimSpace(shot.ShotSize)+"，平视机位，中等焦段，主体与环境保持空间层次")
-	motion := defaultString(strings.TrimSpace(shot.Motion), "固定机位，主体在画面内完成动作")
-	timeBeats := defaultString(strings.TrimSpace(shot.TimeBeats), fmt.Sprintf("0-%d秒：%s", shot.Duration, strings.TrimSpace(shot.Description)))
-	negative := defaultString(strings.TrimSpace(shot.Negative), "禁止换脸、服装变化、手部畸形、乱码、闪烁、风格突变和动作僵硬")
-	parts := []string{
-		"【氛围与画质】\n" + strings.TrimSpace(styleGuide),
-		"【镜头设计】\n" + strings.TrimSpace(shot.ShotSize) + "；" + camera + "；运镜：" + motion,
-		"【画面内容】\n" + timeBeats,
+	parts := make([]string, 0, 8)
+	if style := strings.TrimSpace(styleGuide); style != "" {
+		parts = append(parts, "【项目画风与制作形态】\n"+style)
 	}
+	if start := storyboardBoundaryPrompt(shot.StartBoundary); start != "" {
+		parts = append(parts, "【开始边界】\n"+start)
+	}
+	parts = append(parts,
+		"【边界变化】\n"+strings.TrimSpace(shot.VideoPrompt),
+		"【镜头与主体运动】\n"+strings.TrimSpace(shot.ShotSize)+"；"+strings.TrimSpace(shot.Camera)+"；"+strings.TrimSpace(shot.Motion),
+		"【时间分配】\n"+strings.TrimSpace(shot.TimeBeats),
+	)
 	if strings.TrimSpace(shot.Dialogue) != "" || strings.TrimSpace(shot.AudioEffects) != "" {
 		parts = append(parts, "【台词/声音】\n"+strings.TrimSpace(shot.Dialogue)+"；音效："+strings.TrimSpace(shot.AudioEffects))
 	}
-	if strings.TrimSpace(shot.VideoPrompt) != "" {
-		parts = append(parts, "【执行约束】\n"+strings.TrimSpace(shot.VideoPrompt))
+	if end := storyboardBoundaryPrompt(shot.EndBoundary); end != "" {
+		parts = append(parts, "【结束边界】\n"+end)
 	}
-	parts = append(parts, "【负面要求】\n"+negative)
+	parts = append(parts, "只实现上述开始边界到结束边界的变化，不改写角色身份、持物、空间关系或结束状态。")
+	if negative := strings.TrimSpace(shot.Negative); negative != "" {
+		parts = append(parts, "【本镜风险排除】\n"+negative)
+	}
 	return strings.Join(parts, "\n\n")
+}
+
+func buildStoryboardImagePrompt(styleGuide string, shot agentStoryboardShot) string {
+	parts := make([]string, 0, 4)
+	if style := strings.TrimSpace(styleGuide); style != "" {
+		parts = append(parts, "【项目画风与制作形态】\n"+style)
+	}
+	if start := storyboardBoundaryPrompt(shot.StartBoundary); start != "" {
+		parts = append(parts, "【冻结画面边界】\n"+start)
+	}
+	parts = append(parts, "【图片提示词】\n"+strings.TrimSpace(shot.VisualPrompt), "只表现上述单一开始瞬间，不描述动作过程、结束状态或时间推进。")
+	if negative := strings.TrimSpace(shot.Negative); negative != "" {
+		parts = append(parts, "【本镜风险排除】\n"+negative)
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+func storyboardBoundaryPrompt(boundary *projectShotBoundary) string {
+	if boundary == nil {
+		return ""
+	}
+	parts := make([]string, 0, 6)
+	appendValues := func(label string, values []string) {
+		cleaned := make([]string, 0, len(values))
+		for _, value := range values {
+			if value = strings.TrimSpace(value); value != "" {
+				cleaned = append(cleaned, value)
+			}
+		}
+		if len(cleaned) > 0 {
+			parts = append(parts, label+"："+strings.Join(cleaned, "；"))
+		}
+	}
+	appendValues("位置", boundary.Positions)
+	appendValues("朝向", boundary.Facing)
+	appendValues("目光", boundary.Gaze)
+	appendValues("双手", boundary.Hands)
+	appendValues("持物", boundary.HeldProps)
+	appendValues("可见状态", boundary.VisibleState)
+	return strings.Join(parts, "\n")
 }
 
 func shotComposerContent(prompt string, assets []storyboardAsset) string {
@@ -1459,6 +2197,25 @@ func (s *Service) log(userID string, taskID string, level string, message string
 	return s.repo.Create(&model.TaskLog{ID: newID(), UserID: userID, TaskID: taskID, Level: level, Message: message, Payload: truncateTaskLogPayload(payload)})
 }
 
+// 计费写入失败时订单会继续停在非终态并阻止重试；任务日志与进程日志必须同时留下可追踪证据。
+func (s *Service) recordBillingTransitionFailure(userID string, taskID string, orderID string, action string, transitionErr error) error {
+	if transitionErr == nil {
+		return nil
+	}
+	wrapped := fmt.Errorf("%s失败：%w", action, transitionErr)
+	log.Printf("billing transition failed order=%s task=%s action=%s: %v", orderID, taskID, action, transitionErr)
+	if strings.TrimSpace(taskID) == "" {
+		return wrapped
+	}
+	// 任务日志对普通用户可见，只给核对入口；数据库、Redis 等底层原因仅留在上面的 Backend 日志。
+	publicDetail := fmt.Sprintf("操作：%s；订单：%s。系统不会自动重试，请联系管理员按任务与订单核对服务端日志", action, firstNonEmpty(strings.TrimSpace(orderID), "未生成"))
+	if logErr := s.log(userID, taskID, "error", "计费状态更新失败", publicDetail); logErr != nil {
+		log.Printf("billing transition task log failed order=%s task=%s: %v", orderID, taskID, logErr)
+		return errors.Join(wrapped, fmt.Errorf("计费失败日志写入失败：%w", logErr))
+	}
+	return wrapped
+}
+
 func truncateTaskLogPayload(payload string) string {
 	if len(payload) <= taskLogPayloadLimit {
 		return payload
@@ -1492,18 +2249,7 @@ func (s *Service) cancelActiveTask(id string) {
 }
 
 func (s *Service) markSessionFailed(task model.Task, message string) error {
-	if task.SessionID == "" {
-		return nil
-	}
-	session, err := s.repo.SessionForUser(task.UserID, task.SessionID)
-	if err != nil {
-		return err
-	}
-	session.Status = model.SessionStatusFailed
-	if err := s.repo.Save(session); err != nil {
-		return err
-	}
-	return s.repo.Create(&model.Message{ID: newID(), UserID: task.UserID, SessionID: task.SessionID, Role: "assistant", Content: defaultString(message, "会话任务失败。")})
+	return s.repo.MarkSessionFailedForTask(task, defaultString(message, "会话任务失败。"))
 }
 
 func buildAgentResult(task model.Task) (map[string]any, []map[string]any) {

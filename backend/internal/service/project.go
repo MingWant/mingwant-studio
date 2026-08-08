@@ -128,8 +128,12 @@ func (s *Service) ProjectDetail(userID string, id string) (ProjectDetail, error)
 	if err != nil {
 		return ProjectDetail{}, err
 	}
-	// 项目读取允许降级修复：旧任务可能已成功持久化图片，但浏览器刷新中断了角色版本绑定。
-	if s.reconcileCharacterTurnaroundTasks(userID, project.ID) {
+	// 项目读取允许降级修复：任务结果可能已成功持久化，但浏览器或后续数据库写入在业务绑定前中断。
+	reconciled := s.reconcileCharacterTurnaroundTasks(userID, project.ID)
+	if s.reconcileProjectTaskOutputs(userID, project.ID) {
+		reconciled = true
+	}
+	if reconciled {
 		project, err = s.repo.ProjectForUser(userID, id)
 		if err != nil {
 			return ProjectDetail{}, err
@@ -197,8 +201,8 @@ func (s *Service) CreateProject(userID string, req CreateProjectRequest) (model.
 		return model.Project{}, err
 	}
 	if _, err := s.createProjectWorkflow(project.ID, "", "project", project.Type); err != nil {
-		_ = s.repo.DeleteProject(userID, project.ID)
-		return model.Project{}, err
+		cleanupErr := s.repo.DeleteProject(userID, project.ID)
+		return model.Project{}, errors.Join(err, cleanupErr)
 	}
 	project.Revision++
 	project.UpdatedAt = time.Now()

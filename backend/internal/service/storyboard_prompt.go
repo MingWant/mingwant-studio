@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"infinite-canvas/backend/internal/model"
+	"infinite-canvas/backend/internal/repository"
 )
 
 type StoryboardPromptTemplateRequest struct {
@@ -31,14 +32,14 @@ func (s *Service) EnsureDefaultStoryboardPromptTemplate() error {
 		return err
 	}
 	if count > 0 {
-		// 只升级仍保留旧占位符的内置模板，避免覆盖管理员创建或修改的版本。
+		// 只升级没有创建者且仍带旧内置签名的模板，管理员新建的版本保持不变。
 		templates, err := s.repo.StoryboardPromptTemplates()
 		if err != nil {
 			return err
 		}
 		for index := range templates {
 			template := &templates[index]
-			if template.Name == "默认影视分镜提示词" && strings.Contains(template.Content, "\n....\n") {
+			if template.Name == "默认影视分镜提示词" && template.CreatedBy == "" && legacyStoryboardPromptNeedsUpgrade(template.Content) {
 				template.Content = defaultStoryboardPromptTemplate()
 				return s.repo.SaveStoryboardPromptTemplate(template)
 			}
@@ -75,7 +76,14 @@ func (s *Service) CreateStoryboardPromptTemplate(actor *model.User, req Storyboa
 	if req.Enabled == nil {
 		template.Enabled = false
 	}
-	if err := s.repo.SaveStoryboardPromptTemplate(&template); err != nil {
+	if err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		if err := txRepo.SaveStoryboardPromptTemplate(&template); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "storyboard_prompt.create", "storyboard_prompt_template", template.ID, "创建分镜提示词模板", map[string]any{
+			"name": template.Name, "enabled": template.Enabled, "contentBytes": len([]byte(template.Content)),
+		})
+	}); err != nil {
 		return nil, err
 	}
 	return &template, nil
@@ -85,35 +93,55 @@ func (s *Service) UpdateStoryboardPromptTemplate(actor *model.User, id string, r
 	if err := s.RequireAdmin(actor); err != nil {
 		return nil, err
 	}
-	template, err := s.repo.StoryboardPromptTemplate(id)
+	id = strings.TrimSpace(id)
+	var updated *model.StoryboardPromptTemplate
+	err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		template, err := txRepo.StoryboardPromptTemplateForUpdate(id)
+		if err != nil {
+			return err
+		}
+		if template.Enabled && req.Enabled != nil && !*req.Enabled {
+			return BadAuthRequest("至少需要保留一个启用的分镜提示词")
+		}
+		next, err := storyboardPromptTemplateFromRequest(req, *template)
+		if err != nil {
+			return err
+		}
+		if err := txRepo.SaveStoryboardPromptTemplate(&next); err != nil {
+			return err
+		}
+		if err := appendAdminAuditWithRepository(txRepo, actor, "storyboard_prompt.update", "storyboard_prompt_template", next.ID, "更新分镜提示词模板", map[string]any{
+			"name": next.Name, "enabled": next.Enabled, "contentBytes": len([]byte(next.Content)),
+		}); err != nil {
+			return err
+		}
+		updated = &next
+		return nil
+	})
 	if err != nil {
 		return nil, err
 	}
-	if template.Enabled && req.Enabled != nil && !*req.Enabled {
-		return nil, BadAuthRequest("至少需要保留一个启用的分镜提示词")
-	}
-	next, err := storyboardPromptTemplateFromRequest(req, *template)
-	if err != nil {
-		return nil, err
-	}
-	if err := s.repo.SaveStoryboardPromptTemplate(&next); err != nil {
-		return nil, err
-	}
-	return &next, nil
+	return updated, nil
 }
 
 func (s *Service) DeleteStoryboardPromptTemplate(actor *model.User, id string) error {
 	if err := s.RequireAdmin(actor); err != nil {
 		return err
 	}
-	template, err := s.repo.StoryboardPromptTemplate(id)
-	if err != nil {
-		return err
-	}
-	if template.Enabled {
-		return BadAuthRequest("启用中的分镜提示词不能删除，请先启用其他版本")
-	}
-	return s.repo.DeleteStoryboardPromptTemplate(id)
+	id = strings.TrimSpace(id)
+	return s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		template, err := txRepo.StoryboardPromptTemplateForUpdate(id)
+		if err != nil {
+			return err
+		}
+		if template.Enabled {
+			return BadAuthRequest("启用中的分镜提示词不能删除，请先启用其他版本")
+		}
+		if err := txRepo.DeleteStoryboardPromptTemplate(id); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "storyboard_prompt.delete", "storyboard_prompt_template", id, "删除分镜提示词模板", map[string]any{"name": template.Name})
+	})
 }
 
 func (s *Service) buildAgentStoryboardPlannerPrompt(brief string, requirements string, assets []storyboardAsset, shotDuration int, shotCount int) string {
@@ -133,30 +161,78 @@ func storyboardCinematicQualityContract(shotDuration int, shotCount int) string 
 	if shotCount >= 1 && shotCount <= 10 {
 		countRule = fmt.Sprintf("shots 数组必须严格输出 %d 个镜头，不得多于或少于 %d 个；该规则覆盖模板中的默认镜头数量范围。", shotCount, shotCount)
 	}
-	contract := `强制电影化质量契约（优先级高于用户 brief 中的泛化叙述）：
+	contract := `分镜制作契约（优先级高于用户 brief 中的泛化叙述）：
 - ` + durationRule + `
 - ` + countRule + `
-- 不要把剧情段落直接改写成镜头摘要。每一行必须是一个可执行、可拍摄的连续镜头，必须写清主体在画面中的具体动作、空间关系、视觉焦点和可见结果。
-- 每个镜头必须有摄影机设计：shotSize、camera（机位高度/角度/焦段/景别/构图）、motion（推拉摇移跟/环绕/升降/手持及起止方向）。镜头之间要有远近景、角度或运动变化，避免同质中景。
-- timeBeats 必须按时间码拆解该镜头内部动作，例如“0-1.2秒：...；1.2-4.5秒：...；4.5-8秒：...”，覆盖完整 durationSeconds，包含开始画面、中段变化和结尾停点。
-- description 只写可见画面与动作，不使用“意识到、回忆起、感到、关系建立、命运转折”等不可直接拍摄的剧情总结；这些内容必须转译成眼神、停顿、手部动作、走位、道具反应或环境变化。
-- visualPrompt 必须包含主体、前中后景、构图、光线、材质、色彩和真实摄影质感；videoPrompt 必须补充主体运动、环境运动、连续性、时长和转场逻辑。
+- 先遵循项目已经指定的画风、媒介和制作形态；真人、二维、三维、定格、绘本或混合媒介都可以，不得擅自替换成另一种表现形态。
+- 不要把剧情段落直接改写成镜头摘要。每一行必须写明 purpose、informationChange、可见主体、空间关系与结果。
+- startBoundary 和 endBoundary 是制作事实，至少在 positions 中写明主体位置，并按需要填写朝向、目光、双手、持物和可见状态；相邻镜头必须能连续承接。
+- description 只写可见画面与动作；不可见心理必须转译为表情、停顿、手部动作、走位、道具或环境反馈。
+- visualPrompt 只描述冻结在 startBoundary 的单一画面，可写构图、光线、材质和媒介特征，不得混入动作过程、时间段或 endBoundary。
+- videoPrompt 只描述怎样从 startBoundary 到达 endBoundary，按因果顺序写主体动作、环境/声音反馈与结束核对，不得重设人物身份、服装、持物或空间。
+- camera、motion 和 timeBeats 要具体且可执行；固定视点与运动视点都有效，是否运动、使用何种技法及持续多久由叙事和项目媒介决定。
+- timeBeats 覆盖完整 durationSeconds，并明确开始、变化与结束落点；使用精确时间段时，各段总和必须等于镜头时长。
 - styleGuide、visualPrompt 和 videoPrompt 禁止写入 2.39:1、16:9 等具体画幅比例，也不要讨论画幅配置。
-- negativePrompt 必须针对本镜头列出换脸、服装变化、手部错误、乱码、闪烁、风格突变、动作僵硬等风险，不要只写“无”。
-- 只返回 JSON。shots 中每项必须包含：title、description、durationSeconds、dialogue、shotSize、emotion、lightingAndAtmosphere、audioEffects、visualPrompt、videoPrompt、camera、motion、timeBeats、negativePrompt、assetTags。`
+- negativePrompt 只写本镜真实存在的风险；没有具体风险时返回空字符串，不复制通用禁词清单。
+- assetTags 只能引用输入中存在的画布资产标签；业务项目中的精确资产版本仍由项目镜头绑定负责。
+- 未指定镜头数量时优先生成 3 个镜头，剧情确有必要时最多 5 个；每个字段使用能执行的短句，避免重复解释和长篇 prose，确保结果能在输出上限内完整收束。
+- 为了兼容慢推理模型和五分钟级上游网关，默认严格生成 3 个镜头；只有用户明确指定镜头数量时才改变数量。每个镜头的 description、purpose、informationChange、camera、motion、timeBeats 控制在短句范围内，visualPrompt 和 videoPrompt 各不超过约 160 个中文字符；不要在每个镜头重复 styleGuide、角色设定或制作说明。
+- startBoundary 和 endBoundary 各保留最少一项 positions，其他数组只在确实改变镜头连续性时填写；characters、locations 和 assetTags 只保留本镜真正需要的内容。优先保证完整 JSON、首帧图片提示词和视频动作提示词，不要为了扩写细节牺牲最后几个镜头的闭合括号。
+- 最终响应必须是单个完整 JSON 对象，以 { 开始、以 } 结束；键和字符串使用双引号，不要输出 Markdown、思考过程、注释、尾随逗号或顶层数组。
+- 只返回 JSON。shots 中每项必须包含：title、description、purpose、informationChange、startBoundary、endBoundary、durationSeconds、dialogue、shotSize、emotion、lightingAndAtmosphere、audioEffects、visualPrompt、videoPrompt、camera、motion、timeBeats、negativePrompt、assetTags。`
 
 	return contract + "\n\n" + storyboardCameraLanguageGuide()
 }
 
+// 手动交付只需要可读、可复制的短分镜，不把基础文本模型强行套进长 JSON 契约。
+// 后端仍会把完整标签文本解析并校验成同一份结构化分镜结果。
+func buildManualStoryboardPlannerPrompt(brief string, requirements string, shotDuration int, shotCount int) string {
+	countRule := "默认生成 3 个镜头；只有用户明确指定数量时才调整，最多 8 个。"
+	if shotCount >= 1 && shotCount <= 8 {
+		countRule = fmt.Sprintf("严格生成 %d 个镜头，不得多于或少于 %d 个。", shotCount, shotCount)
+	}
+	durationRule := "每个镜头时长 1 到 60 秒，按剧情节奏决定。"
+	if shotDuration >= 1 && shotDuration <= 60 {
+		durationRule = fmt.Sprintf("每个镜头严格使用 %d 秒。", shotDuration)
+	}
+	return fmt.Sprintf(`你是短剧分镜助手。请把用户需求整理成可直接编辑和复制的短分镜。
+
+用户需求：
+%s
+
+用户要求：
+%s
+
+规则：
+- %s
+- %s
+- 每个镜头都要有可见的画面描述、图片生成提示词和视频动作提示词；没有台词时写“无”。
+- 提示词使用短句，保持人物、场景、道具和光线连续，不要重复整段风格说明。
+- 不要解释过程，不要写 Markdown 表格；按下面的标签格式逐镜输出纯文本即可：
+
+镜头 1：
+画面描述：……
+图片提示词：……
+视频动作提示词：……
+时长：6 秒
+台词：……
+
+只输出镜头内容。`, strings.TrimSpace(brief), strings.TrimSpace(requirements), countRule, durationRule)
+}
+
 func storyboardCameraLanguageGuide() string {
-	return `分镜镜头语言规则（必须融入每个镜头的设计，服务叙事而非炫技）：
-- 景别必须从以下六类中选择并写入 shotSize：S01 大远景 ELS（环境/宏大空间）、S02 远景 LS（人物全身与处境）、S03 全景 FS（完整动作）、S04 中景 MS（自然叙事/对话首选）、S05 近景 CU（表情与反应）、S06 特写 ECU（眼睛、手或关键细节）。同一场景按叙事需要渐进变化，避免无逻辑跳跃。
-- 机位角度按叙事需要选择：A01 平视 Eye Level（中性客观）、A02 仰角 Low Angle（强大/压迫）、A03 俯角 High Angle（弱小/脆弱）、A04 鸟瞰 Bird's Eye/Top Down（全知/构图）、A05 倾斜角 Dutch Angle（失衡/不安）、A06 蜗牛视角 Worm's Eye（极度崇高或压迫）。无动机不得突变视角。
-- 运镜从以下体系中按情绪和空间目的选择，并在 motion 写清起止状态：M01 推、M02 拉、M03 横移、M04 水平摇、M05 垂直倾斜、M06 升降、M07 环绕、M08 甩镜、M09 手持、M10 稳定器跟拍、M11 主观跟进、M12 航拍推进、M13 航拍拉升、M14 变焦、M15 希区柯克变焦、M16 过肩。运动镜头必须有动机；以静制动，固定镜头与运动镜头要形成对比。
-- 构图优先从以下方法选择并写入 camera 或 visualPrompt：C01 三分法、C02 框中框、C03 引导线、C04 对称构图、C05 负空间、C06 前景叠层。必须交代主体、前景/中景/远景和视觉焦点。
-- 叙事手法按需要使用：N01 主观镜头、N02 反应镜头、N03 空镜/插入、N04 匹配剪辑、N05 交叉剪辑、N06 跳切。对话优先 MS + OTS（过肩）+ 反应镜头，不要用复杂运动掩盖表演。
-- 节奏约束：推/拉/横移/升降等运动镜头通常保持 5-8 秒以上；甩镜和希区柯克变焦全片各不超过 1-2 次；手持只用于纪实、紧迫或混乱等明确情绪；航拍主要用于开篇或高潮；ECU 每场景最多 2 个。
-- 禁止每 3-5 秒更换一次运镜，禁止同类技法连续重复，禁止无叙事动机的角度突变；希区柯克变焦仅用于顿悟、恐惧或心理扭转等关键时刻。`
+	return `镜头设计参考（服务信息变化，不作为固定配额）：
+- shotSize 写明观众能看见的空间范围和注意重点；景别变化应由新信息、动作可读性或情绪距离驱动。
+- camera 写明视点、角度、构图与空间关系。真人项目可以使用摄影机术语，动画或其他媒介使用对应的虚拟视点与构图语言。
+- motion 先说明固定或移动，再写移动的主体、方向、起点、终点和叙事动机；没有移动同样是完整设计。
+- 构图应明确主体、视觉焦点及必要的空间层级，但不要为了套用术语强加无关前景、焦段或景深。
+- 对话、反应、插入、主观、匹配或交叉剪辑都按原文义务与信息变化选择，不设固定数量。
+- 镜头技法、持续时间和使用次数没有通用配额；只检查是否可执行、是否连续，以及是否到达 endBoundary。`
+}
+
+func legacyStoryboardPromptNeedsUpgrade(content string) bool {
+	return strings.Contains(content, "\n....\n") ||
+		(strings.Contains(content, "优先使用真实电影机语言") && strings.Contains(content, "不要在 visualPrompt 或 videoPrompt 中使用 3D动漫"))
 }
 
 func storyboardPromptTemplateFromRequest(req StoryboardPromptTemplateRequest, template model.StoryboardPromptTemplate) (model.StoryboardPromptTemplate, error) {
@@ -190,23 +266,23 @@ func renderStoryboardPromptTemplate(template string, brief string, requirements 
 
 func defaultStoryboardPromptTemplate() string {
 	codeFence := "```"
-	return `你是影视分镜导演和 AI 视频提示词专家。
-	请根据用户剧情 brief 和当前画布资产标签，生成可直接用于 AI 视频生成的分镜 JSON。
+	return `你是分镜导演和 AI 媒体制作规划师。
+请根据用户剧情 brief、用户要求和当前画布资产，生成可编辑并可分别用于图片与视频生成的分镜 JSON。
 
-创作方法参考成熟分镜提示词实践：
-- 先理解故事目标、人物动机、冲突、情绪曲线和结尾。
-- 每个镜头都要明确主体、动作、场景、景别、构图、镜头焦段、机位、运镜、光线、色彩、质感、时长感和转场。
-- durationSeconds 必须是 1 到 60 的整数；没有台词、旁白或音效时返回空字符串。
-	- 需要保持角色、服装、道具、空间和风格一致；能复用画布资产时，在 assetTags 中引用对应标签。
-	- characters 必须逐角色输出，格式固定为“角色名：剧情定位、外貌、服装、体态、道具、性格动机和跨镜头一致性约束”，不要把多个角色合并成一项。
-- videoPrompt 必须是完整中文视频生成提示词，不要只写关键词。
-- videoPrompt 必须包含镜头时长、开始画面、中段变化、结尾画面、摄影机运动、主体运动、环境运动、可信光源、色彩基调、真实摄影质感和负面视觉约束。
-- 优先使用真实电影机语言：低机位/平视/俯拍、焦段、景深、自然曝光、空气介质、胶片颗粒、真实高光滚降。
-- 不要把主体完整居中平铺；需要有前景/中景/远景和人、物、空间尺度参照。
-- 不要在 visualPrompt 或 videoPrompt 中使用 3D动漫、动画、二次元、游戏CG、游戏截图、角色原画、概念设计图、手办感、卡通渲染、插画风等媒介限定词。
-- assetTags 只能引用当前画布资产里已有的标签或标签值；没有可复用资产时返回空数组。
+制作方法：
+- 先识别项目已经指定的画风、媒介与制作形态，再分析故事目标、人物动机、冲突、信息变化和结尾；不要擅自改换媒介。
+- 每个镜头先写 purpose 和 informationChange，再决定可见动作、空间、景别、构图、视点、时长和声音。
+- startBoundary 与 endBoundary 分别记录主体位置、朝向、目光、双手、持物和可见状态；positions 至少包含一项。
+- visualPrompt 只描述冻结在 startBoundary 的一个瞬间，不写动作过程、时间推进或 endBoundary。
+- videoPrompt 只描述从 startBoundary 到 endBoundary 的有序变化，不重新发明人物身份、服装、道具或地点。
+- camera 与 motion 使用符合项目媒介的表达；固定视点是有效设计，不为追求术语强行移动。
+- timeBeats 覆盖完整 durationSeconds；durationSeconds 必须是 1 到 60 的整数。
+- 没有台词、旁白、音效或本镜专属排除项时，对应字段返回空字符串。
+- 需要保持角色、服装、道具、空间和风格连续；能复用画布资产时，在 assetTags 中引用现有标签。
+- characters 必须逐角色输出，记录剧情定位、稳定识别点、当前服装/状态、持物与跨镜一致性，不要把多个角色合并成一项。
+- assetTags 只能引用当前画布资产已有的标签或标签值；没有可复用资产时返回空数组。
 
-	用户brief：
+用户 brief：
 ` + codeFence + `
 {{剧情}}
 ` + codeFence + `
@@ -218,10 +294,10 @@ func defaultStoryboardPromptTemplate() string {
 
 当前画布资产：{{画布资产}}
 
-	格式：
-{"title":"项目标题","logline":"一句话故事","styleGuide":"整体摄影、光线、色彩、质感和一致性规则","characters":["张三：男主角，28岁，短黑发，深灰夹克，清瘦挺拔，随身旧怀表，克制果断；所有镜头保持五官、发型、服装和怀表一致"],"locations":["场景与空间描述"],"shots":[{"title":"镜头标题","description":"可拍摄的主体动作、空间关系和可见结果","durationSeconds":8,"dialogue":"台词或旁白","shotSize":"中近景","emotion":"克制紧张","lightingAndAtmosphere":"侧逆光与薄雾","audioEffects":"环境风声","visualPrompt":"包含前中后景、构图、光线、材质和真实摄影质感的图片提示词","videoPrompt":"补充主体运动、环境运动、连续性、时长和转场逻辑","camera":"平视略低机位，50mm，中近景，前景遮挡，三分法构图","motion":"0-1秒固定，1-5秒缓慢推近，5-8秒轻微横移后停住","timeBeats":"0-1秒：建立画面；1-5秒：主体完成关键动作；5-8秒：反应和结尾停点","negativePrompt":"禁止换脸、服装变化、手部畸形、乱码、闪烁、风格突变、动作僵硬","assetTags":["角色:张三"]}]}
+格式：
+{"title":"项目标题","logline":"一句话故事","styleGuide":"沿用项目画风、媒介、材质、光线、色彩和一致性规则","characters":["张三：男主角，稳定身份、当前服装与持物、剧情动机和跨镜一致性"],"locations":["场景身份、空间关系与当前状态"],"shots":[{"title":"镜头标题","description":"可见主体、空间关系、动作和结果","purpose":"观众此刻必须注意什么及为什么需要新镜头","informationChange":"镜头前已知状态 -> 镜头后新增信息或可见结果","startBoundary":{"positions":["张三站在门内左侧"],"facing":["面向走廊"],"gaze":["看向门外"],"hands":["右手扶门框"],"heldProps":["左手握旧怀表"],"visibleState":["门外尚无人出现"]},"endBoundary":{"positions":["张三仍在门内左侧"],"facing":["面向走廊"],"gaze":["视线落到来人身上"],"hands":["右手离开门框"],"heldProps":["左手仍握旧怀表"],"visibleState":["来人停在走廊尽头"]},"durationSeconds":8,"dialogue":"台词或旁白","shotSize":"能读清人物与门口空间关系的景别","emotion":"由等待转为警觉","lightingAndAtmosphere":"沿用项目设定的光线与氛围","audioEffects":"走廊脚步声","visualPrompt":"冻结在开始边界：张三位于门内左侧，右手扶门框，左手握旧怀表，门外尚无人出现；构图、材质与光线沿用项目画风","videoPrompt":"从开始边界出发，脚步声先出现，张三右手离开门框并抬眼，来人进入走廊尽头后停下，最终严格到达结束边界","camera":"符合项目媒介的稳定视点，保持门内与走廊方向可读","motion":"固定视点；主体和来人完成画内动作","timeBeats":"0-2秒：保持开始边界并出现脚步声；2-5秒：张三抬眼、来人进入；5-8秒：来人停下并保持结束边界","negativePrompt":"本镜专属风险；没有则为空字符串","assetTags":["角色:张三"]}]}
 
 特别注意：
 - 只返回 JSON，不要 markdown，不要解释。
-- shots 输出 3 到 8 个；如果后续强制电影化质量契约指定了镜头数量，以契约为准。`
+- shots 输出 3 到 5 个；如果后续分镜制作契约指定了镜头数量，以契约为准。`
 }

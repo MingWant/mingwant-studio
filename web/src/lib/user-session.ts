@@ -1,7 +1,8 @@
 import { getSystemChannels, type AuthSessionPayload } from "@/services/api/auth";
 import { localForageStorage } from "@/lib/localforage-storage";
 import { appQueryClient } from "@/lib/query-client";
-import { scopedLocalStorage, setActiveUserScope } from "@/lib/user-scope";
+import { aiConfigStorage, clearSessionAiConfigSecrets } from "@/lib/ai-config-storage";
+import { getActiveUserScope, scopedLocalStorage, setActiveUserScope } from "@/lib/user-scope";
 import { CANVAS_STORE_KEY, flushCanvasStorePersistence, useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { ASSET_STORE_KEY, useAssetStore } from "@/stores/use-asset-store";
 import { CONFIG_STORE_KEY, defaultConfig, normalizeConfigSnapshot, useConfigStore } from "@/stores/use-config-store";
@@ -11,12 +12,22 @@ import { installRemoteUserDataAutoSync, resetRemoteUserDataSync, syncRemoteUserD
 export async function applyUserSession(payload: AuthSessionPayload) {
     const previousUserId = useUserStore.getState().user?.id || "";
     const nextUserId = payload.user?.id || "";
+    const previousScope = getActiveUserScope();
     useUserStore.getState().setHydrated(false);
     try {
         // Query key 不携带用户 ID；身份变化时必须取消并清空旧账号请求，避免跨账号复用内存数据。
         if (previousUserId !== nextUserId) appQueryClient.clear();
         resetRemoteUserDataSync();
         await flushCanvasStorePersistence();
+        if (previousScope !== (nextUserId || "guest")) {
+            // 即使登录态已过期，也先把旧版配置中的明文密钥迁出普通快照，再清理会话级凭据。
+            try {
+                aiConfigStorage.getItem(CONFIG_STORE_KEY);
+            } catch (error) {
+                console.warn("旧版 AI 配置密钥迁移失败，未读取密钥正文", error);
+            }
+            clearSessionAiConfigSecrets();
+        }
         setActiveUserScope(payload.user?.id);
         const [persistedCanvas, persistedAssets] = await Promise.all([
             localForageStorage.getItem(CANVAS_STORE_KEY),

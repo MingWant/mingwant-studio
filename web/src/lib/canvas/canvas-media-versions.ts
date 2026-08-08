@@ -11,6 +11,7 @@ function snapshotMetadata(metadata: CanvasNodeMetadata | undefined, rootId: stri
     delete snapshot.taskStage;
     delete snapshot.taskCreatedAt;
     delete snapshot.taskUpdatedAt;
+    delete snapshot.taskRecoveryUncertain;
     delete snapshot.errorDetails;
     delete snapshot.generationErrorCode;
     delete snapshot.failedPromptFingerprint;

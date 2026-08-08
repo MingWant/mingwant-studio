@@ -3,17 +3,21 @@ import { create } from "zustand";
 import { createJSONStorage, persist } from "zustand/middleware";
 import { nanoid } from "nanoid";
 
-import { scopedLocalStorage } from "@/lib/user-scope";
+import { aiConfigStorage } from "@/lib/ai-config-storage";
+import type { ModelCapabilityConfig } from "@/lib/model-capabilities";
+import { isGeminiModelProtocol, modelProtocolCapability, normalizeModelProtocol, type ModelProtocol } from "@/lib/model-protocols";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
 
 export type ApiCallFormat = "openai" | "gemini";
-export type ChannelInterfaceType = "chat-completion" | "openai-response" | "openai-image" | "newapi" | "newapi-channel-1" | "newapi-channel-2" | "xai-video";
+export type ChannelInterfaceType = ModelProtocol;
 
 export type ModelChannel = {
     id: string;
     name: string;
     baseUrl: string;
     apiKey: string;
+    rememberApiKey?: boolean;
+    probeCredentialVersion?: string;
     apiFormat: ApiCallFormat;
     interfaceType?: ChannelInterfaceType;
     models: string[];
@@ -25,8 +29,18 @@ export type ModelChannel = {
         model: string;
         displayName?: string;
         capability: ModelCapability;
+        protocol?: ModelProtocol;
+        capabilityVersion?: number;
+        capabilityConfig?: ModelCapabilityConfig;
         billingMode: "fixed_request" | "per_second";
         unitPriceMicrocredits: number;
+        probeStatus?: "succeeded" | "failed" | string;
+        probeTransport?: string;
+        probeDurationMs?: number;
+        probeCheckedAt?: string;
+        toolProbeStatus?: "succeeded" | "failed" | string;
+        toolProbeCheckedAt?: string;
+        toolProbeVerifierVersion?: string;
     }>;
 };
 
@@ -79,6 +93,7 @@ export const defaultConfig: AiConfig = {
             name: "默认渠道",
             baseUrl: OPENAI_BASE_URL,
             apiKey: "",
+            rememberApiKey: false,
             apiFormat: "openai",
             models: ["gpt-image-2", "grok-imagine-video", "gpt-5.5", "gpt-4o-mini-tts"],
         },
@@ -185,8 +200,11 @@ export function configuredModelMatchesCapability(config: AiConfig, model: string
 }
 
 function isAiConfigReady(config: AiConfig, model: string) {
-    const channel = resolveModelChannel(config, model);
-    return Boolean(model.trim() && channel.baseUrl.trim() && channel.apiKey.trim());
+    // 不能只检查渠道有密钥；旧画布或已删模型的裸名称会被 resolveModelChannel 误投到第一条渠道。
+    const normalizedModel = normalizeModelOptionValue(model, config.channels);
+    if (!normalizedModel || !config.models.includes(normalizedModel)) return false;
+    const channel = resolveModelChannel(config, normalizedModel);
+    return Boolean(channel.baseUrl.trim() && channel.apiKey.trim());
 }
 
 export const useConfigStore = create<ConfigStore>()(
@@ -219,7 +237,9 @@ export const useConfigStore = create<ConfigStore>()(
         }),
         {
             name: CONFIG_STORE_KEY,
-            storage: createJSONStorage(() => scopedLocalStorage),
+            storage: createJSONStorage(() => aiConfigStorage),
+            // 必须先由服务端确认当前账号，再按账号 scope 恢复配置和密钥，避免启动阶段短暂加载上一账号凭据。
+            skipHydration: true,
             partialize: (state) => ({ config: state.config }),
             merge: (persisted, current) => {
                 const persistedState = (persisted || {}) as Partial<ConfigStore>;
@@ -276,7 +296,14 @@ export function normalizeConfigSnapshot(snapshot: ConfigStoreSnapshot) {
 
 function normalizeSelectedModel(value: string, channels: ModelChannel[], options: string[]) {
     const model = normalizeModelOptionValue(value, channels);
-    return model && options.includes(model) ? model : options[0] || "";
+    if (model && options.includes(model)) return model;
+    const raw = typeof value === "string" ? value.trim() : "";
+    // 带前缀的旧值曾经明确绑定过某个渠道；渠道被删除后不能把它当成裸模型名，
+    // 否则刷新系统渠道会把用户静默切到 options[0]，测活和实际请求就会漂移。
+    if (raw && isChannelModelValue(raw)) return "";
+    // 旧配置只保存裸模型名且该名称跨渠道重复时，宁可要求重新选择，也不静默绑定第一条渠道。
+    if (raw && !isChannelModelValue(raw) && channels.filter((channel) => channel.models.includes(raw)).length > 1) return "";
+    return options[0] || "";
 }
 
 export function useEffectiveConfig() {
@@ -293,13 +320,15 @@ export function createModelChannel(channel?: Partial<ModelChannel>): ModelChanne
         name: channel?.name?.trim() || "新渠道",
         baseUrl: providedBaseUrl || (interfaceType ? defaultBaseUrlForChannelInterface(interfaceType) : defaultBaseUrlForApiFormat(apiFormat)),
         apiKey: channel?.apiKey || "",
+        rememberApiKey: channel?.rememberApiKey === true,
+        probeCredentialVersion: channel?.probeCredentialVersion,
         apiFormat,
         interfaceType,
         models: uniqueRawModels(channel?.models || []),
         scope: channel?.scope === "system" ? "system" : "user",
         enabled: channel?.enabled !== false,
         hasApiKey: channel?.hasApiKey,
-        modelCosts: channel?.modelCosts,
+        modelCosts: channel?.modelCosts?.map((item) => ({ ...item, protocol: normalizeModelProtocol(item.protocol) })),
     };
 }
 
@@ -329,10 +358,11 @@ export function modelDisplayName(config: AiConfig, value: string) {
 
 export function modelOptionLabel(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(value);
-    if (!decoded) return modelDisplayName(config, value);
-    const channel = config.channels.find((item) => item.id === decoded.channelId);
+    const channel = resolveModelChannel(config, value);
     const displayName = modelDisplayName(config, value);
-    return channel ? `${displayName}（${channel.name}）` : displayName;
+    if (channel.id === "__unresolved_model__") return `需重新选择：${displayName}`;
+    if (!decoded) return displayName;
+    return `${displayName}（${channel.name}）`;
 }
 
 export function modelOptionsFromChannels(channels: ModelChannel[]) {
@@ -360,28 +390,82 @@ export function normalizeModelOptionValue(value: unknown, channels: ModelChannel
         const channel = channels.find((item) => item.id === decoded.channelId);
         return channel && channel.models.includes(decoded.model) ? model : "";
     }
-    const channel = channels.find((item) => item.models.includes(model)) || channels[0];
-    return channel && channel.models.includes(model) ? encodeChannelModel(channel.id, model) : "";
+    const matches = channels.filter((item) => item.models.includes(model));
+    // 裸模型名在多渠道中不具备归属信息；不能猜第一条渠道，否则测活通过的渠道
+    // 可能与创作台实际请求的渠道不同。调用方会回退到当前已绑定的默认模型或提示重新选择。
+    return matches.length === 1 ? encodeChannelModel(matches[0].id, model) : "";
 }
 
 export function resolveModelChannel(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(value);
-    const model = decoded?.model || value;
-    const matched = decoded ? config.channels.find((channel) => channel.id === decoded.channelId) : config.channels.find((channel) => channel.models.includes(model));
-    return matched || config.channels[0] || createModelChannel({ id: "default", name: "默认渠道", baseUrl: config.baseUrl, apiKey: config.apiKey, apiFormat: config.apiFormat, models: config.models.map(modelOptionName) });
+    if (decoded) {
+        // 带渠道前缀的模型已经是一次明确绑定；渠道被删除或模型被下架时，
+        // 不能回退到第一条渠道，否则测活通过的配置会被静默换成另一条 Base URL。
+        return config.channels.find((channel) => channel.id === decoded.channelId) || unresolvedModelChannel(config);
+    }
+    const model = value.trim();
+    const matches = config.channels.filter((channel) => channel.models.includes(model));
+    if (matches.length === 1) return matches[0];
+    if (matches.length > 1) {
+        // 旧数据里的裸模型名在多渠道中没有归属信息，必须要求用户重新选择。
+        return unresolvedModelChannel(config);
+    }
+    if (model && config.channels.length) {
+        // 模型已从所有当前渠道移除时也不能借用第一条渠道的凭据。
+        return unresolvedModelChannel(config);
+    }
+    return config.channels[0] || createModelChannel({ id: "default", name: "默认渠道", baseUrl: config.baseUrl, apiKey: config.apiKey, apiFormat: config.apiFormat, models: config.models.map(modelOptionName) });
+}
+
+function unresolvedModelChannel(config: AiConfig): ModelChannel {
+    return {
+        id: "__unresolved_model__",
+        name: "模型需重新选择",
+        baseUrl: "",
+        apiKey: "",
+        apiFormat: config.apiFormat,
+        models: [],
+        scope: "user",
+        enabled: false,
+    };
 }
 
 export function resolveModelRequestConfig(config: AiConfig, value: string) {
-    const channel = resolveModelChannel(config, value);
+    const requestedValue = value || config.model;
+    const normalizedValue = normalizeModelOptionValue(requestedValue, config.channels);
+    const selectedValue = normalizedValue || requestedValue;
+    const channel = resolveModelChannel(config, selectedValue);
+    const model = modelOptionName(selectedValue);
+    const modelCost = channel.modelCosts?.find((item) => item.model === model);
+    const modelProtocol = modelCost?.protocol;
+    // 渠道默认协议只对同能力模型有效；混合渠道里文本模型不能继承视频协议，
+    // 否则测活会按 Chat 通过，创作台却把同一模型发到错误的请求路径。
+    const channelProtocol = channel.interfaceType;
+    const modelProtocolMatchesCapability = !modelCost?.capability || !modelProtocol || modelProtocolCapability(modelProtocol) === modelCost.capability;
+    const channelProtocolMatchesCapability = !modelCost?.capability || !channelProtocol || modelProtocolCapability(channelProtocol) === modelCost.capability;
+    const interfaceType = (modelProtocolMatchesCapability ? modelProtocol : undefined) || (channelProtocolMatchesCapability ? channelProtocol : undefined) || defaultTextProtocolForChannel(channel, model, modelCost?.capability);
     return {
         ...config,
-        model: modelOptionName(value || config.model),
+        model,
         baseUrl: channel.baseUrl,
         apiKey: channel.apiKey,
-        apiFormat: channel.apiFormat,
-        interfaceType: channel.interfaceType,
+        apiFormat: interfaceType ? (isGeminiModelProtocol(interfaceType) ? "gemini" as const : "openai" as const) : channel.apiFormat,
+        interfaceType,
+        // 仅供前端在一轮 Agent/影视会话中复用已解析渠道；后端请求体不会透传该内部字段，
+        // 自定义渠道不能把它当作系统 channelId 使用。
+        resolvedChannelId: channel.id,
         channelId: channel.scope === "system" ? channel.id : "",
     };
+}
+
+/**
+ * 自动协议只在没有模型级/渠道级声明时生效；Chat Completions 是 OpenAI 兼容
+ * 网关和 Kimi 工具调用的共同交集，Responses 仍可由用户显式选择。
+ */
+export function defaultTextProtocolForChannel(channel: Pick<ModelChannel, "apiFormat">, model: string, capability?: ModelCapability): ChannelInterfaceType | undefined {
+    const resolvedCapability = capability || (modelMatchesCapability(model, "text") ? "text" : undefined);
+    if (resolvedCapability !== "text") return undefined;
+    return channel.apiFormat === "gemini" ? "gemini-content" : "chat-completion";
 }
 
 function normalizeChannels(config: AiConfig, ensureDefault = true) {
@@ -426,15 +510,13 @@ export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
 }
 
 export function defaultBaseUrlForChannelInterface(interfaceType?: ChannelInterfaceType) {
+    if (isGeminiModelProtocol(interfaceType)) return GEMINI_BASE_URL;
     if (interfaceType === "newapi" || interfaceType === "newapi-channel-1" || interfaceType === "newapi-channel-2" || interfaceType === "xai-video") return "";
     return OPENAI_BASE_URL;
 }
 
 function capabilityForChannelInterface(interfaceType?: ChannelInterfaceType): ModelCapability | undefined {
-    if (interfaceType === "chat-completion" || interfaceType === "openai-response") return "text";
-    if (interfaceType === "openai-image") return "image";
-    if (interfaceType === "newapi" || interfaceType === "newapi-channel-1" || interfaceType === "newapi-channel-2" || interfaceType === "xai-video") return "video";
-    return undefined;
+    return modelProtocolCapability(interfaceType);
 }
 
 function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
@@ -442,7 +524,7 @@ function normalizeApiFormat(apiFormat: unknown): ApiCallFormat {
 }
 
 function normalizeChannelInterfaceType(value: unknown): ChannelInterfaceType | undefined {
-    return value === "chat-completion" || value === "openai-response" || value === "openai-image" || value === "newapi" || value === "newapi-channel-1" || value === "newapi-channel-2" || value === "xai-video" ? value : undefined;
+    return normalizeModelProtocol(value);
 }
 
 function uniqueRawModels(models: string[]) {
@@ -460,10 +542,16 @@ function normalizeRawModelName(value: unknown) {
 }
 
 export function buildApiUrl(baseUrl: string, path: string) {
+    // 先判断原始相对系统代理路径。开发环境把 VITE_CANVAS_BACKEND_URL 指向
+    // 另一端口时，解析后的绝对地址会变成跨源 URL；若此时再按“第三方地址”判断，
+    // 会错误追加 /v1，把 /api/ai/system/<id>/chat/completions 发成不存在的路径。
+    const systemProxy = isSystemProxyBaseUrl(baseUrl);
     let normalizedBaseUrl = resolveBackendApiUrl(baseUrl).replace(/\/+$/, "");
     normalizedBaseUrl = normalizeArkPlanBaseUrl(normalizedBaseUrl);
     const lowerBaseUrl = normalizedBaseUrl.toLowerCase();
-    const apiBaseUrl = isSystemProxyBaseUrl(normalizedBaseUrl) || lowerBaseUrl.endsWith("/v1") || lowerBaseUrl.endsWith("/api/v3") || lowerBaseUrl.endsWith("/api/plan/v3") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
+    // 与 Backend 的 apiURL 保持同一套版本根识别；/v1beta 常见于兼容网关，
+    // 若遗漏会被错误拼成 /v1beta/v1/chat/completions。
+    const apiBaseUrl = systemProxy || isSystemProxyBaseUrl(normalizedBaseUrl) || lowerBaseUrl.endsWith("/v1") || lowerBaseUrl.endsWith("/v1beta") || lowerBaseUrl.endsWith("/api/v3") || lowerBaseUrl.endsWith("/api/plan/v3") ? normalizedBaseUrl : `${normalizedBaseUrl}/v1`;
     return `${apiBaseUrl}${path}`;
 }
 
@@ -475,11 +563,26 @@ export function resolveBackendApiUrl(value: string) {
 }
 
 export function isSystemProxyBaseUrl(baseUrl: string) {
-    const marker = "/api/ai/system/";
-    const index = baseUrl.toLowerCase().indexOf(marker);
-    if (index < 0) return false;
-    const channelId = baseUrl.slice(index + marker.length);
-    return Boolean(channelId && !channelId.includes("/") && !channelId.includes("?") && !channelId.includes("#"));
+    const value = baseUrl.trim();
+    if (!value) return false;
+    let pathname = value;
+    if (/^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(value)) {
+        // 系统渠道通常保存为同源相对路径；兼容同源绝对地址时也必须核对
+        // origin，不能因为自定义 Base URL 恰好包含同一段路径就绕过后端中转，
+        // 否则浏览器会把用户 API Key 直接发给第三方主机。
+        if (typeof window === "undefined") return false;
+        try {
+            const url = new URL(value, window.location.origin);
+            if (url.origin !== window.location.origin || url.username || url.password || url.search || url.hash) return false;
+            pathname = url.pathname;
+        } catch {
+            return false;
+        }
+    } else if (!value.startsWith("/")) {
+        return false;
+    }
+    const match = pathname.match(/^\/api\/ai\/system\/([^/]+)$/i);
+    return Boolean(match?.[1]);
 }
 
 function normalizeArkPlanBaseUrl(baseUrl: string) {

@@ -21,6 +21,7 @@ type CreateAssetVersionRequest struct {
 	Prompt         string `json:"prompt"`
 	DefinitionJSON string `json:"definitionJson"`
 	Note           string `json:"note"`
+	Status         string `json:"status"`
 }
 
 type ProjectAssetSummary struct {
@@ -282,13 +283,20 @@ func (s *Service) CreateProjectAssetVersion(userID string, projectID string, ass
 	if !json.Valid([]byte(definition)) {
 		return model.AssetVersion{}, BadAuthRequest("资产版本设定必须是有效 JSON")
 	}
+	status := model.AssetVersionStatus(strings.TrimSpace(req.Status))
+	if status == "" {
+		status = model.AssetVersionStatusDraft
+	}
+	if status != model.AssetVersionStatusDraft && status != model.AssetVersionStatusReview && status != model.AssetVersionStatusConfirmed {
+		return model.AssetVersion{}, BadAuthRequest("不支持的资产版本状态")
+	}
 	now := time.Now()
-	version := model.AssetVersion{ID: newID(), AssetID: assetID, Version: nextVersion, Status: model.AssetVersionStatusDraft, DefinitionJSON: definition, Prompt: strings.TrimSpace(req.Prompt), Note: strings.TrimSpace(req.Note), CreatedAt: now, UpdatedAt: now}
+	version := model.AssetVersion{ID: newID(), AssetID: assetID, Version: nextVersion, Status: status, DefinitionJSON: definition, Prompt: strings.TrimSpace(req.Prompt), Note: strings.TrimSpace(req.Note), CreatedAt: now, UpdatedAt: now}
 	if err := s.repo.CreateAssetVersion(&version); err != nil {
 		return model.AssetVersion{}, err
 	}
 	asset.PrimaryVersionID = version.ID
-	asset.Status = model.AssetVersionStatusDraft
+	asset.Status = status
 	asset.UpdatedAt = now
 	if err := s.repo.UpdateAssetDomain(asset); err != nil {
 		return model.AssetVersion{}, err
@@ -297,6 +305,24 @@ func (s *Service) CreateProjectAssetVersion(userID string, projectID string, ass
 		return model.AssetVersion{}, err
 	}
 	return version, nil
+}
+
+func (s *Service) ProjectAssetVersions(userID string, projectID string, assetID string) ([]model.AssetVersion, error) {
+	if _, err := s.repo.ProjectForUser(userID, projectID); err != nil {
+		return nil, err
+	}
+	assetID = strings.TrimSpace(assetID)
+	if _, err := s.repo.AssetForUser(userID, assetID); err != nil {
+		return nil, err
+	}
+	linked, err := s.repo.ProjectAssetLinked(projectID, assetID)
+	if err != nil {
+		return nil, err
+	}
+	if !linked {
+		return nil, BadAuthRequest("素材尚未加入当前项目")
+	}
+	return s.repo.AssetVersions(assetID)
 }
 
 func (s *Service) ConfirmProjectAssetCandidate(userID string, projectID string, candidateID string, req ConfirmProjectAssetCandidateRequest) (ProjectAssetSummary, error) {

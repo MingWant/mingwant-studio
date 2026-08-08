@@ -1,6 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { Button, Tooltip } from "antd";
-import { ArrowUp, CheckCircle2, CircleAlert, ImagePlus, LoaderCircle, UserRound, Wrench, X, XCircle } from "lucide-react";
+import { ArrowUp, CheckCircle2, CircleAlert, ImagePlus, LoaderCircle, Square, UserRound, Wrench, X, XCircle } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import type { CanvasAgentOperationImpact } from "@/lib/canvas/canvas-agent-ops";
@@ -150,20 +150,36 @@ export function AgentToolCard({ title, text, detail, theme }: { title: string; t
 
 export function AgentWorkingMessage({ theme }: { theme: (typeof canvasThemes)[keyof typeof canvasThemes] }) {
     const [length, setLength] = useState(1);
+    const [elapsedSeconds, setElapsedSeconds] = useState(0);
     useEffect(() => {
         const timer = window.setInterval(() => setLength((value) => (value >= WORKING_TEXT.length + 4 ? 1 : value + 1)), 120);
         return () => window.clearInterval(timer);
     }, [setLength]);
+    useEffect(() => {
+        const startedAt = Date.now();
+        const updateElapsed = () => setElapsedSeconds(Math.max(0, Math.floor((Date.now() - startedAt) / 1000)));
+        updateElapsed();
+        const timer = window.setInterval(updateElapsed, 1_000);
+        return () => window.clearInterval(timer);
+    }, []);
     return (
         <div className="flex items-start gap-2.5">
             <AgentAvatar theme={theme} />
             <div className="min-w-0 max-w-[82%]">
-                <div className="font-mono text-sm" style={{ color: theme.node.muted }} aria-label={WORKING_TEXT}>
+                <div className="font-mono text-sm" style={{ color: theme.node.muted }} aria-label={WORKING_TEXT} aria-live="polite">
                     <span className="inline-block w-[96px]">{WORKING_TEXT.slice(0, Math.min(length, WORKING_TEXT.length))}</span>
+                    {elapsedSeconds >= 10 ? <span className="ml-2 font-sans text-[11px]" style={{ color: theme.node.muted }}>已等待 {formatAgentElapsed(elapsedSeconds)}，模型可能仍在处理，请勿重复提交</span> : null}
                 </div>
             </div>
         </div>
     );
+}
+
+function formatAgentElapsed(totalSeconds: number) {
+    if (totalSeconds < 60) return `${totalSeconds} 秒`;
+    const minutes = Math.floor(totalSeconds / 60);
+    const seconds = totalSeconds % 60;
+    return `${minutes} 分 ${String(seconds).padStart(2, "0")} 秒`;
 }
 
 export function AgentChatComposer({
@@ -175,6 +191,7 @@ export function AgentChatComposer({
     theme,
     onPromptChange,
     onSubmit,
+    onStop,
     onAddFiles,
     onRemoveAttachment,
     left,
@@ -187,6 +204,7 @@ export function AgentChatComposer({
     theme: (typeof canvasThemes)[keyof typeof canvasThemes];
     onPromptChange: (value: string) => void;
     onSubmit: () => void;
+    onStop?: () => void;
     onAddFiles?: (files: FileList | File[] | null) => void | Promise<void>;
     onRemoveAttachment?: (id: string) => void;
     left?: ReactNode;
@@ -244,18 +262,26 @@ export function AgentChatComposer({
                         ) : null}
                         {left}
                     </div>
-                    <Button type="primary" className="!h-9 !w-9 !min-w-9 !rounded-lg !p-0" disabled={!canSubmit} icon={sending ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />} onClick={() => void onSubmit()} aria-label="发送" />
+                    {sending && onStop ? (
+                        <Tooltip title="停止等待；供应商可能仍在执行并计费">
+                            <Button danger type="primary" className="!h-9 !rounded-lg !px-3" icon={<Square className="size-3.5 fill-current" />} onClick={() => void onStop()} aria-label="停止等待在线 Agent">
+                                停止
+                            </Button>
+                        </Tooltip>
+                    ) : (
+                        <Button type="primary" className="!h-9 !w-9 !min-w-9 !rounded-lg !p-0" disabled={!canSubmit} icon={sending ? <LoaderCircle className="size-4 animate-spin" /> : <ArrowUp className="size-4" />} onClick={() => void onSubmit()} aria-label="发送" />
+                    )}
                 </div>
             </div>
         </div>
     );
 }
 
-export function AgentModeSwitch({ value, theme, onChange }: { value: CanvasAgentMode; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; onChange: (value: CanvasAgentMode) => void }) {
+export function AgentModeSwitch({ value, theme, disabled, onChange }: { value: CanvasAgentMode; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; disabled?: boolean; onChange: (value: CanvasAgentMode) => void }) {
     return (
         <div className="inline-flex shrink-0 rounded-md border p-0.5 text-xs" style={{ borderColor: theme.node.stroke, background: theme.spatial.surface }}>
             {(["online", "local"] as const).map((item) => (
-                <button key={item} type="button" className="rounded-md px-2 py-1 transition" style={{ background: value === item ? theme.node.fill : "transparent", color: value === item ? theme.node.text : theme.node.muted }} onClick={() => onChange(item)}>
+                <button key={item} type="button" disabled={disabled} className="rounded-md px-2 py-1 transition disabled:cursor-not-allowed disabled:opacity-45" style={{ background: value === item ? theme.node.fill : "transparent", color: value === item ? theme.node.text : theme.node.muted }} onClick={() => onChange(item)}>
                     {item === "online" ? "网站" : "本机"}
                 </button>
             ))}

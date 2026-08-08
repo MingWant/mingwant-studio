@@ -8,6 +8,7 @@ docs
 docs2
 data
 backend/data
+.local
 backend/*.db
 .serena
 web/.next

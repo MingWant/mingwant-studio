@@ -26,6 +26,8 @@ export type CanvasGenerationExecution = CanvasGenerationExecutorDependencies & {
     generationConfig: AiConfig;
     generationContext: NodeGenerationContext;
     controller: AbortController;
+    sourceTaskId?: string;
+    confirmNewProviderRequest?: boolean;
     editingTextNode: boolean;
     registerPendingNodeIds: (nodeIds: string[]) => void;
 };

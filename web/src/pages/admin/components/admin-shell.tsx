@@ -49,11 +49,15 @@ const adminNavigation: Array<{ label: string; items: AdminNavigationItem[] }> = 
 ];
 
 export function AdminShell() {
-    const [collapsed, setCollapsed] = useState(() => window.localStorage.getItem(WORKSPACE_SIDEBAR_STORAGE_KEY) === "1");
+    const [collapsed, setCollapsed] = useState(() => readSidebarCollapsed());
     const toggleCollapsed = () => {
         setCollapsed((current) => {
             const next = !current;
-            window.localStorage.setItem(WORKSPACE_SIDEBAR_STORAGE_KEY, next ? "1" : "0");
+            try {
+                window.localStorage.setItem(WORKSPACE_SIDEBAR_STORAGE_KEY, next ? "1" : "0");
+            } catch {
+                // 管理侧栏偏好不影响权限和业务操作；存储被禁用时保留内存状态即可。
+            }
             return next;
         });
     };
@@ -93,6 +97,15 @@ export function AdminShell() {
             </section>
         </main>
     );
+}
+
+function readSidebarCollapsed() {
+    if (typeof window === "undefined") return false;
+    try {
+        return window.localStorage.getItem(WORKSPACE_SIDEBAR_STORAGE_KEY) === "1";
+    } catch {
+        return false;
+    }
 }
 
 export function AdminPageFrame({ title, description, actions, children }: { title: string; description: string; actions?: ReactNode; children: ReactNode }) {

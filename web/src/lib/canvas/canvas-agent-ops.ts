@@ -1,7 +1,11 @@
 import { nanoid } from "nanoid";
 
 import { getNodeSpec } from "@/constant/canvas";
+import { normalizeAgentStoryboardMetadata } from "@/lib/canvas/canvas-project-domain";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata, type ViewportTransform } from "@/types/canvas";
+
+/** 手动交付只把分镜产物交给用户，Agent 不得绕过网页工作台提交视频任务。 */
+export const MANUAL_DELIVERY_VIDEO_MESSAGE = "手动交付模式不会通过 Agent 提交视频任务；请先复制分镜视频提示词，再到网页工作台逐镜生成。";
 
 export type CanvasAgentOp =
     | { type: "add_node"; id?: string; nodeType?: CanvasNodeType; title?: string; position?: { x: number; y: number }; x?: number; y?: number; width?: number; height?: number; metadata?: CanvasNodeMetadata }
@@ -11,7 +15,8 @@ export type CanvasAgentOp =
     | { type: "connect_nodes"; id?: string; fromNodeId: string; toNodeId: string; fromHandleId?: string; toHandleId?: string }
     | { type: "set_viewport"; viewport: ViewportTransform }
     | { type: "select_nodes"; ids: string[] }
-    | { type: "run_generation"; nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string };
+    | { type: "run_generation"; nodeId: string; mode?: "text" | "image" | "video" | "audio"; prompt?: string }
+    | { type: "run_image_annotation"; annotationNodeId: string; prompt?: string };
 
 export type CanvasAgentSnapshot = {
     projectId: string;
@@ -89,6 +94,12 @@ export function previewCanvasAgentOps(ops?: CanvasAgentOp[], snapshot?: CanvasAg
             items.push(`为「${nodeById.get(op.nodeId)?.title || op.nodeId}」触发${generationModeLabel(op.mode)}生成`);
             return;
         }
+        if (op.type === "run_image_annotation") {
+            affectedNodeIds.add(op.annotationNodeId);
+            generationCount += 1;
+            items.push(`按「${nodeById.get(op.annotationNodeId)?.title || op.annotationNodeId}」的标注修改图片`);
+            return;
+        }
         if (op.type === "select_nodes") {
             op.ids.forEach((id) => affectedNodeIds.add(id));
             items.push(`选择 ${op.ids.length} 个节点`);
@@ -128,7 +139,7 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
                 position: op.position || { x: op.x ?? index * 36, y: op.y ?? index * 36 },
                 width: op.width || spec.width,
                 height: op.height || spec.height,
-                metadata: { ...spec.metadata, ...op.metadata },
+                metadata: { ...spec.metadata, ...(nodeType === CanvasNodeType.Script ? normalizeAgentStoryboardMetadata(op.metadata as Record<string, unknown> | undefined) : op.metadata) },
             };
             nodes = [...nodes, node];
             selectedNodeIds = [node.id];
@@ -140,7 +151,13 @@ export function applyCanvasAgentOps(snapshot: CanvasAgentSnapshot, ops?: CanvasA
             const dx = current?.type === CanvasNodeType.Frame && nextPosition ? nextPosition.x - current.position.x : 0;
             const dy = current?.type === CanvasNodeType.Frame && nextPosition ? nextPosition.y - current.position.y : 0;
             nodes = nodes.map((node) => {
-                if (node.id === op.id) return { ...node, ...op.patch, metadata: { ...node.metadata, ...op.patch?.metadata, ...op.metadata } };
+                if (node.id === op.id) {
+                    const incomingMetadata = { ...op.patch?.metadata, ...op.metadata };
+                    const metadata = node.type === CanvasNodeType.Script && incomingMetadata.storyboard
+                        ? normalizeAgentStoryboardMetadata(incomingMetadata as Record<string, unknown>)
+                        : incomingMetadata;
+                    return { ...node, ...op.patch, metadata: { ...node.metadata, ...metadata } };
+                }
                 if (node.parentId === op.id && (dx || dy)) return { ...node, position: { x: node.position.x + dx, y: node.position.y + dy } };
                 return node;
             });
@@ -179,6 +196,7 @@ function opLabel(type: string) {
     if (type === "set_viewport") return "调整视图";
     if (type === "select_nodes") return "选择节点";
     if (type === "run_generation") return "触发生成";
+    if (type === "run_image_annotation") return "执行标注改图";
     return type;
 }
 

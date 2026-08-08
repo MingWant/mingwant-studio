@@ -1,19 +1,20 @@
 import type { CSSProperties } from "react";
-import { Image as ImageIcon, LoaderCircle, MessageSquare, MonitorPlay, Music2, Play, Settings2, Square, Video } from "lucide-react";
-import { App, Button, Segmented, Select } from "antd";
+import { Image as ImageIcon, LoaderCircle, MessageSquare, Music2, Play, Settings2, Square, Video } from "lucide-react";
+import { Button, Segmented, Select } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
-import { configuredModelMatchesCapability, defaultConfig, modelOptionName, resolveModelChannel, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { configuredModelMatchesCapability, defaultConfig, modelOptionName, resolveModelChannel, resolveModelRequestConfig, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { resolveVideoOperation, videoCapabilityFromConfig } from "@/lib/model-capabilities";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
 import { navigateToSettings } from "@/lib/settings-navigation";
-import { DESKTOP_VIDEO_PROVIDER_OPTIONS, desktopVideoProviderLabel, isDesktopVideoWorkflowAvailable, openDesktopVideoWorkbench, preferredDesktopVideoProvider, rememberDesktopVideoProvider } from "@/services/desktop-video-workflow";
+import { hasPendingCanvasGenerationTask } from "@/lib/canvas/canvas-generation-task-state";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
-import type { CanvasGenerationMode, CanvasNodeData, CanvasNodeMetadata, CanvasVideoEditOperation, CanvasWorkspaceMode, DesktopVideoProvider } from "@/types/canvas";
+import type { CanvasGenerationMode, CanvasNodeData, CanvasNodeMetadata, CanvasVideoEditOperation, CanvasWorkspaceMode } from "@/types/canvas";
 
 type CanvasConfigNodePanelProps = {
     node: CanvasNodeData;
@@ -39,16 +40,15 @@ const videoOperationOptions: Array<{ label: string; value: CanvasVideoEditOperat
 ];
 
 export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigChange, onGenerate, onStop, onComposerToggle, workspaceMode = "professional" }: CanvasConfigNodePanelProps) {
-    const { message } = App.useApp();
     const globalConfig = useEffectiveConfig();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const mode = node.metadata?.generationMode || "image";
     const simpleMode = workspaceMode === "simple";
-    const desktopVideoWorkflow = mode === "video" && isDesktopVideoWorkflowAvailable();
-    const desktopVideoProvider = preferredDesktopVideoProvider(node.metadata?.desktopVideoProvider);
-    const desktopVideoProviderName = desktopVideoProviderLabel(desktopVideoProvider);
     const config = buildNodeConfig(globalConfig, node, mode);
-    const operationOptions = node.metadata?.videoEditOperation === "concat" ? [...videoOperationOptions, { label: "合并成片", value: "concat" as const }] : videoOperationOptions;
+    const videoCapability = mode === "video" ? videoCapabilityForConfig(config) : undefined;
+    const operationOptions = mode === "video" ? videoOperationOptionsForCapability(videoCapability?.operations, node.metadata?.videoEditOperation) : [];
+    const videoReferenceCounts = { images: inputSummary.imageCount, videos: inputSummary.videoCount, audios: inputSummary.audioCount };
+    const selectedOperation = mode === "video" ? resolveVideoOperation(node.metadata?.videoEditOperation, videoReferenceCounts, videoCapability) : undefined;
     const count = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const priceChannel = resolveModelChannel(config, config.model);
     const credits = requestCreditCost({ channelMode: priceChannel.scope === "system" ? "remote" : "local", modelCosts: priceChannel.modelCosts, model: modelOptionName(config.model), count: mode === "image" ? count : 1, seconds: mode === "video" ? config.videoSeconds : 1 });
@@ -57,27 +57,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     const hasAnyInput = Boolean(inputSummary.textCount || inputSummary.imageCount || inputSummary.videoCount || inputSummary.audioCount);
     const hasComposerContent = Boolean((node.metadata?.composerContent ?? node.metadata?.prompt ?? "").trim());
     const canGenerate = hasComposerContent || (mode === "audio" ? inputSummary.textCount > 0 : hasAnyInput);
-    const changeDesktopVideoProvider = (provider: DesktopVideoProvider) => {
-        rememberDesktopVideoProvider(provider);
-        onConfigChange(node.id, { desktopVideoProvider: provider });
-    };
-    const openVideoWorkbench = () => {
-        void openDesktopVideoWorkbench().catch((error) => message.error(error instanceof Error ? error.message : "网页视频工作台打开失败"));
-    };
-    const desktopProviderControl = (
-        <div className="flex min-w-0 items-center gap-2">
-            <Select<DesktopVideoProvider>
-                size="small"
-                className="canvas-compact-control canvas-control-select !h-10 min-w-0 flex-1"
-                value={desktopVideoProvider}
-                options={DESKTOP_VIDEO_PROVIDER_OPTIONS}
-                onChange={changeDesktopVideoProvider}
-                aria-label="网页视频平台"
-            />
-            <Button className="!size-10 shrink-0 !p-0" type="text" icon={<MonitorPlay className="size-4" />} onClick={openVideoWorkbench} aria-label="打开网页视频工作台" />
-        </div>
-    );
-
+    const backendTaskPending = !isRunning && hasPendingCanvasGenerationTask(node);
     return (
         <div className="flex h-full w-full cursor-move flex-col px-3 pb-3 pt-7 text-sm" style={{ color: theme.node.text }} onWheel={(event) => event.stopPropagation()}>
             <div className="mb-2 flex items-center justify-between gap-3">
@@ -142,11 +122,11 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
             </div>
 
             {mode === "video" && !simpleMode ? (
-                <div className="mb-2 cursor-default" data-canvas-no-zoom onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+                <div className="mb-2 min-w-0 cursor-default" data-canvas-no-zoom onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
                     <Select
                         size="small"
                         className="canvas-compact-control canvas-control-select !h-9 !w-full"
-                        value={node.metadata?.videoEditOperation || defaultVideoOperation(inputSummary)}
+                        value={selectedOperation}
                         options={operationOptions}
                         placement="bottomLeft"
                         popupMatchSelectWidth={false}
@@ -162,10 +142,28 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
             ) : null}
 
             {simpleMode ? (
-                desktopVideoWorkflow ? <div className="mb-2 cursor-default" onMouseDown={(event) => event.stopPropagation()}>{desktopProviderControl}</div> : <div className="mb-2 rounded-lg px-2 py-2 text-[11px]" style={{ background: theme.node.fill, color: theme.node.muted }}>将使用当前默认模型与生成参数</div>
+                <div className="mb-2 rounded-lg px-2 py-2 text-[11px]" style={{ background: theme.node.fill, color: theme.node.muted }}>将使用当前默认模型与生成参数</div>
             ) : (
                 <div className={`mb-2 grid min-w-0 cursor-default items-center gap-2 ${mode === "image" || mode === "video" || mode === "audio" ? "grid-cols-[minmax(0,1fr)_148px]" : "grid-cols-1"}`} onMouseDown={(event) => event.stopPropagation()}>
-                    {desktopVideoWorkflow ? desktopProviderControl : <ModelPicker className="canvas-compact-control h-10" config={config} value={config.model} onChange={(model) => onConfigChange(node.id, { model })} capability={mode} onMissingConfig={() => navigateToSettings({ continueCreation: true })} fullWidth />}
+                    <ModelPicker
+                        className="canvas-compact-control h-10"
+                        config={config}
+                        value={config.model}
+                        onChange={(model) => {
+                            if (mode !== "video") {
+                                onConfigChange(node.id, { model });
+                                return;
+                            }
+                            const nextCapability = videoCapabilityForConfig({ ...config, model });
+                            onConfigChange(node.id, {
+                                model,
+                                videoEditOperation: resolveVideoOperation(node.metadata?.videoEditOperation, videoReferenceCounts, nextCapability),
+                            });
+                        }}
+                        capability={mode}
+                        onMissingConfig={() => navigateToSettings({ continueCreation: true })}
+                        fullWidth
+                    />
                     {mode === "video" ? (
                         <CanvasVideoSettingsPopover config={config} placement="topRight" buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
                     ) : mode === "image" ? (
@@ -180,7 +178,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                 type="primary"
                 className="mt-auto !h-9 !w-full !cursor-pointer !rounded-lg"
                 danger={isRunning}
-                disabled={!isRunning && !canGenerate}
+                disabled={backendTaskPending || (!isRunning && !canGenerate)}
                 onMouseDown={(event) => event.stopPropagation()}
                 onClick={() => (isRunning ? onStop(node.id) : onGenerate(node.id))}
             >
@@ -191,14 +189,14 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                             <Square className="size-3.5 fill-current" />
                             <span>停止</span>
                         </>
+                    ) : backendTaskPending ? (
+                        <>
+                            <LoaderCircle className="size-4 animate-spin" />
+                            <span>后台任务进行中</span>
+                        </>
                     ) : (
                         <>
-                            {desktopVideoWorkflow ? (
-                                <span className="inline-flex items-center gap-1">
-                                    <MonitorPlay className="size-4" />
-                                    {desktopVideoProviderName} 网页生成
-                                </span>
-                            ) : hasPrice ? (
+                            {hasPrice ? (
                                 <span className="inline-flex items-center gap-1">
                                     <CreditSymbol />
                                     {credits.toLocaleString()}
@@ -218,11 +216,25 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     );
 }
 
-function defaultVideoOperation(inputSummary: CanvasConfigNodePanelProps["inputSummary"]): CanvasVideoEditOperation {
-    if (inputSummary.audioCount > 0 && inputSummary.imageCount === 0 && inputSummary.videoCount === 0) return "audio_to_video";
-    if (inputSummary.videoCount > 0) return "extend";
-    if (inputSummary.imageCount > 0) return "image_to_video";
-    return "image_to_video";
+function videoCapabilityForConfig(config: AiConfig) {
+    const request = resolveModelRequestConfig(config, config.model);
+    const channel = config.channels.find((item) => item.id === request.resolvedChannelId);
+    const modelCost = channel?.modelCosts?.find((item) => item.model === request.model);
+    return videoCapabilityFromConfig(modelCost?.capabilityConfig, request.interfaceType);
+}
+
+function videoOperationOptionsForCapability(operations: string[] | undefined, current?: CanvasVideoEditOperation) {
+    const configured = operations?.length ? operations : videoOperationOptions.map((item) => item.value);
+    const options = configured.map((value) => ({ label: videoOperationLabel(value), value: value as CanvasVideoEditOperation }));
+    if (current === "concat") return [...options, { label: "合并成片", value: "concat" as const }];
+    if (current && !configured.some((value) => value.toLowerCase() === current.toLowerCase())) {
+        return [{ label: `${videoOperationLabel(current)}（当前模型不支持）`, value: current, disabled: true }, ...options];
+    }
+    return options;
+}
+
+function videoOperationLabel(value: string) {
+    return videoOperationOptions.find((item) => item.value === value)?.label || value;
 }
 
 function InputChip({ label, value, style }: { label: string; value: string; style: CSSProperties }) {

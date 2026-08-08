@@ -1,4 +1,4 @@
-import { CanvasNodeAnnotationDialog } from "@/components/canvas/canvas-node-annotation-dialog";
+import { CanvasNodeAnnotationDialog, type CanvasImageAnnotationPayload } from "@/components/canvas/canvas-node-annotation-dialog";
 import { CanvasNodeCropDialog, type CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
 import { CanvasNodeMaskEditDialog, type CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import { CanvasNodeSplitDialog, type CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
@@ -17,7 +17,7 @@ type CanvasProjectMediaDialogsProps = {
     onCloseSplit: () => void;
     onCloseUpscale: () => void;
     onCrop: (node: CanvasNodeData, crop: CanvasImageCropRect) => void;
-    onAnnotate: (node: CanvasNodeData, dataUrl: string) => void;
+    onAnnotate: (node: CanvasNodeData, payload: CanvasImageAnnotationPayload) => void;
     onMaskEdit: (node: CanvasNodeData, payload: CanvasImageMaskEditPayload) => void;
     onSplit: (node: CanvasNodeData, params: CanvasImageSplitParams) => void;
     onUpscale: (node: CanvasNodeData, params: CanvasImageUpscaleParams) => void;
@@ -43,7 +43,7 @@ export function CanvasProjectMediaDialogs({
     return (
         <>
             {cropNode?.metadata?.content ? <CanvasNodeCropDialog dataUrl={cropNode.metadata.content} open onClose={onCloseCrop} onConfirm={(crop) => onCrop(cropNode, crop)} /> : null}
-            {annotationNode?.metadata?.content ? <CanvasNodeAnnotationDialog image={{ url: annotationNode.metadata.content, storageKey: annotationNode.metadata.storageKey }} open onClose={onCloseAnnotation} onConfirm={(dataUrl) => onAnnotate(annotationNode, dataUrl)} /> : null}
+            {annotationNode?.metadata?.content ? <CanvasNodeAnnotationDialog image={{ url: annotationNode.metadata.content, storageKey: annotationNode.metadata.storageKey }} open onClose={onCloseAnnotation} onConfirm={(payload) => onAnnotate(annotationNode, payload)} /> : null}
             {maskEditNode?.metadata?.content ? <CanvasNodeMaskEditDialog dataUrl={maskEditNode.metadata.content} open onClose={onCloseMaskEdit} onConfirm={(payload) => onMaskEdit(maskEditNode, payload)} /> : null}
             {splitNode?.metadata?.content ? <CanvasNodeSplitDialog dataUrl={splitNode.metadata.content} open onClose={onCloseSplit} onConfirm={(params) => onSplit(splitNode, params)} /> : null}
             {upscaleNode?.metadata?.content ? <CanvasNodeUpscaleDialog dataUrl={upscaleNode.metadata.content} open onClose={onCloseUpscale} onConfirm={(params) => onUpscale(upscaleNode, params)} /> : null}

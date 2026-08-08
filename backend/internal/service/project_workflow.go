@@ -3,6 +3,7 @@ package service
 import (
 	"encoding/json"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -12,9 +13,10 @@ import (
 )
 
 const builtinShortDramaWorkflowKey = "short-drama-production"
-const builtinShortDramaWorkflowVersion = 1
+const builtinShortDramaWorkflowVersion = 2
 const builtinCommerceWorkflowKey = "commerce-video-production"
 const builtinCommerceWorkflowVersion = 1
+const projectWorkflowOutputReconcileLimit = 50
 
 type workflowStepDefinition struct {
 	Key  string `json:"key"`
@@ -23,12 +25,15 @@ type workflowStepDefinition struct {
 
 var builtinShortDramaSteps = []workflowStepDefinition{
 	{Key: "style", Name: "选择画风"},
-	{Key: "story", Name: "输入故事"},
-	{Key: "storyboard", Name: "生成分镜"},
-	{Key: "assets", Name: "准备资产"},
-	{Key: "video", Name: "生成视频"},
-	{Key: "review", Name: "审核与重试"},
-	{Key: "delivery", Name: "合并成片"},
+	{Key: "development", Name: "开发故事与分集"},
+	{Key: "script", Name: "确认分集剧本"},
+	{Key: "assets", Name: "确认资产与版本"},
+	{Key: "image-prompts", Name: "制作资产参考图"},
+	{Key: "storyboard", Name: "制作分镜与关键帧"},
+	{Key: "video-prompts", Name: "编写视频运动说明"},
+	{Key: "generation", Name: "生成视频"},
+	{Key: "review", Name: "执行独立审查"},
+	{Key: "delivery", Name: "审核并整理交付"},
 }
 
 var builtinCommerceSteps = []workflowStepDefinition{
@@ -230,7 +235,11 @@ func (s *Service) RegisterTaskOutput(userID string, projectID string, stepID str
 	if err != nil {
 		return model.WorkflowStepInstance{}, err
 	}
-	if task.ProjectID != projectID {
+	belongs, err := s.taskBelongsToProject(*task, projectID)
+	if err != nil {
+		return model.WorkflowStepInstance{}, err
+	}
+	if !belongs {
 		return model.WorkflowStepInstance{}, BadAuthRequest("任务不属于当前项目")
 	}
 	if task.Status != model.TaskStatusSucceeded {
@@ -276,7 +285,6 @@ func (s *Service) RegisterTaskOutput(userID string, projectID string, stepID str
 	if err != nil {
 		return model.WorkflowStepInstance{}, err
 	}
-	instance.Revision++
 	instance.Status = model.WorkflowStatusActive
 	instance.UpdatedAt = now
 	next, nextErr := s.repo.NextWorkflowStep(step.WorkflowInstanceID, step.Position)
@@ -307,16 +315,46 @@ func (s *Service) RegisterTaskOutput(userID string, projectID string, stepID str
 	return *step, nil
 }
 
-func (s *Service) RegisterTaskOutputFromTask(task model.Task) error {
+// taskBelongsToProject 同时接受直接以业务项目创建的任务，以及该项目关联画布创建的任务。
+// 不能只相信任务输入中的 domainProjectId，否则客户端可把其他画布的任务挂到当前项目。
+func (s *Service) taskBelongsToProject(task model.Task, projectID string) (bool, error) {
+	actualProjectID, err := s.taskDomainProjectID(task)
+	if err != nil {
+		return false, err
+	}
+	return actualProjectID != "" && actualProjectID == strings.TrimSpace(projectID), nil
+}
+
+func (s *Service) taskDomainProjectID(task model.Task) (string, error) {
+	taskProjectID := strings.TrimSpace(task.ProjectID)
+	if taskProjectID == "" {
+		return "", nil
+	}
+	if _, err := s.repo.ProjectForUser(task.UserID, taskProjectID); err == nil {
+		return taskProjectID, nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", err
+	}
+	canvas, err := s.repo.CanvasProjectForUser(task.UserID, taskProjectID)
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return "", nil
+	}
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(canvas.ProjectID), nil
+}
+
+func (s *Service) RegisterTaskOutputFromTask(task model.Task) (bool, error) {
 	if strings.TrimSpace(task.ProjectID) == "" || task.Status != model.TaskStatusSucceeded {
-		return nil
+		return false, nil
 	}
 	if strings.TrimSpace(task.InputJSON) == "" {
-		return nil
+		return false, nil
 	}
 	decrypted, err := s.decryptTaskInputJSON(task.InputJSON)
 	if err != nil {
-		return err
+		return false, err
 	}
 	var input struct {
 		WorkflowStepID  string         `json:"workflowStepId"`
@@ -328,7 +366,7 @@ func (s *Service) RegisterTaskOutputFromTask(task model.Task) error {
 		Metadata        map[string]any `json:"metadata"`
 	}
 	if err := json.Unmarshal([]byte(decrypted), &input); err != nil {
-		return err
+		return false, err
 	}
 	if input.Metadata != nil {
 		if input.WorkflowStepID == "" {
@@ -351,19 +389,43 @@ func (s *Service) RegisterTaskOutputFromTask(task model.Task) error {
 		}
 	}
 	if strings.TrimSpace(input.WorkflowStepID) == "" {
-		return nil
+		return false, nil
 	}
-	projectID := strings.TrimSpace(input.DomainProjectID)
-	if projectID == "" {
-		if _, projectErr := s.repo.ProjectForUser(task.UserID, task.ProjectID); projectErr == nil {
-			projectID = task.ProjectID
-		}
+	projectID, err := s.taskDomainProjectID(task)
+	if err != nil {
+		return false, err
 	}
 	if projectID == "" {
-		return errors.New("任务未提供项目 ID，无法登记产物")
+		return false, errors.New("任务没有可验证的项目或关联画布，无法登记产物")
+	}
+	if claimedProjectID := strings.TrimSpace(input.DomainProjectID); claimedProjectID != "" && claimedProjectID != projectID {
+		return false, BadAuthRequest("任务声明的项目与实际画布归属不一致")
 	}
 	_, err = s.RegisterTaskOutput(task.UserID, projectID, input.WorkflowStepID, RegisterTaskOutputRequest{TaskID: task.ID, AssetVersionID: input.AssetVersionID, ResourceID: input.ResourceID, MediaType: input.MediaType, Role: input.Role, OutputJSON: task.ResultJSON})
-	return err
+	return err == nil, err
+}
+
+// 项目详情读取时补登记已经成功持久化的任务产物。单个异常任务不能阻断项目展示；
+// 真正的幂等边界由 workflow_step_tasks 唯一键和同一事务保证，多实例并发修复也只推进一次。
+func (s *Service) reconcileProjectTaskOutputs(userID string, projectID string) bool {
+	tasks, err := s.repo.PendingProjectWorkflowOutputTasks(userID, projectID, projectWorkflowOutputReconcileLimit)
+	if err != nil {
+		log.Printf("reconcile project workflow outputs failed user=%s project=%s: %v", userID, projectID, err)
+		return false
+	}
+	recovered := false
+	for _, task := range tasks {
+		registered, registerErr := s.RegisterTaskOutputFromTask(task)
+		if registerErr != nil {
+			log.Printf("reconcile project workflow output failed user=%s project=%s task=%s: %v", userID, projectID, task.ID, registerErr)
+			continue
+		}
+		if registered {
+			recovered = true
+			s.logTaskEventBestEffort(userID, task.ID, "info", "已自动补登记项目工作流产物", "重新打开项目时发现任务结果已成功保存，但工作流步骤尚未推进；本次已完成幂等补登记")
+		}
+	}
+	return recovered
 }
 
 func validWorkflowStepStatus(status model.WorkflowStepStatus) bool {

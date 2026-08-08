@@ -1,11 +1,18 @@
 import { useEffect, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
-import { Button, Modal, Slider, Tooltip } from "antd";
+import { Button, Input, Modal, Slider, Tooltip } from "antd";
 import { Brush, Eraser, Redo2, RotateCcw, Save, Undo2 } from "lucide-react";
 
+import { buildImageEditMask, canvasHasPaint } from "@/lib/canvas/canvas-image-mask";
 import { imageToDataUrl } from "@/services/image-storage";
 
 type Point = { x: number; y: number };
 type Stroke = { color: string; size: number; erase: boolean; points: Point[] };
+
+export type CanvasImageAnnotationPayload = {
+    instruction: string;
+    markedDataUrl: string;
+    maskDataUrl: string;
+};
 
 const colors = ["#ef4444", "#f59e0b", "#22c55e", "#14b8a6", "#3b82f6", "#a855f7", "#ffffff", "#111827"];
 
@@ -13,7 +20,7 @@ export function CanvasNodeAnnotationDialog({ image, open, onClose, onConfirm }: 
     image: { url: string; storageKey?: string };
     open: boolean;
     onClose: () => void;
-    onConfirm: (dataUrl: string) => void;
+    onConfirm: (payload: CanvasImageAnnotationPayload) => void;
 }) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const sourceImageRef = useRef<HTMLImageElement | null>(null);
@@ -25,6 +32,8 @@ export function CanvasNodeAnnotationDialog({ image, open, onClose, onConfirm }: 
     const [brushSize, setBrushSize] = useState(18);
     const [strokes, setStrokes] = useState<Stroke[]>([]);
     const [redoStrokes, setRedoStrokes] = useState<Stroke[]>([]);
+    const [instruction, setInstruction] = useState("");
+    const [error, setError] = useState("");
 
     useEffect(() => {
         if (!open) return;
@@ -39,6 +48,8 @@ export function CanvasNodeAnnotationDialog({ image, open, onClose, onConfirm }: 
                 setSize({ width: element.naturalWidth, height: element.naturalHeight });
                 setStrokes([]);
                 setRedoStrokes([]);
+                setInstruction("");
+                setError("");
             };
             element.src = dataUrl;
         });
@@ -54,6 +65,7 @@ export function CanvasNodeAnnotationDialog({ image, open, onClose, onConfirm }: 
         const stroke: Stroke = { color, size: brushSize, erase: mode === "erase", points: [canvasPoint(event.currentTarget, event.clientX, event.clientY)] };
         drawingRef.current = stroke;
         drawStroke(canvasRef.current, stroke);
+        setError("");
     };
 
     const moveDraw = (event: ReactPointerEvent<HTMLCanvasElement>) => {
@@ -89,7 +101,9 @@ export function CanvasNodeAnnotationDialog({ image, open, onClose, onConfirm }: 
     const save = () => {
         const sourceImage = sourceImageRef.current;
         const annotation = canvasRef.current;
-        if (!sourceImage || !annotation || !strokes.length) return;
+        const nextInstruction = instruction.trim();
+        if (!nextInstruction) return setError("请输入希望修改的内容");
+        if (!sourceImage || !annotation || !canvasHasPaint(annotation)) return setError("请先在图片上标出需要修改的区域");
         const output = document.createElement("canvas");
         output.width = size.width;
         output.height = size.height;
@@ -97,7 +111,7 @@ export function CanvasNodeAnnotationDialog({ image, open, onClose, onConfirm }: 
         if (!context) return;
         context.drawImage(sourceImage, 0, 0, output.width, output.height);
         context.drawImage(annotation, 0, 0);
-        onConfirm(output.toDataURL("image/png"));
+        onConfirm({ instruction: nextInstruction, markedDataUrl: output.toDataURL("image/png"), maskDataUrl: buildImageEditMask(annotation) });
     };
 
     return (
@@ -117,7 +131,24 @@ export function CanvasNodeAnnotationDialog({ image, open, onClose, onConfirm }: 
                     <ToolButton title="重做" disabled={!redoStrokes.length} onClick={redo}><Redo2 className="size-4" /></ToolButton>
                     <ToolButton title="清空" disabled={!strokes.length} onClick={() => { setStrokes([]); setRedoStrokes([]); }}><RotateCcw className="size-4" /></ToolButton>
                     <span className="min-w-0 flex-1" />
-                    <Button type="primary" icon={<Save className="size-4" />} disabled={!strokes.length} onClick={save}>保存为新节点</Button>
+                    <Button type="primary" icon={<Save className="size-4" />} disabled={!strokes.length || !instruction.trim()} onClick={save}>保存标注节点</Button>
+                </div>
+                <div className="rounded-lg border p-3" style={{ borderColor: "rgba(127,127,127,.22)" }}>
+                    <div className="mb-2 flex items-center justify-between gap-3">
+                        <span className="text-sm font-semibold">修改要求</span>
+                        <span className="text-xs opacity-50">彩色笔迹仅供 Agent 理解，不会写入生成结果</span>
+                    </div>
+                    <Input.TextArea
+                        rows={2}
+                        value={instruction}
+                        status={error && !instruction.trim() ? "error" : undefined}
+                        placeholder="例如：把圈出的杯子改成磨砂玻璃，其他区域保持不变"
+                        onChange={(event) => {
+                            setInstruction(event.target.value);
+                            setError("");
+                        }}
+                    />
+                    {error ? <div className="mt-1.5 text-xs font-medium text-[#ef4444]">{error}</div> : null}
                 </div>
                 <div className="flex min-h-[360px] items-center justify-center overflow-hidden rounded-lg bg-black/5 dark:bg-white/[0.03]">
                     {source && size.width ? (

@@ -1,6 +1,7 @@
 package repository
 
 import (
+	"context"
 	"errors"
 	"sort"
 	"strings"
@@ -12,7 +13,20 @@ import (
 	"gorm.io/gorm/clause"
 )
 
+var ErrEmailVerificationUnavailable = errors.New("email verification code is no longer available")
+
 var ErrDailyUploadLimitExceeded = errors.New("daily upload limit exceeded")
+
+var ErrTaskProviderRecoveryConflict = errors.New("task provider recovery is already running")
+
+var ErrTaskProviderRecoveryNotDue = errors.New("task provider recovery is not due")
+
+var ErrTaskStateConflict = errors.New("task state or lease conflict")
+
+var ErrDuplicateSessionRequest = errors.New("duplicate session request")
+
+const taskSummaryResultSelect = "CASE WHEN COALESCE(result_json, '') = '' THEN '' WHEN length(result_json) <= 1048576 THEN result_json ELSE '{}' END AS result_json"
+const taskSummaryRecoverySelect = "CASE WHEN COALESCE(delivery_ops_json, '') <> '' THEN '1' ELSE '' END AS delivery_ops_json"
 
 type Repository struct {
 	db *gorm.DB
@@ -34,8 +48,23 @@ func New(db *gorm.DB) *Repository {
 	return &Repository{db: db}
 }
 
+// WithTransaction 让 service 在一个数据库事务中编排多张表写入，同时仍只通过 repository 访问 GORM。
+func (r *Repository) WithTransaction(run func(*Repository) error) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		return run(New(tx))
+	})
+}
+
 func (r *Repository) Dialect() string {
 	return r.db.Dialector.Name()
+}
+
+func (r *Repository) Ping(ctx context.Context) error {
+	sqlDB, err := r.db.DB()
+	if err != nil {
+		return err
+	}
+	return sqlDB.PingContext(ctx)
 }
 
 func (r *Repository) UserStorageUsage(userID string) (UserStorageUsage, error) {
@@ -50,7 +79,7 @@ func (r *Repository) UserStorageUsage(userID string) (UserStorageUsage, error) {
 			(SELECT COALESCE(SUM(length(CAST(COALESCE(prompt, '') AS BLOB)) + length(CAST(COALESCE(canvas_snapshot_json, '') AS BLOB)) + length(CAST(COALESCE(canvas_ops_json, '') AS BLOB))), 0) FROM sessions WHERE user_id = ?)
 			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(content, '') AS BLOB)) + length(CAST(COALESCE(payload, '') AS BLOB))), 0) FROM messages WHERE user_id = ?) AS session_bytes,
 			(SELECT COUNT(*) FROM tasks WHERE user_id = ?) AS task_count,
-			(SELECT COALESCE(SUM(length(CAST(COALESCE(prompt, '') AS BLOB)) + length(CAST(COALESCE(input_json, '') AS BLOB)) + length(CAST(COALESCE(result_json, '') AS BLOB)) + length(CAST(COALESCE(error, '') AS BLOB))), 0) FROM tasks WHERE user_id = ?)
+			(SELECT COALESCE(SUM(length(CAST(COALESCE(prompt, '') AS BLOB)) + length(CAST(COALESCE(input_json, '') AS BLOB)) + length(CAST(COALESCE(result_json, '') AS BLOB)) + length(CAST(COALESCE(delivery_ops_json, '') AS BLOB)) + length(CAST(COALESCE(error, '') AS BLOB))), 0) FROM tasks WHERE user_id = ?)
 			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(message, '') AS BLOB)) + length(CAST(COALESCE(payload, '') AS BLOB))), 0) FROM task_logs WHERE user_id = ?)
 			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(url, '') AS BLOB)) + length(CAST(COALESCE(payload, '') AS BLOB))), 0) FROM results WHERE user_id = ?)
 			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(path, '') AS BLOB)) + length(CAST(COALESCE(model, '') AS BLOB)) + length(CAST(COALESCE(provider_request_id, '') AS BLOB)) + length(CAST(COALESCE(error_code, '') AS BLOB)) + length(CAST(COALESCE(error, '') AS BLOB)) + length(CAST(COALESCE(upstream_url, '') AS BLOB))), 0) FROM api_call_logs WHERE user_id = ?) AS task_bytes,
@@ -61,6 +90,26 @@ func (r *Repository) UserStorageUsage(userID string) (UserStorageUsage, error) {
 		query = strings.ReplaceAll(query, ", '') AS BLOB))", ", ''))")
 	}
 	err := r.db.Raw(query, userID, userID, userID, userID, userID, userID, userID, userID, userID, userID, userID, userID, userID).Scan(&usage).Error
+	return usage, err
+}
+
+// 高频任务创建和上游日志只核算任务域，避免每次轮询都扫描画布、素材和会话表。
+func (r *Repository) UserTaskStorageUsage(userID string) (UserStorageUsage, error) {
+	var usage UserStorageUsage
+	query := `
+		SELECT
+			(SELECT COUNT(*) FROM tasks WHERE user_id = ?) AS task_count,
+			(SELECT COALESCE(SUM(length(CAST(COALESCE(prompt, '') AS BLOB)) + length(CAST(COALESCE(input_json, '') AS BLOB)) + length(CAST(COALESCE(result_json, '') AS BLOB)) + length(CAST(COALESCE(delivery_ops_json, '') AS BLOB)) + length(CAST(COALESCE(error, '') AS BLOB))), 0) FROM tasks WHERE user_id = ?)
+			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(message, '') AS BLOB)) + length(CAST(COALESCE(payload, '') AS BLOB))), 0) FROM task_logs WHERE user_id = ?)
+			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(url, '') AS BLOB)) + length(CAST(COALESCE(payload, '') AS BLOB))), 0) FROM results WHERE user_id = ?)
+			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(path, '') AS BLOB)) + length(CAST(COALESCE(model, '') AS BLOB)) + length(CAST(COALESCE(provider_request_id, '') AS BLOB)) + length(CAST(COALESCE(error_code, '') AS BLOB)) + length(CAST(COALESCE(error, '') AS BLOB)) + length(CAST(COALESCE(upstream_url, '') AS BLOB))), 0) FROM api_call_logs WHERE user_id = ?) AS task_bytes,
+			(SELECT COUNT(*) FROM api_call_logs WHERE user_id = ?) AS api_call_count
+	`
+	if r.Dialect() == "postgres" {
+		query = strings.ReplaceAll(query, "length(CAST(COALESCE(", "octet_length(COALESCE(")
+		query = strings.ReplaceAll(query, ", '') AS BLOB))", ", ''))")
+	}
+	err := r.db.Raw(query, userID, userID, userID, userID, userID, userID).Scan(&usage).Error
 	return usage, err
 }
 
@@ -189,16 +238,6 @@ func (r *Repository) AdminUserReferences() ([]model.User, error) {
 	return users, err
 }
 
-func (r *Repository) ActiveAdminCountExcluding(userID string) (int64, error) {
-	var count int64
-	query := r.db.Model(&model.User{}).Where("role = ? AND status = ?", model.UserRoleAdmin, model.UserStatusActive)
-	if userID != "" {
-		query = query.Where("id <> ?", userID)
-	}
-	err := query.Count(&count).Error
-	return count, err
-}
-
 func (r *Repository) AuthSession(id string) (*model.AuthSession, error) {
 	var session model.AuthSession
 	if err := r.db.First(&session, "id = ?", id).Error; err != nil {
@@ -211,38 +250,107 @@ func (r *Repository) DeleteAuthSession(id string) error {
 	return r.db.Delete(&model.AuthSession{}, "id = ?", id).Error
 }
 
-func (r *Repository) DeleteExpiredAuthSessions() error {
-	return r.db.Delete(&model.AuthSession{}, "expires_at <= ?", time.Now()).Error
+// 新会话、过期清理和数量上限必须在同一事务内完成，避免登录成功后留下无法交付或无限累积的会话。
+func (r *Repository) CreateAuthSession(session *model.AuthSession, maxActive int) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Delete(&model.AuthSession{}, "expires_at <= ?", time.Now()).Error; err != nil {
+			return err
+		}
+		if err := tx.Create(session).Error; err != nil {
+			return err
+		}
+		if maxActive <= 0 {
+			return nil
+		}
+		var excessIDs []string
+		if err := tx.Model(&model.AuthSession{}).
+			Where("user_id = ? AND id <> ?", session.UserID, session.ID).
+			Order("created_at DESC").
+			Order("id DESC").
+			Offset(maxActive-1).
+			Pluck("id", &excessIDs).Error; err != nil {
+			return err
+		}
+		if len(excessIDs) == 0 {
+			return nil
+		}
+		return tx.Delete(&model.AuthSession{}, "id IN ?", excessIDs).Error
+	})
 }
 
 func (r *Repository) DeleteUserAuthSessions(userID string) error {
 	return r.db.Delete(&model.AuthSession{}, "user_id = ?", userID).Error
 }
 
+func (r *Repository) DeleteOtherUserAuthSessions(userID string, currentSessionID string) (int64, error) {
+	result := r.db.Delete(&model.AuthSession{}, "user_id = ? AND id <> ?", userID, currentSessionID)
+	return result.RowsAffected, result.Error
+}
+
 func (r *Repository) LatestEmailVerificationCode(email string, purpose string) (*model.EmailVerificationCode, error) {
 	var code model.EmailVerificationCode
-	if err := r.db.Where("email = ? AND purpose = ? AND used_at IS NULL", email, purpose).Order("created_at desc").First(&code).Error; err != nil {
+	if err := r.db.Where("email = ? AND purpose = ? AND sent_at IS NOT NULL AND used_at IS NULL", email, purpose).Order("created_at desc").First(&code).Error; err != nil {
 		return nil, err
 	}
 	return &code, nil
 }
 
-func (r *Repository) MarkEmailVerificationCodeUsed(id string, usedAt time.Time) error {
-	return r.db.Model(&model.EmailVerificationCode{}).Where("id = ? AND used_at IS NULL", id).Update("used_at", usedAt).Error
+// 新验证码必须先以 pending 状态落库，同时让此前所有未消费验证码失效；SMTP 成功后才单独激活 sent_at。
+func (r *Repository) ReplaceEmailVerificationCode(code *model.EmailVerificationCode, invalidatedAt time.Time) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&model.EmailVerificationCode{}).
+			Where("email = ? AND purpose = ? AND used_at IS NULL", code.Email, code.Purpose).
+			Update("used_at", invalidatedAt).Error; err != nil {
+			return err
+		}
+		return tx.Create(code).Error
+	})
+}
+
+func (r *Repository) MarkEmailVerificationCodeSent(id string, sentAt time.Time) error {
+	result := r.db.Model(&model.EmailVerificationCode{}).
+		Where("id = ? AND sent_at IS NULL AND used_at IS NULL AND expires_at > ?", id, sentAt).
+		Update("sent_at", sentAt)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return errors.New("email verification code cannot be activated")
+	}
+	return nil
+}
+
+func (r *Repository) RecordEmailVerificationFailure(id string, maxAttempts int, now time.Time) (bool, error) {
+	result := r.db.Model(&model.EmailVerificationCode{}).
+		Where("id = ? AND sent_at IS NOT NULL AND used_at IS NULL AND expires_at > ? AND attempts < ?", id, now, maxAttempts).
+		UpdateColumn("attempts", gorm.Expr("attempts + 1"))
+	if result.Error != nil {
+		return false, result.Error
+	}
+	if result.RowsAffected != 1 {
+		return true, nil
+	}
+	var code model.EmailVerificationCode
+	if err := r.db.Select("attempts").First(&code, "id = ?", id).Error; err != nil {
+		return false, err
+	}
+	return code.Attempts >= maxAttempts, nil
 }
 
 func (r *Repository) DeleteEmailVerificationCode(id string) error {
 	return r.db.Delete(&model.EmailVerificationCode{}, "id = ?", id).Error
 }
 
-func (r *Repository) CreateUserWithEmailVerification(user *model.User, verificationCodeID string, usedAt time.Time) error {
+func (r *Repository) CreateUserWithEmailVerification(user *model.User, verificationCodeID string, purpose string, maxAttempts int, usedAt time.Time) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&model.EmailVerificationCode{}).Where("id = ? AND used_at IS NULL AND expires_at > ?", verificationCodeID, usedAt).Update("used_at", usedAt)
+		result := tx.Model(&model.EmailVerificationCode{}).
+			Where("id = ? AND email = ? AND purpose = ? AND sent_at IS NOT NULL AND used_at IS NULL AND expires_at > ? AND attempts < ?", verificationCodeID, user.Email, purpose, usedAt, maxAttempts).
+			Update("used_at", usedAt)
 		if result.Error != nil {
 			return result.Error
 		}
 		if result.RowsAffected != 1 {
-			return errors.New("email verification code is no longer valid")
+			return ErrEmailVerificationUnavailable
 		}
 		return tx.Create(user).Error
 	})
@@ -277,11 +385,12 @@ func (r *Repository) ActiveTaskCountForUser(userID string) (int64, error) {
 // 任务领取以数据库租约为真相；PostgreSQL 锁行跳过竞争任务，SQLite 继续依赖条件更新保证单实例原子性。
 func (r *Repository) ClaimNextTask(owner string, leaseDuration time.Duration) (*model.Task, error) {
 	var task model.Task
+	recoveredLease := false
 	now := time.Now()
 	leaseExpiresAt := now.Add(leaseDuration)
 	err := r.db.Transaction(func(tx *gorm.DB) error {
-		query := tx.Where("status = ? OR (status = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?))", model.TaskStatusQueued, model.TaskStatusRunning, now).
-			Order("created_at asc").Limit(1)
+		query := tx.Where("status = ? OR (status = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?) AND (next_poll_at IS NULL OR next_poll_at <= ?))", model.TaskStatusQueued, model.TaskStatusRunning, now, now).
+			Order("COALESCE(next_poll_at, created_at) asc, created_at asc, id asc").Limit(1)
 		if r.Dialect() == "postgres" {
 			query = query.Clauses(clause.Locking{Strength: "UPDATE", Options: "SKIP LOCKED"})
 		}
@@ -293,21 +402,29 @@ func (r *Repository) ClaimNextTask(owner string, leaseDuration time.Duration) (*
 			task = model.Task{}
 			return nil
 		}
+		recoveredLease = task.Status == model.TaskStatusRunning
 		claim := tx.Model(&model.Task{}).Where("id = ?", task.ID)
 		if r.Dialect() != "postgres" {
-			claim = claim.Where("status = ? OR (status = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?))", model.TaskStatusQueued, model.TaskStatusRunning, now)
+			claim = claim.Where("status = ? OR (status = ? AND (lease_expires_at IS NULL OR lease_expires_at <= ?) AND (next_poll_at IS NULL OR next_poll_at <= ?))", model.TaskStatusQueued, model.TaskStatusRunning, now, now)
+		}
+		nextAttempts := task.Attempts
+		updates := map[string]any{
+			"status":           model.TaskStatusRunning,
+			"stage":            "后端接管任务",
+			"progress":         15,
+			"attempts":         nextAttempts,
+			"started_at":       gorm.Expr("COALESCE(started_at, ?)", now),
+			"lease_owner":      owner,
+			"lease_expires_at": leaseExpiresAt,
+			"updated_at":       now,
+		}
+		if task.Status == model.TaskStatusQueued {
+			nextAttempts++
+			updates["attempts"] = nextAttempts
+			updates["provider_call_state"] = model.TaskProviderCallPending
 		}
 		updated := claim.
-			Updates(map[string]any{
-				"status":           model.TaskStatusRunning,
-				"stage":            "后端接管任务",
-				"progress":         15,
-				"attempts":         gorm.Expr("attempts + ?", 1),
-				"started_at":       gorm.Expr("COALESCE(started_at, ?)", now),
-				"lease_owner":      owner,
-				"lease_expires_at": leaseExpiresAt,
-				"updated_at":       now,
-			})
+			Updates(updates)
 		if updated.Error != nil {
 			return updated.Error
 		}
@@ -320,6 +437,8 @@ func (r *Repository) ClaimNextTask(owner string, leaseDuration time.Duration) (*
 	if err != nil || task.ID == "" {
 		return nil, err
 	}
+	// 仅供本次进程判断是否为中断恢复，不写入数据库，也不暴露给客户端。
+	task.LeaseRecovered = recoveredLease
 	return &task, nil
 }
 
@@ -336,22 +455,253 @@ func (r *Repository) RenewTaskLease(id string, owner string, leaseDuration time.
 	return nil
 }
 
-func (r *Repository) UpdateTaskProviderState(id string, providerRequestID string, pollStage string, nextPollAt *time.Time) error {
+func taskProviderStateUpdates(providerRequestID string, pollStage string, nextPollAt *time.Time) map[string]any {
 	updates := map[string]any{"poll_stage": pollStage, "next_poll_at": nextPollAt, "updated_at": time.Now()}
 	if strings.TrimSpace(providerRequestID) != "" {
 		updates["provider_request_id"] = strings.TrimSpace(providerRequestID)
 	}
-	return r.db.Model(&model.Task{}).Where("id = ?", id).Updates(updates).Error
+	return updates
 }
 
-func (r *Repository) UpdateTaskProgress(id string, stage string, progress int) error {
-	return r.db.Model(&model.Task{}).Where("id = ?", id).Updates(map[string]any{
-		"stage": stage, "progress": progress, "updated_at": time.Now(),
-	}).Error
+// 请求日志只能回写所属的当前尝试；旧订单或旧开始时间的迟到响应不得污染重试后的供应商任务 ID。
+func (r *Repository) UpdateTaskProviderStateForAttempt(id string, billingOrderID string, requestStartedAt time.Time, providerRequestID string, pollStage string, nextPollAt *time.Time) error {
+	query := r.db.Model(&model.Task{}).
+		Where("id = ? AND status IN ?", id, []model.TaskStatus{model.TaskStatusRunning, model.TaskStatusFailed, model.TaskStatusCancelled})
+	if strings.TrimSpace(billingOrderID) != "" {
+		query = query.Where("billing_order_id = ?", strings.TrimSpace(billingOrderID))
+	} else {
+		query = query.Where("(billing_order_id = '' OR billing_order_id IS NULL)")
+		if !requestStartedAt.IsZero() {
+			query = query.Where("(started_at IS NULL OR started_at <= ?)", requestStartedAt)
+		}
+	}
+	if strings.TrimSpace(providerRequestID) != "" {
+		query = query.Where("(provider_request_id = '' OR provider_request_id IS NULL OR provider_request_id = ?)", strings.TrimSpace(providerRequestID))
+	}
+	return query.Updates(taskProviderStateUpdates(providerRequestID, pollStage, nextPollAt)).Error
 }
 
-func (r *Repository) SaveTaskCompletion(task *model.Task, session *model.Session, message *model.Message, results []model.Result) error {
+func (r *Repository) UpdateClaimedTaskProviderState(id string, owner string, providerRequestID string, pollStage string, nextPollAt *time.Time) error {
+	result := r.db.Model(&model.Task{}).
+		Where("id = ? AND status = ? AND lease_owner = ?", id, model.TaskStatusRunning, owner).
+		Updates(taskProviderStateUpdates(providerRequestID, pollStage, nextPollAt))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTaskStateConflict
+	}
+	return nil
+}
+
+func (r *Repository) UpdateRecoveringTaskProviderState(id string, owner string, providerRequestID string, pollStage string, nextPollAt *time.Time) error {
+	result := r.db.Model(&model.Task{}).
+		Where("id = ? AND status IN ? AND lease_owner = ?", id, []model.TaskStatus{model.TaskStatusFailed, model.TaskStatusCancelled}, owner).
+		Updates(taskProviderStateUpdates(providerRequestID, pollStage, nextPollAt))
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTaskProviderRecoveryConflict
+	}
+	return nil
+}
+
+func (r *Repository) DeferTaskProviderPoll(id string, owner string, stage string, pollStage string, nextPollAt time.Time) error {
+	result := r.db.Model(&model.Task{}).
+		Where("id = ? AND status = ? AND lease_owner = ?", id, model.TaskStatusRunning, owner).
+		Updates(map[string]any{
+			"stage":            stage,
+			"progress":         55,
+			"poll_stage":       pollStage,
+			"next_poll_at":     &nextPollAt,
+			"lease_owner":      "",
+			"lease_expires_at": nil,
+			"updated_at":       time.Now(),
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return errors.New("任务轮询租约已失效")
+	}
+	return nil
+}
+
+// 人工恢复只锁定已到查询时间的终止任务；旧 Worker 租约可覆盖，但未过期的人工恢复租约不能并发抢占。
+func (r *Repository) ClaimRecoverableTaskProviderRecovery(id string, userID string, owner string, leaseDuration time.Duration) error {
+	now := time.Now()
+	query := r.db.Model(&model.Task{}).Where(
+		"id = ? AND status IN ? AND (next_poll_at IS NULL OR next_poll_at <= ?) AND (lease_owner = '' OR lease_owner NOT LIKE ? OR lease_expires_at IS NULL OR lease_expires_at <= ?)",
+		id, []model.TaskStatus{model.TaskStatusFailed, model.TaskStatusCancelled}, now, "manual-recovery:%", now,
+	)
+	if strings.TrimSpace(userID) != "" {
+		query = query.Where("user_id = ?", userID)
+	}
+	result := query.Updates(map[string]any{
+		"lease_owner":      owner,
+		"lease_expires_at": now.Add(leaseDuration),
+		"updated_at":       now,
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		var current model.Task
+		currentQuery := r.db.Select("next_poll_at").Where("id = ? AND status IN ?", id, []model.TaskStatus{model.TaskStatusFailed, model.TaskStatusCancelled})
+		if strings.TrimSpace(userID) != "" {
+			currentQuery = currentQuery.Where("user_id = ?", userID)
+		}
+		if err := currentQuery.First(&current).Error; err == nil && current.NextPollAt != nil && current.NextPollAt.After(now) {
+			return ErrTaskProviderRecoveryNotDue
+		}
+		return ErrTaskProviderRecoveryConflict
+	}
+	return nil
+}
+
+func (r *Repository) RenewTaskProviderRecovery(id string, owner string, leaseDuration time.Duration) error {
+	now := time.Now()
+	result := r.db.Model(&model.Task{}).
+		Where("id = ? AND status IN ? AND lease_owner = ?", id, []model.TaskStatus{model.TaskStatusFailed, model.TaskStatusCancelled}, owner).
+		Updates(map[string]any{"lease_expires_at": now.Add(leaseDuration), "updated_at": now})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTaskProviderRecoveryConflict
+	}
+	return nil
+}
+
+func (r *Repository) ReleaseTaskProviderRecovery(id string, owner string) error {
+	return r.db.Model(&model.Task{}).
+		Where("id = ? AND lease_owner = ?", id, owner).
+		Updates(map[string]any{"lease_owner": "", "lease_expires_at": nil, "updated_at": time.Now()}).Error
+}
+
+func (r *Repository) UpdateClaimedTaskProgress(id string, owner string, stage string, progress int) error {
+	result := r.db.Model(&model.Task{}).
+		Where("id = ? AND status = ? AND lease_owner = ?", id, model.TaskStatusRunning, owner).
+		Updates(map[string]any{"stage": stage, "progress": progress, "updated_at": time.Now()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTaskStateConflict
+	}
+	return nil
+}
+
+// 媒体资源已经写入后先保存轻量结果检查点；后续会话或画布事务失败时仍可从任务详情恢复资源引用。
+func (r *Repository) CheckpointClaimedTaskResult(id string, owner string, resultJSON string, deliveryOpsJSON string, stage string, progress int) error {
+	result := r.db.Model(&model.Task{}).
+		Where("id = ? AND status = ? AND lease_owner = ?", id, model.TaskStatusRunning, owner).
+		Updates(map[string]any{"result_json": resultJSON, "delivery_ops_json": deliveryOpsJSON, "stage": stage, "progress": progress, "updated_at": time.Now()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTaskStateConflict
+	}
+	return nil
+}
+
+func (r *Repository) CheckpointRecoveringTaskResult(id string, owner string, resultJSON string, deliveryOpsJSON string, stage string, progress int) error {
+	result := r.db.Model(&model.Task{}).
+		Where("id = ? AND status IN ? AND lease_owner = ?", id, []model.TaskStatus{model.TaskStatusFailed, model.TaskStatusCancelled}, owner).
+		Updates(map[string]any{"result_json": resultJSON, "delivery_ops_json": deliveryOpsJSON, "stage": stage, "progress": progress, "updated_at": time.Now()})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTaskProviderRecoveryConflict
+	}
+	return nil
+}
+
+// PrepareClaimedTaskProviderCall 把有效租约确认、调用阶段和调用前审计写入同一事务；
+// 任一步失败都不得进入 HTTP 发送检查点，避免租约交接时两个 Worker 同时发起请求。
+func (r *Repository) PrepareClaimedTaskProviderCall(id string, owner string, stage string, progress int, leaseDuration time.Duration, entry *model.TaskLog) error {
+	if strings.TrimSpace(owner) == "" || leaseDuration <= 0 || entry == nil || entry.TaskID != id || strings.TrimSpace(entry.ID) == "" {
+		return ErrTaskStateConflict
+	}
+	now := time.Now()
 	return r.db.Transaction(func(tx *gorm.DB) error {
+		updated := tx.Model(&model.Task{}).
+			Where("id = ? AND status = ? AND lease_owner = ? AND lease_expires_at IS NOT NULL AND lease_expires_at > ?", id, model.TaskStatusRunning, owner, now).
+			Updates(map[string]any{
+				"stage":    stage,
+				"progress": progress,
+				// 第二次结构修复前仍要续租和写审计，但不能抹掉首轮已经 dispatched 的事实。
+				"provider_call_state": gorm.Expr("CASE WHEN provider_call_state IS NULL OR provider_call_state = '' OR provider_call_state = ? THEN ? ELSE provider_call_state END", model.TaskProviderCallPending, model.TaskProviderCallPreflight),
+				"lease_expires_at":    now.Add(leaseDuration),
+				"updated_at":          now,
+			})
+		if updated.Error != nil {
+			return updated.Error
+		}
+		if updated.RowsAffected != 1 {
+			return ErrTaskStateConflict
+		}
+		return tx.Create(entry).Error
+	})
+}
+
+// MarkClaimedTaskProviderCallDispatched 是供应商 HTTP 请求前最后一道持久边界。
+// 只有持有有效租约且仍为运行中的 Worker 能标记 dispatched；用户取消先赢时更新失败，调用方必须停止建连。
+func (r *Repository) MarkClaimedTaskProviderCallDispatched(id string, owner string) error {
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(owner) == "" {
+		return ErrTaskStateConflict
+	}
+	now := time.Now()
+	result := r.db.Model(&model.Task{}).
+		Where("id = ? AND status = ? AND lease_owner = ? AND lease_expires_at IS NOT NULL AND lease_expires_at > ?", id, model.TaskStatusRunning, owner, now).
+		Where("provider_call_state IN ?", []model.TaskProviderCallState{model.TaskProviderCallPreflight, model.TaskProviderCallDispatched, model.TaskProviderCallPrepared}).
+		Updates(map[string]any{"provider_call_state": model.TaskProviderCallDispatched, "updated_at": now})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTaskStateConflict
+	}
+	return nil
+}
+
+// 终态必须先用原状态和租约做条件转移，避免迟到的 worker 覆盖用户取消或其他 worker 的结果。
+func claimTaskTerminal(tx *gorm.DB, id string, expectedStatus model.TaskStatus, expectedOwner string, terminalStatus model.TaskStatus) error {
+	if strings.TrimSpace(expectedOwner) == "" {
+		return ErrTaskStateConflict
+	}
+	result := tx.Model(&model.Task{}).
+		Where("id = ? AND status = ? AND lease_owner = ?", id, expectedStatus, expectedOwner).
+		Update("status", terminalStatus)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTaskStateConflict
+	}
+	return nil
+}
+
+func (r *Repository) SaveClaimedTaskTerminal(task *model.Task, expectedStatus model.TaskStatus, expectedOwner string) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := claimTaskTerminal(tx, task.ID, expectedStatus, expectedOwner, task.Status); err != nil {
+			return err
+		}
+		if err := tx.Save(task).Error; err != nil {
+			return err
+		}
+		return markSessionFailedForTask(tx, *task, task.Error)
+	})
+}
+
+func (r *Repository) SaveTaskCompletion(task *model.Task, expectedStatus model.TaskStatus, expectedOwner string, session *model.Session, message *model.Message, results []model.Result) error {
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		if err := claimTaskTerminal(tx, task.ID, expectedStatus, expectedOwner, model.TaskStatusSucceeded); err != nil {
+			return err
+		}
 		if err := tx.Save(task).Error; err != nil {
 			return err
 		}
@@ -375,12 +725,46 @@ func (r *Repository) SaveTaskCompletion(task *model.Task, session *model.Session
 }
 
 func (r *Repository) CancelTaskIfStatus(userID string, id string, expected model.TaskStatus, now time.Time) (bool, error) {
-	result := r.db.Model(&model.Task{}).
-		Where("id = ? AND user_id = ? AND status = ?", id, userID, expected).
-		Updates(map[string]any{
-			"status": model.TaskStatusCancelled, "stage": "任务已取消", "completed_at": &now, "updated_at": now,
+	return r.cancelTaskIfStatus(userID, id, expected, nil, false, now)
+}
+
+// CancelTaskIfStatusAndProviderStates 只在供应商调用状态仍处于指定集合时抢占取消终态；
+// 它与请求发送检查点竞争同一任务行，只有取消事务先赢时才能证明本次请求没有发出。
+func (r *Repository) CancelTaskIfStatusAndProviderStates(userID string, id string, expected model.TaskStatus, providerStates []model.TaskProviderCallState, now time.Time) (bool, error) {
+	if len(providerStates) == 0 {
+		return false, nil
+	}
+	return r.cancelTaskIfStatus(userID, id, expected, providerStates, true, now)
+}
+
+func (r *Repository) cancelTaskIfStatus(userID string, id string, expected model.TaskStatus, providerStates []model.TaskProviderCallState, restrictProviderState bool, now time.Time) (bool, error) {
+	cancelled := false
+	err := r.db.Transaction(func(tx *gorm.DB) error {
+		query := tx.Model(&model.Task{}).Where("id = ? AND user_id = ? AND status = ?", id, userID, expected)
+		if restrictProviderState {
+			query = query.Where("provider_call_state IN ?", providerStates)
+		}
+		result := query.Updates(map[string]any{
+			"status": model.TaskStatusCancelled, "stage": "任务已取消", "poll_stage": "cancelled", "next_poll_at": nil,
+			"lease_owner": "", "lease_expires_at": nil, "completed_at": &now, "updated_at": now,
 		})
-	return result.RowsAffected == 1, result.Error
+		if result.Error != nil || result.RowsAffected != 1 {
+			return result.Error
+		}
+		cancelled = true
+		var task model.Task
+		if err := tx.First(&task, "id = ? AND user_id = ?", id, userID).Error; err != nil {
+			return err
+		}
+		return markSessionFailedForTask(tx, task, "会话任务已取消。")
+	})
+	return cancelled, err
+}
+
+func (r *Repository) UpdateCancelledTaskError(userID string, id string, errorText string) error {
+	return r.db.Model(&model.Task{}).
+		Where("id = ? AND user_id = ? AND status = ?", id, userID, model.TaskStatusCancelled).
+		Updates(map[string]any{"error": errorText, "updated_at": time.Now()}).Error
 }
 
 func (r *Repository) Tasks(userID string, limit int, projectID string, activeOnly bool) ([]model.Task, error) {
@@ -388,7 +772,8 @@ func (r *Repository) Tasks(userID string, limit int, projectID string, activeOnl
 	if limit <= 0 || limit > 100 {
 		limit = 50
 	}
-	query := r.db.Select("id", "session_id", "project_id", "type", "status", "stage", "progress", "prompt", "operation", "provider", "model", "result_json", "billing_order_id", "attempts", "started_at", "completed_at", "created_at", "updated_at").
+	// 列表只取小型结果用于首图预览，并把私有恢复正文投影成标记，避免部分 Base64 检查点拖垮轮询响应。
+	query := r.db.Select("id", "session_id", "project_id", "type", "status", "stage", "progress", "prompt", "operation", "provider", "model", taskSummaryResultSelect, taskSummaryRecoverySelect, "error", "billing_order_id", "provider_request_id", "attempts", "started_at", "completed_at", "created_at", "updated_at").
 		Where("user_id = ?", userID)
 	if strings.TrimSpace(projectID) != "" {
 		query = query.Where("project_id = ?", strings.TrimSpace(projectID))
@@ -396,7 +781,7 @@ func (r *Repository) Tasks(userID string, limit int, projectID string, activeOnl
 	if activeOnly {
 		query = query.Where("status IN ?", []model.TaskStatus{model.TaskStatusQueued, model.TaskStatusRunning})
 	}
-	err := query.Order("created_at desc").Limit(limit).Find(&tasks).Error
+	err := query.Order("created_at desc, id desc").Limit(limit).Find(&tasks).Error
 	return tasks, err
 }
 
@@ -416,6 +801,74 @@ func (r *Repository) SessionForUser(userID string, id string) (*model.Session, e
 	return &session, nil
 }
 
+func (r *Repository) SessionForRequestKey(userID string, requestKey string) (*model.Session, error) {
+	if strings.TrimSpace(requestKey) == "" {
+		return nil, nil
+	}
+	var session model.Session
+	err := r.db.Where("user_id = ? AND request_key = ?", userID, requestKey).First(&session).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, nil
+	}
+	return &session, err
+}
+
+func (r *Repository) CreateSessionDraft(session *model.Session) error {
+	err := r.db.Create(session).Error
+	if err == nil {
+		return nil
+	}
+	value := strings.ToLower(err.Error())
+	if strings.Contains(value, "idx_sessions_user_request_key") || (strings.Contains(value, "unique constraint") && strings.Contains(value, "sessions.user_id") && strings.Contains(value, "sessions.request_key")) {
+		return ErrDuplicateSessionRequest
+	}
+	return err
+}
+
+func (r *Repository) EnsureInitialSessionMessage(message *model.Message) error {
+	return r.db.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "id"}}, DoNothing: true}).Create(message).Error
+}
+
+// 失败任务与会话终态必须幂等绑定；任务 ID 同时作为失败消息 ID，重放和查询自愈都不会追加重复提示。
+func (r *Repository) MarkSessionFailedForTask(task model.Task, message string) error {
+	if strings.TrimSpace(task.SessionID) == "" {
+		return nil
+	}
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		return markSessionFailedForTask(tx, task, message)
+	})
+}
+
+func markSessionFailedForTask(tx *gorm.DB, task model.Task, message string) error {
+	if strings.TrimSpace(task.SessionID) == "" {
+		return nil
+	}
+	now := time.Now()
+	result := tx.Model(&model.Session{}).
+		Where(
+			"id = ? AND user_id = ? AND status IN ? AND EXISTS (SELECT 1 FROM tasks WHERE tasks.id = ? AND tasks.user_id = ? AND tasks.session_id = ? AND tasks.status IN ?)",
+			task.SessionID, task.UserID, []model.SessionStatus{model.SessionStatusActive, model.SessionStatusFailed},
+			task.ID, task.UserID, task.SessionID, []model.TaskStatus{model.TaskStatusFailed, model.TaskStatusCancelled},
+		).
+		Updates(map[string]any{"status": model.SessionStatusFailed, "updated_at": now})
+	if result.Error != nil || result.RowsAffected == 0 {
+		return result.Error
+	}
+	content := strings.TrimSpace(message)
+	if content == "" {
+		if task.Status == model.TaskStatusCancelled {
+			content = "会话任务已取消。"
+		} else {
+			content = "会话任务失败。"
+		}
+	}
+	failure := model.Message{ID: task.ID, UserID: task.UserID, SessionID: task.SessionID, Role: "assistant", Content: content, CreatedAt: now}
+	return tx.Clauses(clause.OnConflict{
+		Columns:   []clause.Column{{Name: "id"}},
+		DoUpdates: clause.AssignmentColumns([]string{"role", "content", "created_at"}),
+	}).Create(&failure).Error
+}
+
 func (r *Repository) DeleteSessionDraft(userID string, id string) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
 		if err := tx.Delete(&model.Message{}, "user_id = ? AND session_id = ?", userID, id).Error; err != nil {
@@ -427,27 +880,27 @@ func (r *Repository) DeleteSessionDraft(userID string, id string) error {
 
 func (r *Repository) SessionMessages(userID string, sessionID string) ([]model.Message, error) {
 	var messages []model.Message
-	err := r.db.Order("created_at asc").Find(&messages, "user_id = ? AND session_id = ?", userID, sessionID).Error
+	err := r.db.Order("created_at asc, id asc").Find(&messages, "user_id = ? AND session_id = ?", userID, sessionID).Error
 	return messages, err
 }
 
 func (r *Repository) SessionTasks(userID string, sessionID string) ([]model.Task, error) {
 	var tasks []model.Task
-	err := r.db.Select("id", "user_id", "session_id", "project_id", "type", "status", "prompt", "operation", "provider", "model", "attempts", "started_at", "completed_at", "created_at", "updated_at").
-		Order("created_at asc").
+	err := r.db.Select("id", "user_id", "session_id", "project_id", "type", "status", "stage", "progress", "prompt", "operation", "provider", "model", taskSummaryResultSelect, taskSummaryRecoverySelect, "error", "billing_order_id", "provider_request_id", "attempts", "started_at", "completed_at", "created_at", "updated_at").
+		Order("created_at asc, id asc").
 		Find(&tasks, "user_id = ? AND session_id = ?", userID, sessionID).Error
 	return tasks, err
 }
 
 func (r *Repository) SessionResults(userID string, sessionID string) ([]model.Result, error) {
 	var results []model.Result
-	err := r.db.Order("created_at asc").Find(&results, "user_id = ? AND session_id = ?", userID, sessionID).Error
+	err := r.db.Order("created_at asc, id asc").Find(&results, "user_id = ? AND session_id = ?", userID, sessionID).Error
 	return results, err
 }
 
 func (r *Repository) TaskLogs(userID string, taskID string) ([]model.TaskLog, error) {
 	var logs []model.TaskLog
-	err := r.db.Order("created_at asc").Find(&logs, "user_id = ? AND task_id = ?", userID, taskID).Error
+	err := r.db.Order("created_at asc, id asc").Find(&logs, "user_id = ? AND task_id = ?", userID, taskID).Error
 	return logs, err
 }
 
@@ -561,8 +1014,39 @@ func (r *Repository) SaveSystemSetting(setting *model.SystemSetting) error {
 	return r.db.Save(setting).Error
 }
 
-func (r *Repository) DeleteSystemSetting(key string) error {
-	return r.db.Delete(&model.SystemSetting{}, "key = ?", key).Error
+// SaveSystemSettingIfUnchanged 以管理员读取到的旧值作 CAS，避免“保留空密钥”的旧页面覆盖较新的凭据。
+func (r *Repository) SaveSystemSettingIfUnchanged(setting *model.SystemSetting, initial *model.SystemSetting) (bool, error) {
+	if setting == nil || strings.TrimSpace(setting.Key) == "" {
+		return false, errors.New("system setting key is required")
+	}
+	if initial != nil && setting.Key != initial.Key {
+		return false, errors.New("system setting key changed during update")
+	}
+	now := time.Now()
+	setting.UpdatedAt = now
+	if initial == nil {
+		if setting.CreatedAt.IsZero() {
+			setting.CreatedAt = now
+		}
+		result := r.db.Clauses(clause.OnConflict{DoNothing: true}).Create(setting)
+		return result.RowsAffected == 1, result.Error
+	}
+	setting.CreatedAt = initial.CreatedAt
+	result := r.db.Model(&model.SystemSetting{}).
+		Where("key = ? AND value_json = ? AND updated_by = ? AND updated_at = ?", initial.Key, initial.ValueJSON, initial.UpdatedBy, initial.UpdatedAt).
+		Updates(map[string]any{"value_json": setting.ValueJSON, "updated_by": setting.UpdatedBy, "updated_at": now})
+	return result.RowsAffected == 1, result.Error
+}
+
+func (r *Repository) DeleteSystemSettingIfUnchanged(key string, initial *model.SystemSetting) (bool, error) {
+	if initial == nil {
+		var count int64
+		err := r.db.Model(&model.SystemSetting{}).Where("key = ?", key).Count(&count).Error
+		return count == 0, err
+	}
+	result := r.db.Where("key = ? AND value_json = ? AND updated_by = ? AND updated_at = ?", initial.Key, initial.ValueJSON, initial.UpdatedBy, initial.UpdatedAt).
+		Delete(&model.SystemSetting{})
+	return result.RowsAffected == 1, result.Error
 }
 
 func (r *Repository) LatestUserOSSSetting(userID string) (*model.UserOSSSetting, error) {
@@ -618,9 +1102,9 @@ func (r *Repository) UserStoredFileBytes(userID string) (int64, error) {
 	var total int64
 	err := r.db.Raw(`
 		SELECT
-			(SELECT COALESCE(SUM(size), 0) FROM resources WHERE user_id = ?)
+			(SELECT COALESCE(SUM(size), 0) FROM resources WHERE user_id = ? AND status = ?)
 			+ (SELECT COALESCE(SUM(size), 0) FROM session_files WHERE user_id = ?)
-	`, userID, userID).Scan(&total).Error
+	`, userID, model.ResourceStatusReady, userID).Scan(&total).Error
 	return total, err
 }
 
@@ -636,6 +1120,51 @@ func (r *Repository) CreateResource(resource *model.Resource) error {
 
 func (r *Repository) SaveResource(resource *model.Resource) error {
 	return r.db.Save(resource).Error
+}
+
+func (r *Repository) GeneratedResourceForTaskOutput(userID string, taskID string, attempt string, sourcePath string) (*model.Resource, error) {
+	var resource model.Resource
+	err := r.db.Where(
+		"user_id = ? AND source_task_id = ? AND source_attempt = ? AND source_path = ? AND status IN ?",
+		userID, taskID, attempt, sourcePath, []model.ResourceStatus{model.ResourceStatusPending, model.ResourceStatusReady},
+	).Order("CASE WHEN status = 'ready' THEN 0 ELSE 1 END, updated_at DESC").First(&resource).Error
+	if err != nil {
+		return nil, err
+	}
+	return &resource, nil
+}
+
+func (r *Repository) ClaimStaleGeneratedResource(id string, userID string, updatedBefore time.Time) (bool, error) {
+	result := r.db.Model(&model.Resource{}).
+		Where("id = ? AND user_id = ? AND status = ? AND updated_at <= ?", id, userID, model.ResourceStatusPending, updatedBefore).
+		Updates(map[string]any{"updated_at": time.Now(), "error": ""})
+	return result.RowsAffected == 1, result.Error
+}
+
+// 多个崩溃遗留资源必须原子绑定本次已经预留的日额度，避免中途失败后部分行误判为已计费。
+func (r *Repository) SetClaimedGeneratedResourceQuotaDays(userID string, quotaDays map[string]string) error {
+	if len(quotaDays) == 0 {
+		return nil
+	}
+	ids := make([]string, 0, len(quotaDays))
+	for id := range quotaDays {
+		ids = append(ids, id)
+	}
+	sort.Strings(ids)
+	return r.db.Transaction(func(tx *gorm.DB) error {
+		for _, id := range ids {
+			result := tx.Model(&model.Resource{}).
+				Where("id = ? AND user_id = ? AND status = ? AND quota_day = ''", id, userID, model.ResourceStatusPending).
+				Update("quota_day", quotaDays[id])
+			if result.Error != nil {
+				return result.Error
+			}
+			if result.RowsAffected != 1 {
+				return ErrTaskStateConflict
+			}
+		}
+		return nil
+	})
 }
 
 func (r *Repository) ResourceForUser(userID string, id string) (*model.Resource, error) {
@@ -1119,7 +1648,7 @@ func (r *Repository) SaveShot(shot *model.Shot, create bool) error {
 		return r.db.Create(shot).Error
 	}
 	return r.db.Model(&model.Shot{}).Where("id = ? AND project_id = ?", shot.ID, shot.ProjectID).Updates(map[string]any{
-		"unit_id": shot.UnitID, "title": shot.Title, "description": shot.Description, "position": shot.Position,
+		"unit_id": shot.UnitID, "title": shot.Title, "description": shot.Description, "definition_json": shot.DefinitionJSON, "position": shot.Position,
 		"duration_ms": shot.DurationMs, "status": shot.Status, "updated_at": shot.UpdatedAt,
 	}).Error
 }
@@ -1237,6 +1766,36 @@ func (r *Repository) ProjectWorkflowInstances(projectID string) ([]model.Workflo
 	return instances, err
 }
 
+// PendingProjectWorkflowOutputTasks 只返回已经完成但尚未登记到任一工作流步骤的任务。
+// 任务 project_id 可能是业务项目本身，也可能是该项目下的画布，因此归属必须同时覆盖两种合法入口。
+func (r *Repository) PendingProjectWorkflowOutputTasks(userID string, projectID string, limit int) ([]model.Task, error) {
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	var tasks []model.Task
+	err := r.db.Model(&model.Task{}).
+		Where("tasks.user_id = ? AND tasks.status = ?", userID, model.TaskStatusSucceeded).
+		Where(`(
+			tasks.project_id = ? OR EXISTS (
+				SELECT 1 FROM canvas_projects
+				WHERE canvas_projects.id = tasks.project_id
+					AND canvas_projects.user_id = tasks.user_id
+					AND canvas_projects.project_id = ?
+			)
+		)`, projectID, projectID).
+		Where(`EXISTS (
+			SELECT 1 FROM workflow_step_instances
+			JOIN workflow_instances ON workflow_instances.id = workflow_step_instances.workflow_instance_id
+			WHERE workflow_instances.project_id = ?
+				AND tasks.input_json LIKE ('%"workflowStepId":"' || workflow_step_instances.id || '"%')
+		)`, projectID).
+		Where("NOT EXISTS (SELECT 1 FROM workflow_step_tasks WHERE workflow_step_tasks.task_id = tasks.id)").
+		Order("tasks.created_at asc, tasks.id asc").
+		Limit(limit).
+		Find(&tasks).Error
+	return tasks, err
+}
+
 func (r *Repository) WorkflowInstanceForScope(projectID string, unitID string, templateVersionID string) (*model.WorkflowInstance, error) {
 	var instance model.WorkflowInstance
 	if err := r.db.First(&instance, "project_id = ? AND unit_id = ? AND template_version_id = ?", projectID, unitID, templateVersionID).Error; err != nil {
@@ -1316,11 +1875,19 @@ func (r *Repository) UpdateWorkflowProgress(step *model.WorkflowStepInstance, ne
 	})
 }
 
-// RegisterWorkflowTaskOutput 将成功任务、流程步骤和产物表示写入同一事务，重复回填使用任务与用途唯一键幂等。
+// RegisterWorkflowTaskOutput 将成功任务、流程步骤和产物表示写入同一事务。
+// 工作流链接是事务提交凭据；链接已存在时必须直接返回数据库中的当前步骤，不能重复推进步骤或增加修订号。
 func (r *Repository) RegisterWorkflowTaskOutput(step *model.WorkflowStepInstance, next *model.WorkflowStepInstance, instance *model.WorkflowInstance, projectID string, link *model.WorkflowStepTask, representation *model.AssetRepresentation) error {
 	return r.db.Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("workflow_step_id = ? AND task_id = ?", link.WorkflowStepID, link.TaskID).FirstOrCreate(link).Error; err != nil {
-			return err
+		linkResult := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "workflow_step_id"}, {Name: "task_id"}},
+			DoNothing: true,
+		}).Create(link)
+		if linkResult.Error != nil {
+			return linkResult.Error
+		}
+		if linkResult.RowsAffected == 0 {
+			return tx.First(step, "id = ? AND workflow_instance_id = ?", step.ID, step.WorkflowInstanceID).Error
 		}
 		if representation != nil {
 			if err := tx.Where("task_id = ? AND role = ?", representation.TaskID, representation.Role).FirstOrCreate(representation).Error; err != nil {
@@ -1346,7 +1913,7 @@ func (r *Repository) RegisterWorkflowTaskOutput(step *model.WorkflowStepInstance
 				return gorm.ErrInvalidData
 			}
 		}
-		instanceResult := tx.Model(&model.WorkflowInstance{}).Where("id = ? AND project_id = ?", instance.ID, projectID).Updates(map[string]any{"status": instance.Status, "revision": instance.Revision, "updated_at": instance.UpdatedAt})
+		instanceResult := tx.Model(&model.WorkflowInstance{}).Where("id = ? AND project_id = ?", instance.ID, projectID).Updates(map[string]any{"status": instance.Status, "revision": gorm.Expr("revision + 1"), "updated_at": instance.UpdatedAt})
 		if instanceResult.Error != nil {
 			return instanceResult.Error
 		}
@@ -1405,6 +1972,14 @@ func (r *Repository) StoryboardPromptTemplates() ([]model.StoryboardPromptTempla
 func (r *Repository) StoryboardPromptTemplate(id string) (*model.StoryboardPromptTemplate, error) {
 	var template model.StoryboardPromptTemplate
 	if err := r.db.First(&template, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	return &template, nil
+}
+
+func (r *Repository) StoryboardPromptTemplateForUpdate(id string) (*model.StoryboardPromptTemplate, error) {
+	var template model.StoryboardPromptTemplate
+	if err := r.db.Clauses(clause.Locking{Strength: "UPDATE"}).First(&template, "id = ?", id).Error; err != nil {
 		return nil, err
 	}
 	return &template, nil

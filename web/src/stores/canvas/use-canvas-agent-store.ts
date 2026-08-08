@@ -1,14 +1,26 @@
 import { create } from "zustand";
 
 import type { CanvasAgentOp } from "@/lib/canvas/canvas-agent-ops";
+import { readStoredCanvasAgentEndpoint, readStoredCanvasAgentToken } from "@/lib/canvas/canvas-agent-launch";
 
 export type AgentChatRole = "user" | "assistant" | "system" | "tool" | "error";
 export type AgentAttachment = { id: string; name: string; type: string; size: number; url: string; dataUrl: string };
 export type AgentChatItem = { id: string; role: AgentChatRole; title?: string; text: string; meta?: string; detail?: unknown; attachments?: AgentAttachment[]; streamId?: string };
 export type AgentEventLog = { id: string; time: string; title: string; text: string; raw?: unknown };
-export type AgentPendingToolCall = { requestId: string; name: string; input?: { ops?: CanvasAgentOp[] } };
+export type AgentPendingToolCall = { requestId: string; name: string; input?: Record<string, unknown> & { ops?: CanvasAgentOp[] } };
 export type AgentThreadSummary = { id: string; preview: string; name?: string | null; cwd?: string; status?: string; source?: unknown; createdAt?: number; updatedAt?: number };
 export type AgentPanelTab = "chat" | "setup" | "history" | "log";
+
+function readAgentPanelWidth() {
+    if (typeof window === "undefined") return 440;
+    try {
+        const value = Number(window.localStorage.getItem("canvas-agent-panel-width"));
+        return Number.isFinite(value) && value >= 360 && value <= 760 ? value : 440;
+    } catch {
+        // 面板尺寸只是偏好；隐私模式或扩展拦截存储时不能阻断画布和 Agent 初始化。
+        return 440;
+    }
+}
 
 type CanvasAgentStore = {
     width: number;
@@ -38,9 +50,9 @@ type CanvasAgentStore = {
 };
 
 export const useCanvasAgentStore = create<CanvasAgentStore>((set) => ({
-    width: typeof window === "undefined" ? 440 : Number(localStorage.getItem("canvas-agent-panel-width")) || 440,
-    url: typeof window === "undefined" ? "http://127.0.0.1:17371" : localStorage.getItem("canvas-agent-url") || "http://127.0.0.1:17371",
-    token: typeof window === "undefined" ? "" : localStorage.getItem("canvas-agent-token") || "",
+    width: readAgentPanelWidth(),
+    url: readStoredCanvasAgentEndpoint("http://127.0.0.1:17371"),
+    token: readStoredCanvasAgentToken(),
     connected: false,
     enabled: false,
     prompt: "",

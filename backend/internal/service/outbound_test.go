@@ -1,12 +1,34 @@
 package service
 
 import (
+	"context"
+	"errors"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
 )
+
+func TestValidateOutboundURLContextCancelsBlockedDNSLookup(t *testing.T) {
+	originalLookup := lookupOutboundIP
+	lookupOutboundIP = func(ctx context.Context, _ string, _ string) ([]net.IP, error) {
+		<-ctx.Done()
+		return nil, ctx.Err()
+	}
+	t.Cleanup(func() { lookupOutboundIP = originalLookup })
+
+	ctx, cancel := context.WithTimeout(context.Background(), 25*time.Millisecond)
+	defer cancel()
+	startedAt := time.Now()
+	_, err := ValidateOutboundURLContext(ctx, "https://blocked-dns.example/v1/models")
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("ValidateOutboundURLContext() error = %v, want deadline exceeded", err)
+	}
+	if elapsed := time.Since(startedAt); elapsed > time.Second {
+		t.Fatalf("ValidateOutboundURLContext() ignored caller deadline: %v", elapsed)
+	}
+}
 
 func TestValidateOutboundURLRejectsPrivateHosts(t *testing.T) {
 	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "false")

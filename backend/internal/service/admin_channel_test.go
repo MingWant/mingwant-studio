@@ -55,6 +55,36 @@ func TestChannelFromRequestStoresXAIVideoInterfaceType(t *testing.T) {
 	}
 }
 
+func TestChannelFromRequestUsesGeminiAuthForVeo(t *testing.T) {
+	channel, err := channelFromRequest(ChannelRequest{
+		Name:          "Gemini Veo",
+		BaseURL:       "https://generativelanguage.googleapis.com",
+		APIKey:        "key",
+		InterfaceType: "gemini-veo",
+	}, model.ModelChannel{})
+	if err != nil {
+		t.Fatalf("channelFromRequest() error = %v", err)
+	}
+	if channel.InterfaceType != model.ChannelInterfaceGeminiVeo || channel.APIFormat != "gemini" {
+		t.Fatalf("channel = %#v", channel)
+	}
+}
+
+func TestChannelFromRequestUsesGeminiAuthForGenerateContent(t *testing.T) {
+	channel, err := channelFromRequest(ChannelRequest{
+		Name:          "Gemini 文本",
+		BaseURL:       "https://generativelanguage.googleapis.com",
+		APIKey:        "key",
+		InterfaceType: "gemini-content",
+	}, model.ModelChannel{})
+	if err != nil {
+		t.Fatalf("channelFromRequest() error = %v", err)
+	}
+	if channel.InterfaceType != model.ChannelInterfaceGeminiContent || channel.APIFormat != "gemini" {
+		t.Fatalf("channel = %#v", channel)
+	}
+}
+
 func TestMergeChannelRequestSupportsEnabledOnlyPatch(t *testing.T) {
 	enabled := false
 	req := mergeChannelRequest(ChannelRequest{Enabled: &enabled}, model.ModelChannel{

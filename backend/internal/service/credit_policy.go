@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"infinite-canvas/backend/internal/model"
+	"infinite-canvas/backend/internal/repository"
 
 	"gorm.io/gorm"
 )
@@ -98,10 +99,12 @@ func (s *Service) UpdateCreditPolicy(actor *model.User, policy CreditPolicy) (Cr
 	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
 		return CreditPolicy{}, err
 	}
-	if err := s.repo.SaveSystemSetting(&setting); err != nil {
-		return CreditPolicy{}, err
-	}
-	if err := s.appendAdminAudit(actor, "credit_policy.update", "system_setting", creditPolicySettingKey, "更新积分策略", policy); err != nil {
+	if err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		if err := saveSystemSettingUnchanged(txRepo, &setting, current); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "credit_policy.update", "system_setting", creditPolicySettingKey, "更新积分策略", policy)
+	}); err != nil {
 		return CreditPolicy{}, err
 	}
 	return policy, nil

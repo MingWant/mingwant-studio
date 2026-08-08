@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"infinite-canvas/backend/internal/model"
+	"infinite-canvas/backend/internal/repository"
 
 	"gorm.io/gorm"
 )
@@ -102,7 +103,16 @@ func (s *Service) UpdateOSSSetting(actor *model.User, req OSSSettingRequest) (*P
 	if currentSetting != nil {
 		setting.CreatedAt = currentSetting.CreatedAt
 	}
-	if err := s.repo.SaveSystemSetting(&setting); err != nil {
+	credentialChanged := next.AccessKeyID != currentValue.AccessKeyID || next.AccessKeySecret != currentValue.AccessKeySecret
+	storageTargetChanged := next.Endpoint != currentValue.Endpoint || next.Bucket != currentValue.Bucket || next.PathPrefix != currentValue.PathPrefix
+	if err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		if err := saveSystemSettingUnchanged(txRepo, &setting, currentSetting); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "oss_setting.update", "system_setting", ossSettingKey, "更新平台对象存储设置", map[string]any{
+			"enabled": next.Enabled, "provider": next.Provider, "credentialChanged": credentialChanged, "storageTargetChanged": storageTargetChanged,
+		})
+	}); err != nil {
 		return nil, err
 	}
 	public := publicOSSSetting(&setting, next)

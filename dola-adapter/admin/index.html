@@ -1,0 +1,394 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; connect-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; base-uri 'none'; form-action 'self';">
+    <title>Dola 账号池管理</title>
+    <style>
+        :root {
+            color-scheme: dark;
+            --bg: #0a1020;
+            --panel: rgba(19, 29, 53, .86);
+            --panel-strong: #151f3b;
+            --line: rgba(164, 181, 224, .18);
+            --text: #eef3ff;
+            --muted: #9aa8c7;
+            --primary: #7c8cff;
+            --primary-strong: #9da8ff;
+            --good: #59d6a5;
+            --warn: #f3be66;
+            --bad: #ff778e;
+            font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        }
+        * { box-sizing: border-box; }
+        body {
+            min-width: 320px;
+            min-height: 100vh;
+            margin: 0;
+            color: var(--text);
+            background: radial-gradient(circle at 15% 0%, #23366e 0, transparent 32rem), radial-gradient(circle at 100% 20%, #23314f 0, transparent 28rem), var(--bg);
+        }
+        button, input { font: inherit; }
+        button { cursor: pointer; }
+        button:disabled { cursor: not-allowed; opacity: .55; }
+        .shell { width: min(1180px, calc(100% - 32px)); margin: 0 auto; padding: 42px 0 64px; }
+        .brand { display: flex; align-items: center; gap: 14px; margin-bottom: 30px; }
+        .brand-mark { display: grid; place-items: center; width: 46px; height: 46px; border: 1px solid rgba(157, 168, 255, .5); border-radius: 15px; color: #fff; background: linear-gradient(135deg, #6575ff, #8b5cf6); box-shadow: 0 14px 34px rgba(78, 91, 221, .32); font-weight: 800; }
+        h1, h2, p { margin: 0; }
+        h1 { font-size: clamp(25px, 4vw, 38px); letter-spacing: -.03em; }
+        h2 { font-size: 16px; }
+        .subtitle, .muted { color: var(--muted); }
+        .subtitle { margin-top: 5px; font-size: 13px; }
+        .panel { border: 1px solid var(--line); border-radius: 20px; background: var(--panel); box-shadow: 0 18px 60px rgba(0, 0, 0, .22); backdrop-filter: blur(18px); }
+        .auth-panel { width: min(460px, 100%); margin: 9vh auto 0; padding: 28px; }
+        .auth-panel h2 { margin-bottom: 10px; font-size: 21px; }
+        .auth-panel p { margin-bottom: 20px; line-height: 1.65; font-size: 13px; }
+        .field { display: grid; gap: 7px; }
+        .field label { color: var(--muted); font-size: 12px; }
+        input { width: 100%; border: 1px solid var(--line); border-radius: 10px; outline: none; padding: 11px 12px; color: var(--text); background: rgba(6, 12, 28, .72); }
+        input:focus { border-color: var(--primary); box-shadow: 0 0 0 3px rgba(124, 140, 255, .16); }
+        .button-row { display: flex; flex-wrap: wrap; align-items: center; gap: 9px; }
+        .auth-panel .button-row { margin-top: 18px; }
+        .button { border: 1px solid transparent; border-radius: 10px; padding: 9px 13px; color: #fff; background: var(--primary); transition: transform .15s ease, background .15s ease, border-color .15s ease; }
+        .button:hover:not(:disabled) { transform: translateY(-1px); background: var(--primary-strong); }
+        .button.secondary { border-color: var(--line); background: rgba(255, 255, 255, .06); }
+        .button.secondary:hover:not(:disabled) { background: rgba(255, 255, 255, .12); }
+        .button.danger { color: #ffd9de; border-color: rgba(255, 119, 142, .32); background: rgba(255, 119, 142, .1); }
+        .button.small { padding: 6px 9px; font-size: 12px; }
+        .hidden { display: none !important; }
+        .topbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; margin-bottom: 22px; }
+        .topbar .button-row { justify-content: flex-end; }
+        .dashboard { display: grid; gap: 16px; }
+        .stats { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 12px; }
+        .stat { min-height: 100px; padding: 17px; }
+        .stat-label { color: var(--muted); font-size: 12px; }
+        .stat-value { margin-top: 11px; font-size: 25px; font-weight: 750; }
+        .stat-value.good { color: var(--good); }
+        .stat-value.warn { color: var(--warn); }
+        .toolbar { display: flex; align-items: flex-end; justify-content: space-between; gap: 18px; padding: 20px; }
+        .toolbar h2 { margin-bottom: 5px; }
+        .toolbar p { font-size: 12px; }
+        .add-form { display: grid; grid-template-columns: minmax(145px, 1fr) minmax(120px, .8fr) minmax(180px, 1.1fr) auto; gap: 9px; align-items: end; }
+        .table-panel { overflow: hidden; }
+        .table-wrap { overflow-x: auto; }
+        table { width: 100%; border-collapse: collapse; min-width: 760px; }
+        th, td { padding: 14px 18px; border-top: 1px solid var(--line); text-align: left; vertical-align: middle; }
+        th { color: var(--muted); font-size: 11px; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+        td { font-size: 13px; }
+        .account-name { font-weight: 650; }
+        .account-id { margin-top: 4px; color: var(--muted); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; font-size: 10px; }
+        .badge { display: inline-flex; align-items: center; gap: 6px; border: 1px solid var(--line); border-radius: 99px; padding: 5px 9px; color: var(--muted); background: rgba(255,255,255,.04); font-size: 11px; white-space: nowrap; }
+        .badge::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: currentColor; }
+        .badge.good { color: var(--good); border-color: rgba(89, 214, 165, .26); background: rgba(89, 214, 165, .08); }
+        .badge.warn { color: var(--warn); border-color: rgba(243, 190, 102, .26); background: rgba(243, 190, 102, .08); }
+        .badge.bad { color: var(--bad); border-color: rgba(255, 119, 142, .26); background: rgba(255, 119, 142, .08); }
+        .actions { display: flex; flex-wrap: wrap; gap: 7px; }
+        .notice { min-height: 20px; margin-top: 14px; color: var(--muted); font-size: 12px; }
+        .notice.good { color: var(--good); }
+        .notice.bad { color: var(--bad); }
+        .empty { padding: 38px 18px; color: var(--muted); text-align: center; }
+        @media (max-width: 780px) {
+            .shell { width: min(100% - 20px, 680px); padding-top: 25px; }
+            .topbar, .toolbar { align-items: stretch; flex-direction: column; }
+            .topbar .button-row { justify-content: flex-start; }
+            .stats { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .add-form { grid-template-columns: 1fr 1fr; }
+            .add-form .button { grid-column: 1 / -1; }
+        }
+    </style>
+</head>
+<body>
+    <main class="shell">
+        <header class="brand">
+            <div class="brand-mark">D</div>
+            <div>
+                <h1>Dola 账号池</h1>
+                <p class="subtitle">网页工作台账号、独立浏览器分区与每日额度管理</p>
+            </div>
+        </header>
+
+        <section id="auth-panel" class="panel auth-panel">
+            <h2>登录管理台</h2>
+            <p class="muted">请输入 Adapter 的管理 Key。密钥只保存在当前浏览器标签页的 sessionStorage，不会写入 URL 或服务端状态文件。</p>
+            <form id="auth-form">
+                <div class="field">
+                    <label for="admin-key">DOLA_ADAPTER_ADMIN_KEY</label>
+                    <input id="admin-key" type="password" autocomplete="off" spellcheck="false" required>
+                </div>
+                <div class="button-row">
+                    <button class="button" type="submit">进入管理台</button>
+                </div>
+            </form>
+            <div id="auth-notice" class="notice" role="status"></div>
+        </section>
+
+        <section id="app" class="hidden">
+            <div class="topbar">
+                <div>
+                    <h2>账号池概览</h2>
+                    <p class="subtitle">只有状态为“可用”的账号会被任务调度；额度耗尽后按每日刷新时间自动恢复。</p>
+                </div>
+                <div class="button-row">
+                    <button id="refresh" class="button secondary" type="button">刷新状态</button>
+                    <button id="logout" class="button secondary" type="button">退出管理台</button>
+                </div>
+            </div>
+
+            <div class="dashboard">
+                <div class="stats">
+                    <div class="panel stat"><div class="stat-label">浏览器 Worker</div><div id="browser-status" class="stat-value">—</div></div>
+                    <div class="panel stat"><div class="stat-label">账号总数</div><div id="account-total" class="stat-value">0</div></div>
+                    <div class="panel stat"><div class="stat-label">当前可用</div><div id="account-healthy" class="stat-value good">0</div></div>
+                    <div class="panel stat"><div class="stat-label">待登录 / 用尽</div><div id="account-attention" class="stat-value warn">0 / 0</div></div>
+                </div>
+
+                <section class="panel toolbar">
+                    <div>
+                        <h2>添加 Dola 账号</h2>
+                        <p class="muted">每个账号使用独立 Profile Key；网页工作台模式还要对应独立 CDP 地址。</p>
+                    </div>
+                    <form id="add-form" class="add-form">
+                        <div class="field"><label for="account-name">显示名称</label><input id="account-name" maxlength="80" placeholder="Dola 账号 A" required></div>
+                        <div class="field"><label for="profile-key">Profile Key</label><input id="profile-key" maxlength="80" placeholder="account-a" pattern="[^\\\\/]+" required></div>
+                        <div class="field"><label for="cdp-url">CDP 地址（可选）</label><input id="cdp-url" maxlength="200" placeholder="http://127.0.0.1:9222"></div>
+                        <button class="button" type="submit">添加账号</button>
+                    </form>
+                </section>
+
+                <section class="panel table-panel">
+                    <div class="table-wrap">
+                        <table>
+                            <thead><tr><th>账号</th><th>状态</th><th>额度</th><th>最近使用</th><th>操作</th></tr></thead>
+                            <tbody id="accounts-body"></tbody>
+                        </table>
+                    </div>
+                    <div id="empty" class="empty hidden">还没有账号，请先添加一个 Dola 账号。</div>
+                </section>
+            </div>
+            <div id="app-notice" class="notice" role="status"></div>
+        </section>
+    </main>
+
+    <script>
+        (() => {
+            const STORAGE_KEY = "dola-adapter-admin-key";
+            const state = { adminKey: sessionStorage.getItem(STORAGE_KEY) || "" };
+            const $ = (selector) => document.querySelector(selector);
+            const authPanel = $("#auth-panel");
+            const app = $("#app");
+            const authKey = $("#admin-key");
+            const authNotice = $("#auth-notice");
+            const appNotice = $("#app-notice");
+            const statusLabels = {
+                healthy: ["可用", "good"],
+                busy: ["执行中", "warn"],
+                needs_login: ["待登录", "warn"],
+                quota_exhausted: ["今日额度用尽", "bad"],
+                cooldown: ["冷却中", "warn"],
+                disabled: ["已停用", "bad"],
+            };
+
+            function setNotice(element, message, kind = "") {
+                element.textContent = message || "";
+                element.className = `notice${kind ? ` ${kind}` : ""}`;
+            }
+
+            function formatDate(value) {
+                if (!value) return "—";
+                const date = new Date(value);
+                if (Number.isNaN(date.getTime())) return "—";
+                return new Intl.DateTimeFormat("zh-CN", { timeZone: "Asia/Hong_Kong", dateStyle: "short", timeStyle: "short" }).format(date);
+            }
+
+            function statusBadge(value) {
+                const [label, kind] = statusLabels[value] || [value || "未知", ""];
+                const badge = document.createElement("span");
+                badge.className = `badge ${kind}`;
+                badge.textContent = label;
+                return badge;
+            }
+
+            function cell(text, className = "") {
+                const element = document.createElement("td");
+                element.textContent = text;
+                if (className) element.className = className;
+                return element;
+            }
+
+            function button(label, handler, kind = "secondary") {
+                const element = document.createElement("button");
+                element.type = "button";
+                element.className = `button small ${kind}`;
+                element.textContent = label;
+                element.addEventListener("click", async () => {
+                    element.disabled = true;
+                    try { await handler(); } catch (error) { setNotice(appNotice, error.message || "操作失败", "bad"); }
+                    element.disabled = false;
+                });
+                return element;
+            }
+
+            async function request(path, options = {}) {
+                const headers = new Headers(options.headers || {});
+                headers.set("Authorization", `Bearer ${state.adminKey}`);
+                if (options.body && !headers.has("Content-Type")) headers.set("Content-Type", "application/json");
+                const response = await fetch(path, { ...options, headers });
+                const text = await response.text();
+                let payload = {};
+                try { payload = text ? JSON.parse(text) : {}; } catch { payload = {}; }
+                if (!response.ok) throw new Error(payload?.error?.message || `请求失败（${response.status}）`);
+                return payload;
+            }
+
+            async function loadDashboard() {
+                const [accountsPayload, healthResponse] = await Promise.all([
+                    request("/internal/accounts"),
+                    fetch("/healthz", { cache: "no-store" }),
+                ]);
+                const healthPayload = await healthResponse.json();
+                renderAccounts(accountsPayload.data || []);
+                renderHealth(healthPayload.data || {});
+            }
+
+            function renderHealth(health) {
+                const browser = $("#browser-status");
+                const browserHealthy = health.browserMode === "cdp" ? health.cdpConfigured : health.browserReady;
+                browser.textContent = health.browserMode === "cdp" ? (browserHealthy ? "CDP 已配置" : "CDP 未配置") : (browserHealthy ? "正常" : "异常");
+                browser.className = `stat-value ${browserHealthy ? "good" : "warn"}`;
+                const accounts = health.accounts || {};
+                $("#account-total").textContent = accounts.total ?? 0;
+                $("#account-healthy").textContent = accounts.healthy ?? 0;
+                $("#account-attention").textContent = `${accounts.needsLogin ?? 0} / ${accounts.quotaExhausted ?? 0}`;
+            }
+
+            function renderAccounts(accounts) {
+                const body = $("#accounts-body");
+                body.replaceChildren();
+                $("#empty").classList.toggle("hidden", accounts.length > 0);
+                for (const account of accounts) {
+                    const row = document.createElement("tr");
+                    const identity = document.createElement("td");
+                    const name = document.createElement("div");
+                    name.className = "account-name";
+                    name.textContent = account.name;
+                    const id = document.createElement("div");
+                    id.className = "account-id";
+                    id.textContent = account.id;
+                    const endpoint = document.createElement("div");
+                    endpoint.className = "account-id";
+                    endpoint.textContent = account.cdpUrl ? `CDP：${account.cdpUrl}` : "CDP：跟随 .env 全局配置";
+                    identity.append(name, id, endpoint);
+                    row.append(identity);
+
+                    const status = document.createElement("td");
+                    status.append(statusBadge(account.state));
+                    row.append(status);
+
+                    const quotaText = account.quotaRemaining === null || account.quotaRemaining === undefined
+                        ? "由 Dola 返回"
+                        : `${account.quotaRemaining} 点`;
+                    const quota = cell(quotaText);
+                    if (account.quotaResetAt) quota.title = `预计刷新：${formatDate(account.quotaResetAt)}`;
+                    row.append(quota);
+                    row.append(cell(formatDate(account.lastUsedAt)));
+
+                    const actions = document.createElement("td");
+                    actions.className = "actions";
+                    actions.append(button("打开登录", async () => {
+                        await request(`/internal/accounts/${encodeURIComponent(account.id)}/login`, { method: "POST" });
+                        setNotice(appNotice, `${account.name} 的登录工作台已打开或已接管，请完成 Dola 登录。`, "good");
+                    }));
+                    actions.append(button("设置 CDP", async () => {
+                        const value = window.prompt("留空表示使用 .env 中的 DOLA_BROWSER_CDP_URL", account.cdpUrl || "");
+                        if (value === null) return;
+                        await request(`/internal/accounts/${encodeURIComponent(account.id)}`, { method: "PATCH", body: JSON.stringify({ cdpUrl: value.trim() }) });
+                        await loadDashboard();
+                        setNotice(appNotice, `${account.name} 的浏览器连接地址已更新，请重新确认登录状态。`, "good");
+                    }));
+                    if (account.state === "needs_login") actions.append(button("标记可用", async () => {
+                        await request(`/internal/accounts/${encodeURIComponent(account.id)}`, { method: "PATCH", body: JSON.stringify({ state: "healthy" }) });
+                        await loadDashboard();
+                        setNotice(appNotice, `${account.name} 已加入可用号池。`, "good");
+                    }, ""));
+                    if (account.enabled) {
+                        actions.append(button("停用", async () => {
+                            await request(`/internal/accounts/${encodeURIComponent(account.id)}`, { method: "PATCH", body: JSON.stringify({ enabled: false }) });
+                            await loadDashboard();
+                            setNotice(appNotice, `${account.name} 已停用。`, "good");
+                        }, "danger"));
+                    } else {
+                        actions.append(button("启用", async () => {
+                            await request(`/internal/accounts/${encodeURIComponent(account.id)}`, { method: "PATCH", body: JSON.stringify({ enabled: true }) });
+                            await loadDashboard();
+                            setNotice(appNotice, `${account.name} 已启用，请重新确认登录状态。`, "good");
+                        }, ""));
+                    }
+                    row.append(actions);
+                    body.append(row);
+                }
+            }
+
+            async function enter(key) {
+                state.adminKey = key.trim();
+                if (!state.adminKey) throw new Error("请输入管理 Key");
+                await loadDashboard();
+                sessionStorage.setItem(STORAGE_KEY, state.adminKey);
+                authPanel.classList.add("hidden");
+                app.classList.remove("hidden");
+                setNotice(authNotice, "");
+            }
+
+            $("#auth-form").addEventListener("submit", async (event) => {
+                event.preventDefault();
+                try {
+                    setNotice(authNotice, "正在验证…");
+                    await enter(authKey.value);
+                } catch (error) {
+                    state.adminKey = "";
+                    sessionStorage.removeItem(STORAGE_KEY);
+                    setNotice(authNotice, error.message || "管理 Key 无效", "bad");
+                }
+            });
+
+            $("#add-form").addEventListener("submit", async (event) => {
+                event.preventDefault();
+                const name = $("#account-name").value.trim();
+                const profileKey = $("#profile-key").value.trim();
+                const cdpUrl = $("#cdp-url").value.trim();
+                try {
+                    await request("/internal/accounts", { method: "POST", body: JSON.stringify({ name, profileKey, cdpUrl }) });
+                    event.target.reset();
+                    await loadDashboard();
+                    setNotice(appNotice, "账号已添加，请点击“打开登录”完成登录。", "good");
+                } catch (error) {
+                    setNotice(appNotice, error.message || "账号添加失败", "bad");
+                }
+            });
+
+            $("#refresh").addEventListener("click", async () => {
+                try { await loadDashboard(); setNotice(appNotice, "状态已刷新。", "good"); }
+                catch (error) { setNotice(appNotice, error.message || "刷新失败", "bad"); }
+            });
+
+            $("#logout").addEventListener("click", () => {
+                state.adminKey = "";
+                sessionStorage.removeItem(STORAGE_KEY);
+                app.classList.add("hidden");
+                authPanel.classList.remove("hidden");
+                authKey.value = "";
+                setNotice(authNotice, "已退出当前标签页的管理台。", "good");
+            });
+
+            if (state.adminKey) {
+                authKey.value = state.adminKey;
+                enter(state.adminKey).catch(() => {
+                    state.adminKey = "";
+                    sessionStorage.removeItem(STORAGE_KEY);
+                    setNotice(authNotice, "保存的管理 Key 已失效，请重新输入。", "bad");
+                });
+            }
+        })();
+    </script>
+</body>
+</html>

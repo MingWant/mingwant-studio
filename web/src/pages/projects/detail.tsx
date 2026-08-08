@@ -38,7 +38,7 @@ export default function ProjectDetailPage() {
     const createCanvas = () => {
         if (detail.data?.project.status === "archived") { message.warning("项目已归档，请先在项目设置中恢复"); return; }
         const commerceProject = detail.data?.project.type === "commerce-video";
-        const activeChapterId = chapterId || sessionStorage.getItem(`project-active-chapter:${projectId}`) || "";
+        const activeChapterId = chapterId || readSessionStorage(`project-active-chapter:${projectId}`) || "";
         const unit = !commerceProject && activeView === "chapters"
             ? detail.data?.units.find((item) => item.id === activeChapterId) || detail.data?.units.slice().sort((left, right) => left.position - right.position)[0]
             : undefined;
@@ -112,7 +112,16 @@ export default function ProjectDetailPage() {
 }
 
 function projectChapterHref(units: Array<{ id: string; position: number }>, projectId: string, routeChapterId?: string) {
-    const rememberedId = sessionStorage.getItem(`project-active-chapter:${projectId}`) || "";
+    const rememberedId = readSessionStorage(`project-active-chapter:${projectId}`) || "";
     const targetId = [routeChapterId, rememberedId].find((id) => id && units.some((unit) => unit.id === id)) || units.slice().sort((left, right) => left.position - right.position)[0]?.id;
     return targetId ? `/projects/${projectId}/chapters/${targetId}` : `/projects/${projectId}/chapters`;
+}
+
+function readSessionStorage(key: string) {
+    if (typeof window === "undefined") return null;
+    try {
+        return window.sessionStorage.getItem(key);
+    } catch {
+        return null;
+    }
 }

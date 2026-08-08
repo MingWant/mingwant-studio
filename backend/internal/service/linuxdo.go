@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"infinite-canvas/backend/internal/model"
+	"infinite-canvas/backend/internal/repository"
 
 	"gorm.io/gorm"
 )
@@ -127,7 +128,14 @@ func (s *Service) UpdateLinuxDOSetting(actor *model.User, req LinuxDOSettingRequ
 	if currentSetting != nil {
 		setting.CreatedAt = currentSetting.CreatedAt
 	}
-	if err := s.repo.SaveSystemSetting(&setting); err != nil {
+	if err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		if err := saveSystemSettingUnchanged(txRepo, &setting, currentSetting); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "linuxdo_setting.update", "system_setting", linuxDOSettingKey, "更新 Linux.do 登录设置", map[string]any{
+			"enabled": next.Enabled, "clientAuthMethod": next.ClientAuthMethod, "scopeCount": len(next.Scopes), "clientSecretChanged": req.ClientSecret != "",
+		})
+	}); err != nil {
 		return nil, err
 	}
 	return publicLinuxDOSetting(&setting, next), nil

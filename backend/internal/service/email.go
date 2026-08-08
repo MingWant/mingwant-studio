@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"math/big"
 	"mime"
 	"net"
@@ -19,6 +20,7 @@ import (
 	"time"
 
 	"infinite-canvas/backend/internal/model"
+	"infinite-canvas/backend/internal/repository"
 
 	"gorm.io/gorm"
 )
@@ -26,6 +28,9 @@ import (
 const emailSettingKey = "email"
 const registrationEmailPurpose = "registration"
 const registrationCodeTTL = 10 * time.Minute
+const registrationCodeMaxAttempts = 5
+const smtpDialTimeout = 12 * time.Second
+const smtpOperationTimeout = 30 * time.Second
 
 type EmailSettingRequest struct {
 	Enabled    bool   `json:"enabled"`
@@ -102,7 +107,14 @@ func (s *Service) UpdateEmailSetting(actor *model.User, req EmailSettingRequest)
 	if currentSetting != nil {
 		setting.CreatedAt = currentSetting.CreatedAt
 	}
-	if err := s.repo.SaveSystemSetting(&setting); err != nil {
+	if err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		if err := saveSystemSettingUnchanged(txRepo, &setting, currentSetting); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "email_setting.update", "system_setting", emailSettingKey, "更新注册邮件设置", map[string]any{
+			"enabled": next.Enabled, "port": next.Port, "encryption": next.Encryption, "passwordChanged": req.Password != "",
+		})
+	}); err != nil {
 		return nil, err
 	}
 	return publicEmailSetting(&setting, next), nil
@@ -113,7 +125,10 @@ func (s *Service) EmailEnabled() (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	return value.Enabled && value.Host != "" && value.Port > 0 && value.FromEmail != "", nil
+	if !value.Enabled || validateEmailSetting(value) != nil {
+		return false, nil
+	}
+	return true, nil
 }
 
 func (s *Service) SendRegistrationEmailCode(rawEmail string) error {
@@ -135,17 +150,23 @@ func (s *Service) SendRegistrationEmailCode(rawEmail string) error {
 	if !registrationEnabled {
 		return Forbidden("管理员未开放新用户注册")
 	}
-	if _, err := s.repo.UserByEmail(email); err == nil {
-		return BadAuthRequest("邮箱已被注册")
-	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-		return err
-	}
 	_, setting, err := s.readEmailSetting()
 	if err != nil {
-		return err
+		log.Printf("registration email setting read failed: %v", err)
+		return Unavailable("注册邮件服务暂时不可用，请稍后再试")
 	}
 	if !setting.Enabled {
 		return Forbidden("平台尚未启用注册邮件，请联系管理员")
+	}
+	if err := validateEmailSetting(setting); err != nil {
+		log.Printf("registration email setting invalid: %v", err)
+		return Unavailable("注册邮件服务暂时不可用，请联系管理员检查邮件配置")
+	}
+	// 已注册邮箱返回同样的成功响应，避免注册验证码接口直接充当账号枚举器。
+	if _, err := s.repo.UserByEmail(email); err == nil {
+		return nil
+	} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+		return err
 	}
 	s.emailCodeMu.Lock()
 	defer s.emailCodeMu.Unlock()
@@ -164,14 +185,22 @@ func (s *Service) SendRegistrationEmailCode(rawEmail string) error {
 	}
 	now := time.Now()
 	record := model.EmailVerificationCode{ID: newID(), Email: email, CodeHash: codeHash, Purpose: registrationEmailPurpose, ExpiresAt: now.Add(registrationCodeTTL), CreatedAt: now}
-	if err := s.repo.Create(&record); err != nil {
+	if err := s.repo.ReplaceEmailVerificationCode(&record, now); err != nil {
 		return err
 	}
 	if err := sendSMTPMail(setting, email, "明想 MingWant Studio 注册验证码", registrationEmailBody(code)); err != nil {
-		_ = s.repo.DeleteEmailVerificationCode(record.ID)
-		return fmt.Errorf("发送注册邮件失败：%w", err)
+		cleanupErr := s.repo.DeleteEmailVerificationCode(record.ID)
+		log.Printf("registration email send failed: %v", errors.Join(err, cleanupErr))
+		return Unavailable("注册邮件暂时无法发送，请稍后再试")
 	}
-	_ = s.repo.DeleteExpiredEmailVerificationCodes(now.Add(-24 * time.Hour))
+	sentAt := time.Now()
+	if err := s.repo.MarkEmailVerificationCodeSent(record.ID, sentAt); err != nil {
+		log.Printf("registration email code activation failed: %v", err)
+		return Unavailable("邮件已发送，但验证码未能激活，请稍后重新获取")
+	}
+	if err := s.repo.DeleteExpiredEmailVerificationCodes(now.Add(-24 * time.Hour)); err != nil {
+		log.Printf("email verification cleanup failed: %v", err)
+	}
 	return nil
 }
 
@@ -197,11 +226,21 @@ func (s *Service) VerifyRegistrationEmailCode(email string, rawCode string) (*mo
 	if time.Now().After(record.ExpiresAt) {
 		return nil, BadAuthRequest("邮箱验证码已过期，请重新获取")
 	}
+	if record.Attempts >= registrationCodeMaxAttempts {
+		return nil, BadAuthRequest("邮箱验证码错误次数过多，请重新获取")
+	}
 	hash, err := s.emailVerificationCodeHash(email, code)
 	if err != nil {
 		return nil, err
 	}
 	if !hmac.Equal([]byte(hash), []byte(record.CodeHash)) {
+		locked, recordErr := s.repo.RecordEmailVerificationFailure(record.ID, registrationCodeMaxAttempts, time.Now())
+		if recordErr != nil {
+			return nil, recordErr
+		}
+		if locked {
+			return nil, BadAuthRequest("邮箱验证码错误次数过多，请重新获取")
+		}
 		return nil, BadAuthRequest("邮箱验证码不正确")
 	}
 	return record, nil
@@ -243,11 +282,25 @@ func validateEmailSetting(value emailSettingValue) error {
 	if value.Host == "" || value.Port < 1 || value.Port > 65535 || value.FromEmail == "" {
 		return BadAuthRequest("启用邮件前请完整填写 SMTP 主机、端口和发件邮箱")
 	}
+	if strings.ContainsAny(value.Host, "\r\n\t /\\") || (strings.Contains(value.Host, ":") && net.ParseIP(value.Host) == nil) {
+		return BadAuthRequest("SMTP 主机格式无效，请填写不含协议和端口的域名或 IP")
+	}
 	if err := validateEmail(value.FromEmail); err != nil {
 		return BadAuthRequest("发件邮箱格式不正确")
 	}
 	if value.Username != "" && value.Password == "" {
 		return BadAuthRequest("SMTP 用户名已填写，请同时填写密码")
+	}
+	if strings.ContainsAny(value.Username, "\r\n\x00") {
+		return BadAuthRequest("SMTP 用户名不能包含控制字符")
+	}
+	switch value.Encryption {
+	case "tls", "starttls", "none":
+	default:
+		return BadAuthRequest("SMTP 加密方式无效")
+	}
+	if value.Username != "" && value.Encryption == "none" {
+		return BadAuthRequest("SMTP 认证凭据必须通过 TLS 或 STARTTLS 发送")
 	}
 	if strings.ContainsAny(value.FromName, "\r\n") {
 		return BadAuthRequest("发件人名称不能包含换行")
@@ -261,12 +314,11 @@ func normalizeEmailSetting(value emailSettingValue) emailSettingValue {
 	value.Password = strings.TrimSpace(value.Password)
 	value.FromEmail = normalizeEmail(value.FromEmail)
 	value.FromName = strings.TrimSpace(value.FromName)
+	value.Encryption = strings.ToLower(strings.TrimSpace(value.Encryption))
 	if value.Port == 0 {
 		value.Port = 587
 	}
-	switch value.Encryption {
-	case "tls", "none":
-	default:
+	if value.Encryption == "" {
 		value.Encryption = "starttls"
 	}
 	if value.FromName == "" {
@@ -288,29 +340,32 @@ func publicEmailSetting(setting *model.SystemSetting, value emailSettingValue) *
 func sendSMTPMail(setting emailSettingValue, recipient string, subject string, body string) error {
 	address := net.JoinHostPort(setting.Host, strconv.Itoa(setting.Port))
 	tlsConfig := &tls.Config{ServerName: setting.Host, MinVersion: tls.VersionTLS12}
-	dialer := &net.Dialer{Timeout: 12 * time.Second}
-	var client *smtp.Client
+	dialer := &net.Dialer{Timeout: smtpDialTimeout}
+	var connection net.Conn
 	var err error
 	if setting.Encryption == "tls" {
-		connection, dialErr := tls.DialWithDialer(dialer, "tcp", address, tlsConfig)
-		if dialErr != nil {
-			return dialErr
-		}
-		client, err = smtp.NewClient(connection, setting.Host)
+		connection, err = tls.DialWithDialer(dialer, "tcp", address, tlsConfig)
 	} else {
-		connection, dialErr := dialer.Dial("tcp", address)
-		if dialErr != nil {
-			return dialErr
-		}
-		client, err = smtp.NewClient(connection, setting.Host)
-		if err == nil && setting.Encryption == "starttls" {
-			err = client.StartTLS(tlsConfig)
-		}
+		connection, err = dialer.Dial("tcp", address)
 	}
 	if err != nil {
 		return err
 	}
+	if err := connection.SetDeadline(time.Now().Add(smtpOperationTimeout)); err != nil {
+		_ = connection.Close()
+		return err
+	}
+	client, err := smtp.NewClient(connection, setting.Host)
+	if err != nil {
+		_ = connection.Close()
+		return err
+	}
 	defer client.Close()
+	if setting.Encryption == "starttls" {
+		if err := client.StartTLS(tlsConfig); err != nil {
+			return err
+		}
+	}
 	if setting.Username != "" {
 		if err := client.Auth(smtp.PlainAuth("", setting.Username, setting.Password, setting.Host)); err != nil {
 			return err

@@ -31,6 +31,7 @@ export const taskTypeLabel: Record<string, string> = {
     canvas_video: "画布视频",
     canvas_audio: "画布音频",
     canvas_text: "画布文本",
+    channel_health_probe: "渠道测活",
 };
 
 export function formatTaskKind(task: GenerationTask) {

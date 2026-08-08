@@ -1,4 +1,4 @@
-import { App, Button, Form, InputNumber, Tag } from "antd";
+import { Alert, App, Button, Form, InputNumber, Tag } from "antd";
 import { Database, Gauge, Infinity as InfinityIcon, Network, RotateCcw, Save, ShieldCheck, TimerReset } from "lucide-react";
 import { useEffect, useMemo, useState, type ReactNode } from "react";
 
@@ -46,10 +46,10 @@ const concurrencyFields: PolicyField[] = [
 
 const timeoutFields: PolicyField[] = [
     { group: "task", name: "imageTimeoutMinutes", label: "图片任务超时", extra: "图片任务进入失败状态前的最长执行时间。", unit: "分钟", max: 9_999 },
-    { group: "task", name: "textTimeoutMinutes", label: "文本任务超时", extra: "文本任务的最长执行时间。", unit: "分钟", max: 9_999 },
+    { group: "task", name: "textTimeoutMinutes", label: "文本任务超时", extra: "后台文本与测活的总执行上限；慢推理模型建议至少 15 分钟。若供应商约 5 分钟返回 524 且记录为非流式，这是上游/CDN 上限，调大此值无效。", unit: "分钟", max: 9_999 },
     { group: "task", name: "audioTimeoutMinutes", label: "音频任务超时", extra: "音频任务的最长执行时间。", unit: "分钟", max: 9_999 },
     { group: "task", name: "videoTimeoutMinutes", label: "视频任务超时", extra: "视频任务的最长执行时间。", unit: "分钟", max: 9_999 },
-    { group: "task", name: "storyboardTimeoutMinutes", label: "分镜任务超时", extra: "Agent 分镜任务的最长执行时间。", unit: "分钟", max: 9_999 },
+    { group: "task", name: "storyboardTimeoutMinutes", label: "分镜任务超时", extra: "分镜任务总执行上限；需覆盖首轮和一次已授权修复，建议不低于文本超时的两倍。", unit: "分钟", max: 9_999 },
     { group: "task", name: "defaultTimeoutMinutes", label: "默认任务超时", extra: "未匹配专用类型时使用的最长执行时间。", unit: "分钟", max: 9_999 },
 ];
 
@@ -73,7 +73,7 @@ const relayFields: PolicyField[] = [
     { group: "request", name: "customRelayConcurrency", label: "自定义渠道并发", extra: "单账号同时进行的自定义渠道请求数。", unit: "个", max: 999 },
     { group: "request", name: "customRelayRequestMB", label: "自定义渠道请求体", extra: "中转到自定义上游的请求体上限。", unit: "MB", max: 999 },
     { group: "request", name: "customRelayResponseMB", label: "自定义渠道响应体", extra: "自定义上游 JSON 与流式响应的读取上限。", unit: "MB", max: 999 },
-    { group: "request", name: "customRelayTimeoutMinutes", label: "自定义渠道超时", extra: "自定义渠道连接与响应的最长等待时间。", unit: "分钟", max: 9_999 },
+    { group: "request", name: "customRelayTimeoutMinutes", label: "同步模型中转超时", extra: "在线 Agent 使用系统或自定义渠道时，从等待并发槽位到响应完成的总时限；慢模型建议至少 35 分钟。若供应商约 5 分钟返回 524 且记录为非流式，请改用能持续送出分片的 SSE，调大此值无效。", unit: "分钟", max: 9_999 },
     { group: "request", name: "systemRelayRequestMB", label: "系统渠道请求体", extra: "中转到系统渠道的请求体上限。", unit: "MB", max: 999 },
     { group: "request", name: "systemRelayResponseMB", label: "系统渠道响应体", extra: "系统渠道上游响应的读取上限。", unit: "MB", max: 999 },
     { group: "request", name: "channelCircuitFailureCount", label: "熔断失败次数", extra: "一分钟内连续失败达到该值后打开熔断。", unit: "次", max: 999 },
@@ -166,6 +166,7 @@ export default function RuntimePolicySettingsPage() {
         >
             <Form form={form} layout="vertical" requiredMark={false} disabled={loading} onValuesChange={() => setDirty(true)}>
                 <div className="mx-auto max-w-6xl space-y-5">
+                    <Alert type="warning" showIcon message="调大超时前先调整部署停机窗口" description="Backend 会拒绝保存超过当前 CANVAS_SHUTDOWN_DRAIN_TIMEOUT 的任务或同步中转时限。请先提高该部署变量，并让 CANVAS_CONTAINER_STOP_GRACE_PERIOD 至少多 1 分钟，再重启后修改策略；否则部署、重启或普通 Compose stop 仍可能截断付费请求。供应商自身约 5 分钟返回的非流式 524 不受这两个值影响。" />
                     <PolicySection icon={<Database className="size-4" />} title="资源与账号配额" description="上传、文件容量、结构化数据和历史记录上限。" fields={resourceFields} />
                     <PolicySection icon={<Gauge className="size-4" />} title="任务与并发" description="后台任务消费、渠道调度和单账号活动任务上限。" fields={concurrencyFields} status={<Tag variant="filled" color="blue">热更新</Tag>} />
                     <PolicySection icon={<TimerReset className="size-4" />} title="任务超时" description="不同生成类型的最长执行时间。" fields={timeoutFields} />

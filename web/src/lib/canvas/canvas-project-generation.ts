@@ -1,11 +1,12 @@
 import { createGenerationTask, waitForGenerationTask, type GenerationTask } from "@/services/api/task-center";
-import { configuredModelMatchesCapability, defaultConfig, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { configuredModelMatchesCapability, defaultConfig, normalizeModelOptionValue, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import { getImageBlob, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { getMediaBlob, resolveMediaUrl } from "@/services/file-storage";
 import { resourceIdFromStorageKey, resourceStorageKey, uploadResourceFile } from "@/services/api/resources";
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
 import { isSeedanceVideoConfig } from "@/lib/seedance-video";
+import { defaultModelCapabilityConfig, normalizeCapabilityDuration, normalizeCapabilityRatio, normalizeCapabilityResolution, ratioFromSize, resolveVideoOperation, sizeForCapabilityRatio, videoCapabilityFromConfig } from "@/lib/model-capabilities";
 import { imageMetadata, parseBackendGenerationResult } from "@/lib/canvas/canvas-generation-task-sync";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import { CanvasNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasImageGenerationType, type CanvasNodeData, type CanvasNodeMetadata, type CanvasVideoEditOperation } from "@/types/canvas";
@@ -23,6 +24,8 @@ export async function runBackendCanvasGenerationTask({
     referenceAudios = [],
     mask,
     signal,
+    sourceTaskId,
+    confirmNewProviderRequest,
     metadata,
     onTaskCreated,
 }: {
@@ -36,6 +39,8 @@ export async function runBackendCanvasGenerationTask({
     referenceAudios?: ReferenceAudio[];
     mask?: ReferenceImage;
     signal?: AbortSignal;
+    sourceTaskId?: string;
+    confirmNewProviderRequest?: boolean;
     metadata?: Record<string, unknown>;
     onTaskCreated?: (task: GenerationTask) => void;
 }) {
@@ -46,9 +51,11 @@ export async function runBackendCanvasGenerationTask({
     const task = await createGenerationTask({
         projectId,
         type: `canvas_${mode}`,
-        operation: mode === "video" ? String(metadata?.videoEditOperation || "image_to_video") : mode,
+        operation: mode === "video" ? String(metadata?.videoEditOperation || "text_to_video") : mode,
         prompt,
         model: config.model,
+        sourceTaskId,
+        confirmNewProviderRequest,
         input: {
             mode,
             prompt,
@@ -76,7 +83,7 @@ async function mediaToBackendReference(media: ReferenceVideo | ReferenceAudio) {
     try {
         const kind: "video" | "audio" | "file" = blob.type.startsWith("video/") ? "video" : blob.type.startsWith("audio/") ? "audio" : "file";
         const resource = await uploadResourceFile(blob, kind, { fileName: media.name, width: "width" in media ? media.width : undefined, height: "height" in media ? media.height : undefined, durationMs: media.durationMs });
-        return { ...media, url: resource.publicUrl || `/api/resources/${resource.id}/file`, storageKey: resourceStorageKey(resource.id), dataUrl: "", type: resource.mimeType || media.type || blob.type };
+        return { ...media, url: resource.publicUrl || `/api/resources/${resource.id}/file`, storageKey: resourceStorageKey(resource.id), dataUrl: "", type: resource.mimeType || media.type || blob.type, bytes: resource.size || blob.size, durationMs: resource.durationMs || media.durationMs };
     } catch (error) {
         throw new Error(error instanceof Error ? `参考媒体上传失败：${error.message}` : "参考媒体上传失败");
     }
@@ -89,7 +96,7 @@ async function prepareBackendImageReference(image: ReferenceImage) {
     if (blob) {
         try {
             const resource = await uploadResourceFile(blob, "image", { fileName: image.name });
-            return { ...image, dataUrl: "", url: resource.publicUrl || `/api/resources/${resource.id}/file`, storageKey: resourceStorageKey(resource.id), type: resource.mimeType || image.type || blob.type };
+            return { ...image, dataUrl: "", url: resource.publicUrl || `/api/resources/${resource.id}/file`, storageKey: resourceStorageKey(resource.id), type: resource.mimeType || image.type || blob.type, bytes: resource.size || blob.size };
         } catch (error) {
             throw new Error(error instanceof Error ? `参考图片上传失败：${error.message}` : "参考图片上传失败");
         }
@@ -97,8 +104,18 @@ async function prepareBackendImageReference(image: ReferenceImage) {
     throw new Error("参考图片尚未保存，请重新上传后再生成");
 }
 
-export function backendProviderConfig(config: AiConfig) {
-    const requestConfig = resolveModelRequestConfig(config, config.model);
+type ResolvedProviderConfig = ReturnType<typeof resolveModelRequestConfig>;
+
+export function backendProviderConfig(config: AiConfig | ResolvedProviderConfig) {
+    const resolved = config as ResolvedProviderConfig;
+    const frozenChannel = resolved.resolvedChannelId
+        ? config.channels.find((channel) => channel.id === resolved.resolvedChannelId)
+        : undefined;
+    // Agent/任务页已经在发送前冻结了渠道；再次用裸模型名解析会在同名模型跨渠道时落到第一条渠道，
+    // 造成测活通过但实际任务走错 Base URL、协议或 API Key。只有找不到冻结渠道时才重新解析。
+    const requestConfig = frozenChannel ? resolved : resolveModelRequestConfig(config, config.model);
+    const requestChannel = requestConfig.channels.find((channel) => channel.id === requestConfig.resolvedChannelId);
+    const modelCost = requestChannel?.modelCosts?.find((item) => item.model === requestConfig.model);
     return {
         channelId: requestConfig.channelId,
         apiFormat: requestConfig.apiFormat,
@@ -106,6 +123,7 @@ export function backendProviderConfig(config: AiConfig) {
         baseUrl: requestConfig.baseUrl,
         apiKey: requestConfig.apiKey,
         model: requestConfig.model,
+        capabilityConfig: modelCost?.capabilityConfig || defaultModelCapabilityConfig(requestConfig.interfaceType),
         size: config.size,
         quality: config.quality,
         transparentBackground: config.transparentBackground,
@@ -131,6 +149,7 @@ export function generationTaskMetadata(task: GenerationTask): CanvasNodeMetadata
         taskStage: task.stage,
         taskCreatedAt: task.createdAt || task.created_at,
         taskUpdatedAt: task.updatedAt || task.updated_at,
+        taskRecoveryUncertain: undefined,
     };
 }
 
@@ -149,6 +168,7 @@ export function resetGenerationTaskMetadata(metadata: CanvasNodeMetadata | undef
     delete next.taskStage;
     delete next.taskCreatedAt;
     delete next.taskUpdatedAt;
+    delete next.taskRecoveryUncertain;
     return next;
 }
 
@@ -193,6 +213,7 @@ export function nodeReferenceImage(node: CanvasNodeData): ReferenceImage | null 
         type: node.metadata.mimeType || "image/png",
         dataUrl: node.metadata.content,
         storageKey: node.metadata.storageKey,
+        bytes: node.metadata.bytes,
     };
 }
 
@@ -254,15 +275,13 @@ function resolveVideoEditOperation(
         referenceVideos: ReferenceVideo[];
         referenceAudios: ReferenceAudio[];
     },
+    config?: AiConfig,
 ): CanvasVideoEditOperation {
-    const storedOperation = node?.metadata?.videoEditOperation;
-    // 连接关系是生成时的真实输入，不能让分镜节点残留的文生视频模式丢弃后来连接的参考图。
-    if (storedOperation === "text_to_video" && context?.referenceImages.length) return "image_to_video";
-    if (storedOperation) return storedOperation;
-    if (context?.referenceAudios.length && !context.referenceImages.length && !context.referenceVideos.length) return "audio_to_video";
-    if (context?.referenceVideos.length) return "extend";
-    if (context?.referenceImages.length) return "image_to_video";
-    return "image_to_video";
+    const request = config ? resolveModelRequestConfig(config, config.model) : undefined;
+    const channel = request ? config?.channels.find((item) => item.id === request.resolvedChannelId) : undefined;
+    const modelCost = request ? channel?.modelCosts?.find((item) => item.model === request.model) : undefined;
+    const capability = request ? videoCapabilityFromConfig(modelCost?.capabilityConfig, request.interfaceType) : undefined;
+    return resolveVideoOperation(node?.metadata?.videoEditOperation, { images: context?.referenceImages.length, videos: context?.referenceVideos.length, audios: context?.referenceAudios.length }, capability);
 }
 
 export function buildVideoGenerationMetadata(
@@ -272,12 +291,13 @@ export function buildVideoGenerationMetadata(
         referenceVideos: ReferenceVideo[];
         referenceAudios: ReferenceAudio[];
     },
+    config?: AiConfig,
 ): CanvasNodeMetadata {
     const metadata = node?.metadata;
     const startFrame = metadata?.videoStartFrameNodeId && context?.referenceImages.some((image) => image.id === metadata.videoStartFrameNodeId) ? metadata.videoStartFrameNodeId : undefined;
     const endFrame = metadata?.videoEndFrameNodeId && context?.referenceImages.some((image) => image.id === metadata.videoEndFrameNodeId) ? metadata.videoEndFrameNodeId : undefined;
     return {
-        videoEditOperation: resolveVideoEditOperation(node, context),
+        videoEditOperation: resolveVideoEditOperation(node, context, config),
         videoCameraMoveId: metadata?.videoCameraMoveId,
         videoCameraMovePrompt: metadata?.videoCameraMovePrompt,
         videoStartFrameNodeId: startFrame,
@@ -335,17 +355,33 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
     const defaultModel = mode === "image" ? config.imageModel : mode === "video" ? config.videoModel : mode === "audio" ? config.audioModel : config.textModel;
     const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
     const storedModel = node?.metadata?.model;
-    const model = storedModel && configuredModelMatchesCapability(config, storedModel, mode) ? storedModel : defaultModel && configuredModelMatchesCapability(config, defaultModel, mode) ? defaultModel : fallbackModel;
+    // 节点已经绑定过渠道模型时，渠道被删除或能力被撤销必须明确失败，不能静默落到另一条同名默认渠道。
+    const selectedModel = storedModel || (defaultModel && configuredModelMatchesCapability(config, defaultModel, mode) ? defaultModel : fallbackModel);
+    // 旧画布节点可能只保存了裸模型名；生成前必须补回渠道前缀，否则同名模型会被解析到第一条渠道，测活结论与实际请求就会错配。
+    const model = normalizeModelOptionValue(selectedModel, config.channels) || selectedModel;
+    const modelConfig = { ...config, model };
+    const requestConfig = resolveModelRequestConfig(modelConfig, model);
+    const requestChannel = modelConfig.channels.find((channel) => channel.id === requestConfig.resolvedChannelId);
+    const modelCost = requestChannel?.modelCosts?.find((item) => item.model === requestConfig.model);
+    const capability = videoCapabilityFromConfig(modelCost?.capabilityConfig, requestConfig.interfaceType);
+    const rawVideoSize = node?.metadata?.size || config.size || defaultConfig.size;
+    const requestedRatio = ratioFromSize(rawVideoSize, capability.ratios) || normalizeCapabilityRatio(capability.defaultRatio);
+    const videoSize = isSeedanceVideoConfig(modelConfig) ? requestedRatio : sizeForCapabilityRatio(requestedRatio);
+    const rawVideoResolution = node?.metadata?.vquality || config.vquality || defaultConfig.vquality;
+    const normalizedResolution = normalizeCapabilityResolution(rawVideoResolution);
+    const supportedResolutions = capability.resolutions.map(normalizeCapabilityResolution);
+    const videoResolution = supportedResolutions.includes(normalizedResolution) ? normalizedResolution.replace(/p$/, "") : normalizeCapabilityResolution(capability.defaultResolution).replace(/p$/i, "");
+    const videoDuration = normalizeCapabilityDuration(node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds, capability);
     return {
-        ...config,
+        ...modelConfig,
         model,
         quality: node?.metadata?.quality || config.quality || defaultConfig.quality,
-        size: node?.metadata?.size || config.size || defaultConfig.size,
+        size: mode === "video" ? videoSize : rawVideoSize,
         transparentBackground: (node?.metadata?.transparentBackground || config.transparentBackground) === "true" ? "true" : "false",
-        videoSeconds: normalizeVideoDuration(node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds),
-        vquality: normalizeVideoResolution(node?.metadata?.vquality || config.vquality || defaultConfig.vquality),
-        videoGenerateAudio: node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio,
-        videoWatermark: node?.metadata?.watermark || config.videoWatermark || defaultConfig.videoWatermark,
+        videoSeconds: mode === "video" ? String(videoDuration) : normalizeVideoDuration(node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds),
+        vquality: mode === "video" ? videoResolution : normalizeVideoResolution(node?.metadata?.vquality || config.vquality || defaultConfig.vquality),
+        videoGenerateAudio: mode === "video" && !capability.generateAudio.supported ? "false" : node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio,
+        videoWatermark: mode === "video" && !capability.watermark.supported ? "false" : node?.metadata?.watermark || config.videoWatermark || defaultConfig.videoWatermark,
         audioVoice: node?.metadata?.audioVoice || config.audioVoice || defaultConfig.audioVoice,
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,
@@ -355,9 +391,11 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
 }
 
 export function supportsVideoReferenceAudio(config: AiConfig) {
-    const interfaceType = resolveModelRequestConfig(config, config.model).interfaceType;
-    if (interfaceType === "newapi-channel-2") return false;
-    return interfaceType === "newapi-channel-1" || isSeedanceVideoConfig(config);
+    const request = resolveModelRequestConfig(config, config.model);
+    const channel = config.channels.find((item) => item.id === request.resolvedChannelId);
+    const modelCost = channel?.modelCosts?.find((item) => item.model === request.model);
+    const capability = videoCapabilityFromConfig(modelCost?.capabilityConfig, request.interfaceType);
+    return capability.references.maxVideos > 0 || capability.references.maxAudios > 0 || isSeedanceVideoConfig(config);
 }
 
 export function resetInterruptedGeneration(nodes: CanvasNodeData[]) {

@@ -6,14 +6,7 @@
         <meta name="description" content="明想 MingWant Studio，面向 AI 电商广告、带货短视频与商业内容生产的一体化工作台。" />
         <link rel="icon" href="/logo.svg" />
         <title>明想 MingWant Studio</title>
-        <script>
-            try {
-                var s = JSON.parse(localStorage.getItem("infinite-canvas:theme_store") || "{}");
-                var t = s.state && s.state.theme === "light" ? "light" : "dark";
-                document.documentElement.classList.toggle("dark", t === "dark");
-                document.documentElement.style.colorScheme = t;
-            } catch (e) {}
-        </script>
+        <script src="/theme-init.js"></script>
     </head>
     <body class="bg-background text-foreground antialiased">
         <div id="root"></div>

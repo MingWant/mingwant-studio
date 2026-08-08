@@ -1,13 +1,15 @@
-import { useCallback, useRef, useState, type Dispatch, type SetStateAction } from "react";
+import { useCallback, useEffect, useRef, useState, type Dispatch, type SetStateAction } from "react";
 import { App } from "antd";
+import copyToClipboard from "copy-to-clipboard";
 import { nanoid } from "nanoid";
 
 import { FRAME_HEADER_HEIGHT, getFrameChildIds, getFrameChildren, isFrameNode } from "@/lib/canvas/canvas-frame";
 import { alignCanvasNodes, layoutCanvasFlow, layoutCanvasNodes, nextCanvasVersionLabel, type CanvasAlignmentMode } from "@/lib/canvas/canvas-layout";
 import { createCanvasNode, removeCanvasNodes } from "@/lib/canvas/canvas-project-domain";
 import { getGenerationCount } from "@/lib/canvas/canvas-project-generation";
+import { isolateCopiedNodeMetadata } from "@/lib/canvas/canvas-node-copy";
 import { useEffectiveConfig } from "@/stores/use-config-store";
-import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata, type ContextMenuState, type Position } from "@/types/canvas";
+import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type ContextMenuState, type Position } from "@/types/canvas";
 import { cloneCanvasDrawing } from "@/lib/canvas/canvas-drawing-storage";
 
 type CanvasClipboard = {
@@ -30,9 +32,6 @@ type UseCanvasNodeOperationsOptions = {
     onNodesDeleted: (removedIds: Set<string>, nextNodes: CanvasNodeData[], removedNodes: CanvasNodeData[]) => void;
 };
 
-const NODE_STATUS_IDLE = "idle" as const;
-const NODE_STATUS_SUCCESS = "success" as const;
-
 export function useCanvasNodeOperations({
     projectId,
     nodesRef,
@@ -50,7 +49,29 @@ export function useCanvasNodeOperations({
     const { message } = App.useApp();
     const effectiveConfig = useEffectiveConfig();
     const clipboardRef = useRef<CanvasClipboard | null>(null);
+    const preferCopiedNodesRef = useRef(false);
+    const markerWritePendingRef = useRef(false);
+    const markerWriteSequenceRef = useRef(0);
     const [hasCopiedNodes, setHasCopiedNodes] = useState(false);
+
+    const releaseCopiedNodesPastePriority = useCallback(() => {
+        markerWriteSequenceRef.current += 1;
+        markerWritePendingRef.current = false;
+        preferCopiedNodesRef.current = false;
+    }, []);
+
+    const shouldPreferCopiedNodes = useCallback(() => markerWritePendingRef.current || preferCopiedNodesRef.current, []);
+
+    useEffect(() => {
+        window.addEventListener("copy", releaseCopiedNodesPastePriority);
+        window.addEventListener("cut", releaseCopiedNodesPastePriority);
+        window.addEventListener("blur", releaseCopiedNodesPastePriority);
+        return () => {
+            window.removeEventListener("copy", releaseCopiedNodesPastePriority);
+            window.removeEventListener("cut", releaseCopiedNodesPastePriority);
+            window.removeEventListener("blur", releaseCopiedNodesPastePriority);
+        };
+    }, [releaseCopiedNodesPastePriority]);
 
     const commitNodes = useCallback((nextNodes: CanvasNodeData[]) => {
         nodesRef.current = nextNodes;
@@ -256,7 +277,7 @@ export function useCanvasNodeOperations({
         const versionRootId = isFrameNode(source) ? undefined : source.metadata?.versionOfNodeId || source.id;
         const versionLabel = versionRootId ? nextCanvasVersionLabel(versionRootId, nodesRef.current) : undefined;
         const copiedNodes = sources.map((node) => {
-            const metadata: CanvasNodeMetadata = { ...node.metadata, frame: node.metadata?.frame ? { ...node.metadata.frame } : undefined };
+            const metadata = isolateCopiedNodeMetadata(node, idMap);
             if (node.type === CanvasNodeType.Drawing) {
                 metadata.drawingId = `${idMap.get(node.id)}-document`;
                 metadata.drawingRevision = 0;
@@ -265,14 +286,6 @@ export function useCanvasNodeOperations({
                 metadata.drawingPageCount = 1;
             }
             if (node.id === source.id && versionRootId) {
-                delete metadata.taskId;
-                delete metadata.taskStatus;
-                delete metadata.taskProgress;
-                delete metadata.taskStage;
-                delete metadata.taskCreatedAt;
-                delete metadata.taskUpdatedAt;
-                delete metadata.errorDetails;
-                metadata.status = metadata.content ? NODE_STATUS_SUCCESS : NODE_STATUS_IDLE;
                 metadata.versionOfNodeId = versionRootId;
                 metadata.versionLabel = versionLabel;
                 metadata.versionPrimary = false;
@@ -332,6 +345,21 @@ export function useCanvasNodeOperations({
             connections: connectionsRef.current.filter((connection) => copyIds.has(connection.fromNodeId) && copyIds.has(connection.toNodeId)).map((connection) => ({ ...connection })),
         };
         setHasCopiedNodes(true);
+        // 写入完成前或写入失败时优先内部节点，避免快速粘贴读到系统残留图片。
+        const marker = `mingwant-studio-nodes:${Date.now()}:${copiedNodes.length}`;
+        const sequence = markerWriteSequenceRef.current + 1;
+        markerWriteSequenceRef.current = sequence;
+        markerWritePendingRef.current = true;
+        preferCopiedNodesRef.current = true;
+        void copyToClipboard(marker, { format: "text/plain" }).then((written) => {
+            if (markerWriteSequenceRef.current !== sequence) return;
+            markerWritePendingRef.current = false;
+            preferCopiedNodesRef.current = !written;
+        }, () => {
+            if (markerWriteSequenceRef.current !== sequence) return;
+            markerWritePendingRef.current = false;
+            preferCopiedNodesRef.current = true;
+        });
     }, [connectionsRef, nodesRef]);
 
     const copySelectedNodes = useCallback(() => {
@@ -351,20 +379,38 @@ export function useCanvasNodeOperations({
         const dx = center.x - (bounds.left + bounds.right) / 2;
         const dy = center.y - (bounds.top + bounds.bottom) / 2;
         const idMap = new Map(clipboard.nodes.map((node, index) => [node.id, `${node.type}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`]));
-        const nextNodes = clipboard.nodes.map((node) => ({
-            ...node,
-            id: idMap.get(node.id)!,
-            title: node.title.endsWith(" Copy") ? node.title : `${node.title} Copy`,
-            position: { x: node.position.x + dx, y: node.position.y + dy },
-            parentId: node.parentId ? idMap.get(node.parentId) : undefined,
-            metadata: node.type === CanvasNodeType.Drawing
-                ? { ...node.metadata, frame: node.metadata?.frame ? { ...node.metadata.frame } : undefined, drawingId: `${idMap.get(node.id)}-document`, drawingRevision: 0, drawingUpdatedAt: undefined, drawingShapeCount: 0, drawingPageCount: 1 }
-                : node.metadata ? { ...node.metadata, frame: node.metadata.frame ? { ...node.metadata.frame } : undefined } : undefined,
-        }));
+        const copiedSourceIds = new Set(clipboard.nodes.map((node) => node.id));
+        const nextNodes = clipboard.nodes.map((node) => {
+            const metadata = isolateCopiedNodeMetadata(node, idMap);
+            if (node.type === CanvasNodeType.Drawing && metadata) {
+                metadata.drawingId = `${idMap.get(node.id)}-document`;
+                metadata.drawingRevision = 0;
+                metadata.drawingUpdatedAt = undefined;
+                metadata.drawingShapeCount = 0;
+                metadata.drawingPageCount = 1;
+            }
+            return {
+                ...node,
+                id: idMap.get(node.id)!,
+                title: node.title.endsWith(" Copy") ? node.title : `${node.title} Copy`,
+                position: { x: node.position.x + dx, y: node.position.y + dy },
+                parentId: node.parentId ? idMap.get(node.parentId) : undefined,
+                metadata,
+            };
+        });
+        // 1) 剪贴板内部连线；2) 仍保留到画布上未复制参考节点的入边（只复制结果节点时常见）。
         const nextConnections = clipboard.connections.flatMap((connection, index) => {
             const fromNodeId = idMap.get(connection.fromNodeId);
             const toNodeId = idMap.get(connection.toNodeId);
             return fromNodeId && toNodeId ? [{ ...connection, id: `conn-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 7)}`, fromNodeId, toNodeId }] : [];
+        });
+        connectionsRef.current.forEach((connection) => {
+            if (!copiedSourceIds.has(connection.toNodeId) || copiedSourceIds.has(connection.fromNodeId)) return;
+            const toNodeId = idMap.get(connection.toNodeId);
+            if (!toNodeId) return;
+            // 参考节点仍在画布上时，粘贴结果应重新挂上同一入边。
+            if (!nodesRef.current.some((node) => node.id === connection.fromNodeId)) return;
+            nextConnections.push({ ...connection, id: nanoid(), toNodeId });
         });
         commitNodes([...nodesRef.current, ...nextNodes]);
         commitConnections([...connectionsRef.current, ...nextConnections]);
@@ -394,7 +440,9 @@ export function useCanvasNodeOperations({
         duplicateNode,
         hasCopiedNodes,
         pasteCopiedNodes,
+        releaseCopiedNodesPastePriority,
         setPrimaryVersion,
+        shouldPreferCopiedNodes,
         toggleNodeLocked,
     };
 }

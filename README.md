@@ -43,37 +43,54 @@
 
 ## 快速开始
 
-需要 Bun、Go 1.25，以及可用的 OpenAI 兼容或项目已支持的模型渠道。
+零基础本地运行只需要 Docker Desktop。Windows PowerShell 在仓库根目录执行：
 
-```bash
-cd backend
-go run ./cmd/server
-
-# 另开终端
-cd web
-bun install
-bun run dev
+```powershell
+powershell -ExecutionPolicy Bypass -File .\scripts\start-local.ps1
 ```
 
-打开 `http://localhost:3000`，注册首个管理员账号，在“系统渠道”或个人模型设置中配置 API。后端默认监听 `:8080`；本地调试时请按 [AGENTS.md](AGENTS.md) 的数据目录约束启动，避免切换到另一套账号数据。
+脚本会先确认 Docker CLI、Docker Engine、Compose 和 Web 端口可用，再构建 Web 与 Backend、等待容器健康，并检查数据库、运行时协调器和 Worker。端口已被其他程序占用时会在创建容器前停止并显示进程；需要换端口可先执行 `$env:CANVAS_HTTP_PORT=3001`。首次健康启动还会记录 Compose 项目标识，后续目录名或项目名变化会在切换数据卷前停止。脚本不会自动启动 Docker Desktop，也不会删除数据卷。
 
-Docker 本地运行：
+如果看到 `dockerDesktopLinuxEngine` 或 `//./pipe/dockerDesktopLinuxEngine` 不存在，说明 Docker 命令已经安装，但 Docker Desktop 的 Linux Engine 还没有启动。先打开 Docker Desktop，等待显示 Engine running，再重新执行脚本；反复运行 Compose 不能修复这个状态。如果提示 `Access is denied` / `permission denied`，说明当前 Windows 账号没有访问 Docker Engine 的权限；确认 Docker Desktop 已完全启动，必要时加入 `docker-users` 组并重新打开 PowerShell。启动脚本在这两种情况下都不会创建、修改或删除容器和数据卷。
 
-```bash
-docker compose -f docker-compose.local.yml up -d --build
-```
-
-服务器源码部署脚本不再默认拉取上游仓库。发布到你自己的 Git 仓库后显式传入地址：
+macOS、Linux 或需要手工执行时使用：
 
 ```bash
-curl -fsSL https://你的仓库/raw/main/scripts/install-server.sh | sudo REPOSITORY_URL=https://你的仓库/mingwant-studio.git bash
+docker compose -f docker-compose.local.yml up -d --build --wait
+docker compose -f docker-compose.local.yml ps
 ```
 
-镜像部署还需设置 `COMPOSE_URL`、`MINGWANT_BACKEND_IMAGE` 和 `MINGWANT_WEB_IMAGE`，防止误拉取不包含本项目改动的上游镜像。
+默认启动后访问 `http://localhost:3000`；使用 `CANVAS_HTTP_PORT` 时按脚本最终显示的地址访问。对应 `/api/health` 中的 `database`、`coordination` 和 `worker` 应全部为 `ok`。
+
+首次使用在 `http://localhost:3000` 注册管理员，并在“系统渠道”或个人模型设置中配置 Base URL、API Key、视频模型和对应视频协议。视频生成统一通过已配置渠道进入后端任务队列。
+
+Compose 继续复用原有 `backend-data` 后端卷。停止容器不会清除数据；不要使用 `docker compose down -v`，除非明确要同时删除后端数据。需要 Bun、Go 1.25 的源码开发方式请阅读[零基础快速开始](docs/content/docs/getting-started.mdx)；脱离 Docker 调试后端时必须复用 `.local/project-workbench-debug`，不能直接生成另一套 `backend/data` 账号数据。
+
+服务器源码部署脚本不再默认拉取上游仓库。发布到你自己的 GitHub 仓库后，将示例中的“你的账号”替换为实际账号，先下载并审阅脚本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/你的账号/mingwant-studio/main/scripts/install-server.sh -o /tmp/mingwant-install.sh
+less /tmp/mingwant-install.sh
+sudo REPOSITORY_URL=https://github.com/你的账号/mingwant-studio.git bash /tmp/mingwant-install.sh
+```
+
+镜像部署还需设置同一发布版本的 `COMPOSE_URL`、`BACKUP_SCRIPT_URL`、`MINGWANT_BACKEND_IMAGE` 和 `MINGWANT_WEB_IMAGE`，防止误拉取不包含本项目改动的上游镜像或部署出缺少恢复入口的服务器。
+
+服务器 Compose 默认只在 `127.0.0.1` 发布 Web 上游端口；公网访问应由同机 HTTPS 反向代理转发，不要把安装脚本输出的本机地址直接作为公网入口。
+
+## 完整教程
+
+第一次使用建议按顺序阅读：
+
+1. [零基础快速开始](docs/content/docs/getting-started.mdx)：启动、创建管理员、配置模型、测活并完成第一条任务。
+2. [完整案例：从 5 条真人素材到 15 条带货视频](docs/content/docs/commerce-video-complete-example.mdx)：从授权素材、创意矩阵和分镜一直做到 QA 与交付。
+3. [管理部署手册](docs/content/docs/administration-deployment.mdx)：系统渠道、计费、存储、HTTPS、备份恢复、升级和故障处理。
+
+全部功能、开发参考和待验证状态统一从[文档索引](docs/index.md)进入。
 
 ## 数据与安全
 
-- 用户自定义 AI API Key 保存在浏览器本地；异步任务可能将密钥加密后提交到自部署后端。仅使用可信部署，生产环境必须启用 HTTPS。
+- 用户自定义 AI API Key 默认只保留在当前标签页会话；只有明确开启“在此设备记住”才写入独立的账号级浏览器密钥区。异步任务可能将所选渠道密钥加密后提交到自部署后端。仅使用可信部署，生产环境必须启用 HTTPS，并把原密钥另存于密码管理器。
 - 画布和素材登录后同步到后端，本地 `localForage` 继续承担缓存及后端不可用时的降级存储。
 - 启用 OSS 时媒体保存到私有 OSS，否则保存到后端数据目录；删除业务记录不会自动清理 OSS 远端对象。
 - 电商模板中的合规清单不能替代品牌法务、平台规则审核或广告上线审批。
@@ -83,7 +100,7 @@ curl -fsSL https://你的仓库/raw/main/scripts/install-server.sh | sudo REPOSI
 
 - `web/`：React、TypeScript、tldraw、Zustand、Ant Design 前端。
 - `backend/`：Go、Gin、GORM、SQLite/PostgreSQL、Redis 后端。
-- `canvas-agent/`：本地 Canvas Agent 与 MCP 服务。
+- `canvas-agent/`：本地 Canvas Agent 与 MCP 服务；`canvas_generate_video` 调用画布已配置的视频模型。
 - `plugins/infinite-canvas/`：Codex 插件；内部标识暂保留以兼容现有 MCP 工具名。
 - `docs/`：功能索引、待验证项与派生说明。
 

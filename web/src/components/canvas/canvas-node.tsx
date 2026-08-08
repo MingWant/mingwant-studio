@@ -41,6 +41,7 @@ type CanvasNodeProps = {
     batchClosing?: boolean;
     batchOpening?: boolean;
     batchRecovering?: boolean;
+    batchPrimary?: boolean;
     batchMotion?: { x: number; y: number; index: number };
     onMouseDown: (event: React.MouseEvent, nodeId: string) => void;
     onHoverStart: (nodeId: string) => void;
@@ -106,6 +107,7 @@ export const CanvasNode = React.memo(function CanvasNode({
     batchClosing = false,
     batchOpening = false,
     batchRecovering = false,
+    batchPrimary = false,
     batchMotion,
     onMouseDown,
     onHoverStart,
@@ -428,7 +430,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                         {resourceLabel ? <ResourceLabelBadge reference={resourceLabel} theme={theme} /> : null}
                         {hasMediaContent && !readOnly ? <ResourceStorageBadge storageKey={data.metadata?.storageKey} active={isActive} theme={theme} /> : null}
                         {isBatchRoot ? <BatchToggleBadge count={batchCount} expanded={batchExpanded} theme={theme} onToggle={() => onToggleBatch?.(data.id)} /> : null}
-                        {isBatchChild && !readOnly ? <BatchPrimaryBadge visible={hovered || isSelected} theme={theme} onSelect={() => onSetBatchPrimary?.(data)} /> : null}
+                        {isBatchChild && !readOnly ? <BatchPrimaryBadge visible={batchPrimary || hovered || isSelected} selected={batchPrimary} theme={theme} onSelect={() => onSetBatchPrimary?.(data)} /> : null}
                         {data.metadata?.locked ? <NodeLockBadge theme={theme} /> : null}
                     </div>
                 ) : null}
@@ -768,11 +770,11 @@ function BatchToggleBadge({ count, expanded, theme, onToggle }: { count: number;
     );
 }
 
-function BatchPrimaryBadge({ visible, theme, onSelect }: { visible: boolean; theme: CanvasTheme; onSelect: () => void }) {
+function BatchPrimaryBadge({ visible, selected, theme, onSelect }: { visible: boolean; selected: boolean; theme: CanvasTheme; onSelect: () => void }) {
     return (
-        <button type="button" className={`canvas-node-tool-button inline-flex h-7 shrink-0 items-center gap-1 rounded-md border px-2 text-[10px] font-medium backdrop-blur-md transition-opacity ${visible ? "opacity-100" : "pointer-events-none opacity-0"}`} style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }} onClick={(event) => { event.stopPropagation(); onSelect(); }} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-            <Star className="size-3" style={{ color: theme.accent.primary }} />
-            主图
+        <button type="button" className={`canvas-node-tool-button inline-flex h-7 shrink-0 items-center gap-1 rounded-md border px-2 text-[10px] font-medium backdrop-blur-md transition-opacity ${visible ? "opacity-100" : "pointer-events-none opacity-0"}`} style={{ background: theme.toolbar.panel, borderColor: selected ? theme.accent.primary : theme.toolbar.border, color: selected ? theme.accent.primary : theme.node.text }} aria-label={selected ? "当前主图" : "设置为主图"} aria-pressed={selected} onClick={(event) => { event.stopPropagation(); onSelect(); }} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
+            <Star className={`size-3 ${selected ? "fill-current" : ""}`} style={{ color: theme.accent.primary }} />
+            {selected ? "当前主图" : "主图"}
         </button>
     );
 }
@@ -1095,7 +1097,7 @@ function ConnectionHandleDot({ side, scale, visible, theme, onPointerDown }: { s
         <div
             className={`canvas-connection-handle absolute top-1/2 z-30 flex -translate-y-1/2 cursor-pointer items-center justify-center transition-opacity duration-150 ${
                 side === "left" ? "left-0 -translate-x-1/2" : "right-0 translate-x-1/2"
-            } ${visible ? "pointer-events-auto opacity-100" : "pointer-events-none opacity-0"}`}
+            } ${visible ? "opacity-100" : "opacity-35"}`}
             style={{ width: 40 * inverseScale, height: 40 * inverseScale }}
             onPointerDown={onPointerDown}
         >

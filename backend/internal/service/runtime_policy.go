@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"infinite-canvas/backend/internal/model"
+	"infinite-canvas/backend/internal/repository"
 
 	"gorm.io/gorm"
 )
@@ -15,13 +16,13 @@ import (
 const runtimePolicySettingKey = "runtime_policy"
 
 const (
-	maxRuntimeUploadMB   int64 = 999
-	maxRuntimeStorageGB  int64 = 999
-	maxRuntimeDataMB     int64 = 999_999
-	maxRuntimeCount      int64 = 999_999_999
-	maxRuntimeRate             = 999_999
-	maxRuntimeConcurrency      = 999
-	maxRuntimeTimeoutMinutes   = 9_999
+	maxRuntimeUploadMB       int64 = 999
+	maxRuntimeStorageGB      int64 = 999
+	maxRuntimeDataMB         int64 = 999_999
+	maxRuntimeCount          int64 = 999_999_999
+	maxRuntimeRate                 = 999_999
+	maxRuntimeConcurrency          = 999
+	maxRuntimeTimeoutMinutes       = 9_999
 )
 
 type RuntimeResourcePolicy struct {
@@ -52,27 +53,27 @@ type RuntimeTaskPolicy struct {
 }
 
 type RuntimeRequestPolicy struct {
-	TaskCreatePerMinute          int   `json:"taskCreatePerMinute"`
-	SessionCreatePerMinute       int   `json:"sessionCreatePerMinute"`
-	ResourceUploadPerMinute      int   `json:"resourceUploadPerMinute"`
-	ResourceImportPerMinute      int   `json:"resourceImportPerMinute"`
-	SessionFilePerMinute         int   `json:"sessionFilePerMinute"`
-	AssetWritePerMinute          int   `json:"assetWritePerMinute"`
-	CanvasWritePerMinute         int   `json:"canvasWritePerMinute"`
-	RegisterPerHour              int   `json:"registerPerHour"`
-	EmailCodePerHour             int   `json:"emailCodePerHour"`
-	LoginIPPerTenMinutes         int   `json:"loginIPPerTenMinutes"`
-	LoginAccountPerTenMinutes    int   `json:"loginAccountPerTenMinutes"`
-	SystemRelayPerMinute         int   `json:"systemRelayPerMinute"`
-	CustomRelayPerMinute         int   `json:"customRelayPerMinute"`
-	CustomRelayConcurrency       int   `json:"customRelayConcurrency"`
-	CustomRelayRequestMB         int64 `json:"customRelayRequestMB"`
-	CustomRelayResponseMB        int64 `json:"customRelayResponseMB"`
-	CustomRelayTimeoutMinutes    int   `json:"customRelayTimeoutMinutes"`
-	SystemRelayRequestMB         int64 `json:"systemRelayRequestMB"`
-	SystemRelayResponseMB        int64 `json:"systemRelayResponseMB"`
-	ChannelCircuitFailureCount   int   `json:"channelCircuitFailureCount"`
-	ChannelCircuitOpenSeconds    int   `json:"channelCircuitOpenSeconds"`
+	TaskCreatePerMinute        int   `json:"taskCreatePerMinute"`
+	SessionCreatePerMinute     int   `json:"sessionCreatePerMinute"`
+	ResourceUploadPerMinute    int   `json:"resourceUploadPerMinute"`
+	ResourceImportPerMinute    int   `json:"resourceImportPerMinute"`
+	SessionFilePerMinute       int   `json:"sessionFilePerMinute"`
+	AssetWritePerMinute        int   `json:"assetWritePerMinute"`
+	CanvasWritePerMinute       int   `json:"canvasWritePerMinute"`
+	RegisterPerHour            int   `json:"registerPerHour"`
+	EmailCodePerHour           int   `json:"emailCodePerHour"`
+	LoginIPPerTenMinutes       int   `json:"loginIPPerTenMinutes"`
+	LoginAccountPerTenMinutes  int   `json:"loginAccountPerTenMinutes"`
+	SystemRelayPerMinute       int   `json:"systemRelayPerMinute"`
+	CustomRelayPerMinute       int   `json:"customRelayPerMinute"`
+	CustomRelayConcurrency     int   `json:"customRelayConcurrency"`
+	CustomRelayRequestMB       int64 `json:"customRelayRequestMB"`
+	CustomRelayResponseMB      int64 `json:"customRelayResponseMB"`
+	CustomRelayTimeoutMinutes  int   `json:"customRelayTimeoutMinutes"`
+	SystemRelayRequestMB       int64 `json:"systemRelayRequestMB"`
+	SystemRelayResponseMB      int64 `json:"systemRelayResponseMB"`
+	ChannelCircuitFailureCount int   `json:"channelCircuitFailureCount"`
+	ChannelCircuitOpenSeconds  int   `json:"channelCircuitOpenSeconds"`
 }
 
 type RuntimePolicySetting struct {
@@ -112,34 +113,37 @@ func defaultRuntimePolicy() RuntimePolicySetting {
 			APICallLogCount:  100_000,
 		},
 		Task: RuntimeTaskPolicy{
-			WorkerConcurrency:        effectiveChannelConcurrencyLimit(envInt("CANVAS_WORKER_CONCURRENCY", taskWorkerConcurrency)),
-			ChannelConcurrency:       defaultChannelConcurrencyLimit(),
-			ActiveTaskLimit:          5,
-			ImageTimeoutMinutes:      8,
-			TextTimeoutMinutes:       8,
-			AudioTimeoutMinutes:      8,
-			VideoTimeoutMinutes:      30,
-			StoryboardTimeoutMinutes: 12,
+			WorkerConcurrency:   effectiveChannelConcurrencyLimit(envInt("CANVAS_WORKER_CONCURRENCY", taskWorkerConcurrency)),
+			ChannelConcurrency:  defaultChannelConcurrencyLimit(),
+			ActiveTaskLimit:     5,
+			ImageTimeoutMinutes: 8,
+			// 慢推理文本模型常接近五分钟；保留充足余量，实际请求仍受任务取消和渠道熔断约束。
+			TextTimeoutMinutes:  15,
+			AudioTimeoutMinutes: 8,
+			VideoTimeoutMinutes: 30,
+			// 分镜可能在用户授权后串行执行一次结构修复，默认时限需覆盖两次慢文本调用。
+			StoryboardTimeoutMinutes: 30,
 			DefaultTimeoutMinutes:    10,
 		},
 		Request: RuntimeRequestPolicy{
-			TaskCreatePerMinute:        30,
-			SessionCreatePerMinute:     20,
-			ResourceUploadPerMinute:    30,
-			ResourceImportPerMinute:    30,
-			SessionFilePerMinute:       30,
-			AssetWritePerMinute:        120,
-			CanvasWritePerMinute:       120,
-			RegisterPerHour:            5,
-			EmailCodePerHour:           10,
-			LoginIPPerTenMinutes:       50,
-			LoginAccountPerTenMinutes:  10,
-			SystemRelayPerMinute:       120,
-			CustomRelayPerMinute:       120,
-			CustomRelayConcurrency:     4,
-			CustomRelayRequestMB:       32,
-			CustomRelayResponseMB:      32,
-			CustomRelayTimeoutMinutes:  10,
+			TaskCreatePerMinute:       30,
+			SessionCreatePerMinute:    20,
+			ResourceUploadPerMinute:   30,
+			ResourceImportPerMinute:   30,
+			SessionFilePerMinute:      30,
+			AssetWritePerMinute:       120,
+			CanvasWritePerMinute:      120,
+			RegisterPerHour:           5,
+			EmailCodePerHour:          10,
+			LoginIPPerTenMinutes:      50,
+			LoginAccountPerTenMinutes: 10,
+			SystemRelayPerMinute:      120,
+			CustomRelayPerMinute:      120,
+			CustomRelayConcurrency:    4,
+			CustomRelayRequestMB:      32,
+			CustomRelayResponseMB:     32,
+			// 在线 Agent 直接占用同步渠道连接；系统与自定义渠道共用此总时限，避免代理和并发槽位生命周期分叉。
+			CustomRelayTimeoutMinutes:  35,
 			SystemRelayRequestMB:       64,
 			SystemRelayResponseMB:      128,
 			ChannelCircuitFailureCount: min(envInt("CANVAS_CHANNEL_CIRCUIT_FAILURES", 5), maxRuntimeConcurrency),
@@ -182,6 +186,19 @@ func (s *Service) RuntimePolicy() (RuntimePolicySetting, error) {
 	return value, err
 }
 
+// ConfigureShutdownDrainTimeout 必须在开放 HTTP 与启动 Worker 前调用，之后保持只读。
+func (s *Service) ConfigureShutdownDrainTimeout(timeout time.Duration) {
+	s.shutdownDrainTimeout = timeout
+}
+
+func (s *Service) ValidateRuntimePolicyShutdownWindow() error {
+	policy, err := s.RuntimePolicy()
+	if err != nil {
+		return err
+	}
+	return s.validateRuntimePolicyShutdownWindow(policy)
+}
+
 func (s *Service) runtimeConcurrencySetting() (RuntimeTaskPolicy, error) {
 	policy, err := s.RuntimePolicy()
 	return policy.Task, err
@@ -213,7 +230,9 @@ func (s *Service) AdminSelfUseRuntimePolicy(actor *model.User) (*PublicRuntimePo
 	if err := s.RequireAdmin(actor); err != nil {
 		return nil, err
 	}
-	return publicRuntimePolicy(nil, selfUseRuntimePolicy()), nil
+	value := selfUseRuntimePolicy()
+	s.capRuntimePolicyToShutdownWindow(&value)
+	return publicRuntimePolicy(nil, value), nil
 }
 
 func (s *Service) UpdateRuntimePolicySetting(actor *model.User, value RuntimePolicySetting) (*PublicRuntimePolicySetting, error) {
@@ -221,6 +240,9 @@ func (s *Service) UpdateRuntimePolicySetting(actor *model.User, value RuntimePol
 		return nil, err
 	}
 	if err := validateRuntimePolicy(value); err != nil {
+		return nil, err
+	}
+	if err := s.validateRuntimePolicyShutdownWindow(value); err != nil {
 		return nil, err
 	}
 	current, before, err := s.readRuntimePolicy()
@@ -235,10 +257,12 @@ func (s *Service) UpdateRuntimePolicySetting(actor *model.User, value RuntimePol
 	if current != nil {
 		setting.CreatedAt = current.CreatedAt
 	}
-	if err := s.repo.SaveSystemSetting(&setting); err != nil {
-		return nil, err
-	}
-	if err := s.appendAdminAudit(actor, "runtime_policy.update", "system_setting", runtimePolicySettingKey, "更新资源与请求策略", map[string]any{"before": before, "after": value}); err != nil {
+	if err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		if err := saveSystemSettingUnchanged(txRepo, &setting, current); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "runtime_policy.update", "system_setting", runtimePolicySettingKey, "更新资源与请求策略", map[string]any{"before": before, "after": value})
+	}); err != nil {
 		return nil, err
 	}
 	return publicRuntimePolicy(&setting, value), nil
@@ -248,15 +272,17 @@ func (s *Service) ResetRuntimePolicySetting(actor *model.User) (*PublicRuntimePo
 	if err := s.RequireAdmin(actor); err != nil {
 		return nil, err
 	}
-	_, before, err := s.readRuntimePolicy()
+	current, before, err := s.readRuntimePolicy()
 	if err != nil {
 		return nil, err
 	}
-	if err := s.repo.DeleteSystemSetting(runtimePolicySettingKey); err != nil {
-		return nil, err
-	}
 	after := defaultRuntimePolicy()
-	if err := s.appendAdminAudit(actor, "runtime_policy.reset", "system_setting", runtimePolicySettingKey, "重置资源与请求策略", map[string]any{"before": before, "after": after}); err != nil {
+	if err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		if err := deleteSystemSettingUnchanged(txRepo, runtimePolicySettingKey, current); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "runtime_policy.reset", "system_setting", runtimePolicySettingKey, "重置资源与请求策略", map[string]any{"before": before, "after": after})
+	}); err != nil {
 		return nil, err
 	}
 	return publicRuntimePolicy(nil, after), nil
@@ -364,6 +390,49 @@ func validateRuntimePolicy(value RuntimePolicySetting) error {
 		return BadAuthRequest("渠道熔断时长必须是 1-86400 秒的整数")
 	}
 	return nil
+}
+
+func (s *Service) validateRuntimePolicyShutdownWindow(value RuntimePolicySetting) error {
+	if s == nil || s.shutdownDrainTimeout <= 0 {
+		return nil
+	}
+	longestMinutes := value.Request.CustomRelayTimeoutMinutes
+	for _, timeoutMinutes := range []int{
+		value.Task.ImageTimeoutMinutes,
+		value.Task.TextTimeoutMinutes,
+		value.Task.AudioTimeoutMinutes,
+		value.Task.VideoTimeoutMinutes,
+		value.Task.StoryboardTimeoutMinutes,
+		value.Task.DefaultTimeoutMinutes,
+	} {
+		if timeoutMinutes > longestMinutes {
+			longestMinutes = timeoutMinutes
+		}
+	}
+	if time.Duration(longestMinutes)*time.Minute > s.shutdownDrainTimeout {
+		return BadAuthRequest(fmt.Sprintf("最长任务或同步模型中转时限为 %d 分钟，超过 Backend 停机排空窗口 %s；请先提高 CANVAS_SHUTDOWN_DRAIN_TIMEOUT，并让容器宽限至少再多 1 分钟", longestMinutes, s.shutdownDrainTimeout))
+	}
+	return nil
+}
+
+func (s *Service) capRuntimePolicyToShutdownWindow(value *RuntimePolicySetting) {
+	if s == nil || value == nil || s.shutdownDrainTimeout <= 0 {
+		return
+	}
+	maxMinutes := int(s.shutdownDrainTimeout / time.Minute)
+	for _, timeout := range []*int{
+		&value.Task.ImageTimeoutMinutes,
+		&value.Task.TextTimeoutMinutes,
+		&value.Task.AudioTimeoutMinutes,
+		&value.Task.VideoTimeoutMinutes,
+		&value.Task.StoryboardTimeoutMinutes,
+		&value.Task.DefaultTimeoutMinutes,
+		&value.Request.CustomRelayTimeoutMinutes,
+	} {
+		if *timeout > maxMinutes {
+			*timeout = maxMinutes
+		}
+	}
 }
 
 func publicRuntimePolicy(setting *model.SystemSetting, value RuntimePolicySetting) *PublicRuntimePolicySetting {

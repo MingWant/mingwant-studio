@@ -6,7 +6,13 @@ export function isToolName(name: unknown): name is ToolName {
 }
 
 export function parseToolInput(name: ToolName, input: unknown) {
-    return toolInputSchemas[name].parse(input ?? {});
+    const result = toolInputSchemas[name].safeParse(input ?? {});
+    if (result.success) return result.data;
+    const details = result.error.issues.slice(0, 6).map((issue) => {
+        const path = issue.path.length ? issue.path.join(".") : "根参数";
+        return `${path}：${issue.message}`;
+    });
+    throw new Error(`工具 ${name} 参数无效：${details.join("；")}`);
 }
 
 export function compactCanvasState(state: CanvasSnapshot | null) {

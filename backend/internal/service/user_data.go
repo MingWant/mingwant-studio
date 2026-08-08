@@ -58,8 +58,8 @@ func (s *Service) UpsertUserAsset(userID string, raw json.RawMessage) (UserDataS
 	if err != nil {
 		return UserDataSummary{}, err
 	}
-	s.storageMu.Lock()
-	defer s.storageMu.Unlock()
+	unlockStorage := s.lockUserStorage(userID)
+	defer unlockStorage()
 	existing, existingErr := s.repo.AssetForUser(userID, asset.ID)
 	if existingErr != nil && !errors.Is(existingErr, gorm.ErrRecordNotFound) {
 		return UserDataSummary{}, existingErr
@@ -127,8 +127,8 @@ func (s *Service) ReplaceUserAssets(userID string, req AssetsSyncRequest) ([]jso
 	if err != nil {
 		return nil, err
 	}
-	s.storageMu.Lock()
-	defer s.storageMu.Unlock()
+	unlockStorage := s.lockUserStorage(userID)
+	defer unlockStorage()
 	usage, err := s.repo.UserStorageUsage(userID)
 	if err != nil {
 		return nil, err
@@ -188,8 +188,8 @@ func (s *Service) UpsertUserCanvasProject(userID string, raw json.RawMessage) (U
 	if err != nil {
 		return UserDataSummary{}, err
 	}
-	s.storageMu.Lock()
-	defer s.storageMu.Unlock()
+	unlockStorage := s.lockUserStorage(userID)
+	defer unlockStorage()
 	existing, existingErr := s.repo.CanvasProjectForUser(userID, project.ID)
 	if existingErr != nil && !errors.Is(existingErr, gorm.ErrRecordNotFound) {
 		return UserDataSummary{}, existingErr
@@ -236,8 +236,8 @@ func (s *Service) ReplaceUserCanvasProjects(userID string, req CanvasProjectsSyn
 	if err != nil {
 		return nil, err
 	}
-	s.storageMu.Lock()
-	defer s.storageMu.Unlock()
+	unlockStorage := s.lockUserStorage(userID)
+	defer unlockStorage()
 	usage, err := s.repo.UserStorageUsage(userID)
 	if err != nil {
 		return nil, err

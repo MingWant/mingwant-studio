@@ -49,7 +49,10 @@ func (s *Service) MigrateLegacyStorage() (StorageMigrationSummary, error) {
 				if storeErr != nil {
 					return summary, storeErr
 				}
-				encoded, _ := json.Marshal(stored)
+				encoded, encodeErr := json.Marshal(stored)
+				if encodeErr != nil {
+					return summary, fmt.Errorf("迁移任务输入序列化失败：%w", encodeErr)
+				}
 				tasks[index].InputJSON = string(encoded)
 				changed = true
 			}
@@ -61,7 +64,10 @@ func (s *Service) MigrateLegacyStorage() (StorageMigrationSummary, error) {
 				if storeErr != nil {
 					return summary, storeErr
 				}
-				encoded, _ := json.Marshal(stored)
+				encoded, encodeErr := json.Marshal(stored)
+				if encodeErr != nil {
+					return summary, fmt.Errorf("迁移任务结果序列化失败：%w", encodeErr)
+				}
 				tasks[index].ResultJSON = string(encoded)
 				changed = true
 			}
@@ -72,7 +78,10 @@ func (s *Service) MigrateLegacyStorage() (StorageMigrationSummary, error) {
 				if err := s.protectTaskSecrets(protected); err != nil {
 					return summary, err
 				}
-				encoded, _ := json.Marshal(protected)
+				encoded, encodeErr := json.Marshal(protected)
+				if encodeErr != nil {
+					return summary, fmt.Errorf("迁移任务密钥保护结果序列化失败：%w", encodeErr)
+				}
 				if string(encoded) != tasks[index].InputJSON {
 					tasks[index].InputJSON = string(encoded)
 					changed = true
@@ -110,7 +119,10 @@ func (s *Service) MigrateLegacyStorage() (StorageMigrationSummary, error) {
 		if err != nil {
 			return summary, err
 		}
-		encoded, _ := json.Marshal(stored)
+		encoded, encodeErr := json.Marshal(stored)
+		if encodeErr != nil {
+			return summary, fmt.Errorf("迁移素材序列化失败：%w", encodeErr)
+		}
 		assets[index].PayloadJSON = string(encoded)
 		if err := s.repo.Save(&assets[index]); err != nil {
 			return summary, err
@@ -134,7 +146,10 @@ func (s *Service) MigrateLegacyStorage() (StorageMigrationSummary, error) {
 		if err != nil {
 			return summary, err
 		}
-		encoded, _ := json.Marshal(stored)
+		encoded, encodeErr := json.Marshal(stored)
+		if encodeErr != nil {
+			return summary, fmt.Errorf("迁移画布序列化失败：%w", encodeErr)
+		}
 		projects[index].PayloadJSON = string(encoded)
 		if err := s.repo.Save(&projects[index]); err != nil {
 			return summary, err

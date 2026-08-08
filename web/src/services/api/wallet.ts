@@ -1,5 +1,7 @@
 import axios from "axios";
 
+import type { ModelCapabilityConfig } from "@/lib/model-capabilities";
+
 const api = axios.create({ baseURL: import.meta.env.VITE_CANVAS_BACKEND_URL || "/api", withCredentials: true });
 
 type BackendEnvelope<T> = { code: number; data: T; msg: string };
@@ -65,11 +67,21 @@ export type ChannelModel = {
     modelKey: string;
     displayName: string;
     capability: "text" | "image" | "video" | "audio";
+    protocol: import("@/lib/model-protocols").ModelProtocol;
+    capabilityVersion?: number;
+    capabilityConfig?: ModelCapabilityConfig;
     billingMode: "fixed_request" | "per_second";
     unitPriceMicrocredits: number;
     priceConfigured: boolean;
     enabled: boolean;
     priceVersion: number;
+    probeStatus?: "succeeded" | "failed" | string;
+    probeTransport?: string;
+    probeDurationMs?: number;
+    probeCheckedAt?: string;
+    toolProbeStatus?: "succeeded" | "failed" | string;
+    toolProbeCheckedAt?: string;
+    toolProbeVerifierVersion?: string;
     createdAt: string;
     updatedAt: string;
 };

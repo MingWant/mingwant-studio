@@ -9,13 +9,71 @@ import (
 )
 
 type CreateProjectShotRequest struct {
-	ID          string `json:"id"`
-	UnitID      string `json:"unitId"`
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	Position    int    `json:"position"`
-	DurationMs  int64  `json:"durationMs"`
-	Status      string `json:"status"`
+	ID             string  `json:"id"`
+	UnitID         *string `json:"unitId"`
+	Title          *string `json:"title"`
+	Description    *string `json:"description"`
+	DefinitionJSON *string `json:"definitionJson"`
+	Position       *int    `json:"position"`
+	DurationMs     *int64  `json:"durationMs"`
+	Status         *string `json:"status"`
+}
+
+const projectShotDefinitionSchemaV1 = "mingwant.short-drama.shot/v1"
+
+type projectShotDefinition struct {
+	SchemaVersion     string                    `json:"schemaVersion"`
+	ShotCode          string                    `json:"shotCode"`
+	SourceRefs        []projectShotSourceRef    `json:"sourceRefs"`
+	Purpose           string                    `json:"purpose"`
+	InformationChange string                    `json:"informationChange"`
+	AssetBindings     []projectShotAssetBinding `json:"assetBindings"`
+	StartBoundary     *projectShotBoundary      `json:"startBoundary"`
+	EndBoundary       *projectShotBoundary      `json:"endBoundary"`
+	MotionSpec        *projectShotMotionSpec    `json:"motionSpec"`
+	ImagePrompt       string                    `json:"imagePrompt"`
+	VideoPrompt       string                    `json:"videoPrompt"`
+	NegativePrompt    string                    `json:"negativePrompt"`
+}
+
+type projectShotSourceRef struct {
+	UnitID        string `json:"unitId"`
+	BlockID       string `json:"blockId"`
+	Role          string `json:"role"`
+	UnitUpdatedAt string `json:"unitUpdatedAt"`
+}
+
+type projectShotAssetBinding struct {
+	AssetVersionID string `json:"assetVersionId"`
+	Role           string `json:"role"`
+}
+
+type projectShotBoundary struct {
+	Positions    []string `json:"positions"`
+	Facing       []string `json:"facing"`
+	Gaze         []string `json:"gaze"`
+	Hands        []string `json:"hands"`
+	HeldProps    []string `json:"heldProps"`
+	VisibleState []string `json:"visibleState"`
+}
+
+type projectShotMotionSpec struct {
+	StartAnchor          string                     `json:"startAnchor"`
+	OrderedSubjectMotion *[]projectShotMotionAction `json:"orderedSubjectMotion"`
+	PerformanceArc       string                     `json:"performanceArc"`
+	Camera               string                     `json:"camera"`
+	EnvironmentAndAudio  []string                   `json:"environmentAndAudio"`
+	TimingPlan           string                     `json:"timingPlan"`
+	EndReport            string                     `json:"endReport"`
+}
+
+type projectShotMotionAction struct {
+	Order         int    `json:"order"`
+	Actor         string `json:"actor"`
+	Trigger       string `json:"trigger"`
+	Action        string `json:"action"`
+	PathOrContact string `json:"pathOrContact"`
+	Result        string `json:"result"`
 }
 
 type ReplaceProjectUnitShotsRequest struct {
@@ -43,42 +101,64 @@ func (s *Service) CreateProjectShot(userID string, projectID string, req CreateP
 	if _, err := s.repo.ProjectForUser(userID, projectID); err != nil {
 		return model.Shot{}, err
 	}
-	unitID := strings.TrimSpace(req.UnitID)
-	if unitID != "" {
-		if _, err := s.repo.ProjectUnit(projectID, unitID); err != nil {
-			return model.Shot{}, err
-		}
-	}
-	title := strings.TrimSpace(req.Title)
-	if title == "" {
-		return model.Shot{}, BadAuthRequest("镜头标题不能为空")
-	}
-	if req.Position < 0 || req.DurationMs < 0 {
-		return model.Shot{}, BadAuthRequest("镜头顺序和时长不能为负数")
-	}
-	now := time.Now()
 	shotID := strings.TrimSpace(req.ID)
 	create := shotID == ""
-	status := strings.TrimSpace(req.Status)
+	now := time.Now()
+	shot := model.Shot{ID: shotID, ProjectID: projectID, Status: "draft", CreatedAt: now}
 	if create {
-		shotID = newID()
-		if status == "" {
-			status = "draft"
-		}
+		shot.ID = newID()
 	} else {
 		existing, err := s.repo.ShotForProject(projectID, shotID)
 		if err != nil {
 			return model.Shot{}, err
 		}
-		if status == "" {
-			status = existing.Status
-		}
-		now = existing.CreatedAt
+		shot = *existing
 	}
-	if !validShotStatus(status) {
+	// 更新接口按字段存在性覆盖，避免 Agent 只改定义时把章节、时长或顺序清零。
+	if req.UnitID != nil {
+		shot.UnitID = strings.TrimSpace(*req.UnitID)
+	}
+	if req.Title != nil {
+		shot.Title = strings.TrimSpace(*req.Title)
+	}
+	if req.Description != nil {
+		shot.Description = strings.TrimSpace(*req.Description)
+	}
+	if req.DefinitionJSON != nil {
+		shot.DefinitionJSON = strings.TrimSpace(*req.DefinitionJSON)
+	}
+	if req.Position != nil {
+		shot.Position = *req.Position
+	}
+	if req.DurationMs != nil {
+		shot.DurationMs = *req.DurationMs
+	}
+	if req.Status != nil {
+		shot.Status = strings.TrimSpace(*req.Status)
+	}
+	if shot.DefinitionJSON == "" {
+		shot.DefinitionJSON = "{}"
+	}
+	if shot.Title == "" {
+		return model.Shot{}, BadAuthRequest("镜头标题不能为空")
+	}
+	if shot.Position < 0 || shot.DurationMs < 0 {
+		return model.Shot{}, BadAuthRequest("镜头顺序和时长不能为负数")
+	}
+	if shot.UnitID != "" {
+		if _, err := s.repo.ProjectUnit(projectID, shot.UnitID); err != nil {
+			return model.Shot{}, err
+		}
+	}
+	if !validShotStatus(shot.Status) {
 		return model.Shot{}, BadAuthRequest("不支持的镜头状态")
 	}
-	shot := model.Shot{ID: shotID, ProjectID: projectID, UnitID: unitID, Title: title, Description: strings.TrimSpace(req.Description), Position: req.Position, DurationMs: req.DurationMs, Status: status, CreatedAt: now, UpdatedAt: time.Now()}
+	definitionJSON, err := s.validateProjectShotDefinition(projectID, shot.UnitID, shot.DefinitionJSON, shot.DurationMs)
+	if err != nil {
+		return model.Shot{}, err
+	}
+	shot.DefinitionJSON = definitionJSON
+	shot.UpdatedAt = time.Now()
 	if err := s.repo.SaveShot(&shot, create); err != nil {
 		return model.Shot{}, err
 	}
@@ -102,18 +182,111 @@ func (s *Service) ReplaceProjectUnitShots(userID string, projectID string, unitI
 	now := time.Now()
 	shots := make([]model.Shot, 0, len(req.Shots))
 	for position, input := range req.Shots {
-		title := strings.TrimSpace(input.Title)
-		description := strings.TrimSpace(input.Description)
-		if title == "" || description == "" || input.DurationMs < 0 {
+		title := projectShotRequestText(input.Title)
+		description := projectShotRequestText(input.Description)
+		if title == "" || description == "" || input.DurationMs == nil || *input.DurationMs < 0 {
 			return nil, BadAuthRequest("分镜标题、描述或时长无效")
 		}
-		shots = append(shots, model.Shot{ID: newID(), ProjectID: projectID, UnitID: unitID, Title: title, Description: description, Position: position, DurationMs: input.DurationMs, Status: "draft", CreatedAt: now, UpdatedAt: now})
+		definitionJSON, err := s.validateProjectShotDefinition(projectID, unitID, projectShotRequestText(input.DefinitionJSON), *input.DurationMs)
+		if err != nil {
+			return nil, err
+		}
+		shots = append(shots, model.Shot{ID: newID(), ProjectID: projectID, UnitID: unitID, Title: title, Description: description, DefinitionJSON: definitionJSON, Position: position, DurationMs: *input.DurationMs, Status: "draft", CreatedAt: now, UpdatedAt: now})
 	}
 	// 章节级重生成是一个整体写操作，旧镜头与引用必须和新镜头在同一事务中替换。
 	if err := s.repo.ReplaceProjectUnitShots(projectID, unitID, shots); err != nil {
 		return nil, err
 	}
 	return shots, nil
+}
+
+func projectShotRequestText(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return strings.TrimSpace(*value)
+}
+
+func (s *Service) validateProjectShotDefinition(projectID string, unitID string, raw string, durationMs int64) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" || raw == "{}" {
+		return "{}", nil
+	}
+	if !json.Valid([]byte(raw)) {
+		return "", BadAuthRequest("镜头定义必须是有效 JSON")
+	}
+	var definition projectShotDefinition
+	if err := json.Unmarshal([]byte(raw), &definition); err != nil {
+		return "", BadAuthRequest("镜头定义格式无效")
+	}
+	if strings.TrimSpace(definition.SchemaVersion) != projectShotDefinitionSchemaV1 {
+		return "", BadAuthRequest("镜头定义版本不受支持")
+	}
+	if strings.TrimSpace(definition.ShotCode) == "" || strings.TrimSpace(definition.Purpose) == "" || strings.TrimSpace(definition.InformationChange) == "" {
+		return "", BadAuthRequest("镜头定义缺少编号、观看目的或信息变化")
+	}
+	if durationMs <= 0 {
+		return "", BadAuthRequest("结构化镜头必须提供大于零的时长")
+	}
+	if len(definition.SourceRefs) == 0 || definition.StartBoundary == nil || definition.EndBoundary == nil {
+		return "", BadAuthRequest("镜头定义缺少来源或起止边界")
+	}
+	if !projectShotBoundaryHasPosition(definition.StartBoundary) || !projectShotBoundaryHasPosition(definition.EndBoundary) {
+		return "", BadAuthRequest("镜头起止边界必须明确主体位置")
+	}
+	hasOwningUnit := unitID == ""
+	for _, source := range definition.SourceRefs {
+		sourceUnitID := strings.TrimSpace(source.UnitID)
+		if sourceUnitID == "" || strings.TrimSpace(source.Role) == "" {
+			return "", BadAuthRequest("镜头来源必须包含章节和用途")
+		}
+		if _, err := s.repo.ProjectUnit(projectID, sourceUnitID); err != nil {
+			return "", err
+		}
+		if sourceUnitID == unitID {
+			hasOwningUnit = true
+		}
+		if stamp := strings.TrimSpace(source.UnitUpdatedAt); stamp != "" {
+			if _, err := time.Parse(time.RFC3339Nano, stamp); err != nil {
+				return "", BadAuthRequest("镜头来源版本时间格式无效")
+			}
+		}
+	}
+	if !hasOwningUnit {
+		return "", BadAuthRequest("镜头定义没有引用所属章节")
+	}
+	for _, binding := range definition.AssetBindings {
+		versionID := strings.TrimSpace(binding.AssetVersionID)
+		if versionID == "" || strings.TrimSpace(binding.Role) == "" {
+			return "", BadAuthRequest("镜头资产绑定缺少版本或用途")
+		}
+		if _, err := s.repo.AssetVersionForProject(projectID, versionID); err != nil {
+			return "", err
+		}
+	}
+	if motion := definition.MotionSpec; motion != nil {
+		if strings.TrimSpace(motion.StartAnchor) == "" || strings.TrimSpace(motion.PerformanceArc) == "" || strings.TrimSpace(motion.Camera) == "" || strings.TrimSpace(motion.TimingPlan) == "" || strings.TrimSpace(motion.EndReport) == "" {
+			return "", BadAuthRequest("视频运动说明缺少起点、表演、摄影、时间或终点核对")
+		}
+		if motion.OrderedSubjectMotion == nil {
+			return "", BadAuthRequest("视频运动说明必须明确有序主体动作")
+		}
+		for index, action := range *motion.OrderedSubjectMotion {
+			if action.Order != index+1 || strings.TrimSpace(action.Actor) == "" || strings.TrimSpace(action.Action) == "" || strings.TrimSpace(action.Result) == "" {
+				return "", BadAuthRequest("视频运动动作必须按顺序填写主体、动作和结果")
+			}
+		}
+	}
+	return raw, nil
+}
+
+func projectShotBoundaryHasPosition(boundary *projectShotBoundary) bool {
+	for _, position := range boundary.Positions {
+		if strings.TrimSpace(position) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func validShotStatus(status string) bool {

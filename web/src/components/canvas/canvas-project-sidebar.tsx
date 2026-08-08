@@ -73,7 +73,7 @@ export function CanvasProjectSidebar({ projectId, detail, onAddChapter, onLocate
         getItemKey: (index) => visibleUnits[index]?.unit.id || index,
         initialOffset: () => readStoredScroll(`canvas-project-chapters:${projectId}`),
         onChange: (instance, scrolling) => {
-            if (!scrolling && instance.scrollOffset !== null) sessionStorage.setItem(`canvas-project-chapters:${projectId}`, String(instance.scrollOffset));
+            if (!scrolling && instance.scrollOffset !== null) writeSessionStorage(`canvas-project-chapters:${projectId}`, String(instance.scrollOffset));
         },
         overscan: 12,
     });
@@ -208,6 +208,22 @@ function htmlToPlainText(value: string) {
 }
 
 function readStoredScroll(key: string) {
-    const value = Number(sessionStorage.getItem(key) || 0);
+    if (typeof window === "undefined") return 0;
+    let stored = "";
+    try {
+        stored = window.sessionStorage.getItem(key) || "";
+    } catch {
+        stored = "";
+    }
+    const value = Number(stored || 0);
     return Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+function writeSessionStorage(key: string, value: string) {
+    if (typeof window === "undefined") return;
+    try {
+        window.sessionStorage.setItem(key, value);
+    } catch {
+        // 章节滚动位置只是会话偏好；不可写时不影响画布和项目操作。
+    }
 }

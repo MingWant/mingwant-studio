@@ -1,12 +1,10 @@
 package service
 
 import (
-	"bytes"
-	"encoding/csv"
 	"encoding/json"
 	"errors"
+	"log"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -227,66 +225,6 @@ func (s *Service) AdminAPICallLog(actor *model.User, id string) (*model.ApiCallL
 	return s.repo.APICallLog(strings.TrimSpace(id))
 }
 
-func (s *Service) AdminAPICallLogsCSV(actor *model.User, query APICallLogQuery) ([]byte, error) {
-	if err := s.RequireAdmin(actor); err != nil {
-		return nil, err
-	}
-	filter := normalizeAnalyticsFilter(query.AnalyticsQuery)
-	ids := uniqueNonEmpty(query.IDs)
-	if len(query.IDs) > 0 && len(ids) == 0 {
-		return nil, BadAuthRequest("请选择要导出的请求明细")
-	}
-	if len(ids) > 200 {
-		return nil, BadAuthRequest("单次最多导出 200 条已选请求明细")
-	}
-	logs, err := s.repo.ExportAPICallLogs(repository.APICallLogFilter{AnalyticsFilter: filter, Keyword: query.Keyword, Status: query.Status, IDs: ids}, 10_000)
-	if err != nil {
-		return nil, err
-	}
-	var buffer bytes.Buffer
-	buffer.WriteString("\xEF\xBB\xBF")
-	writer := csv.NewWriter(&buffer)
-	_ = writer.Write([]string{"时间", "用户ID", "渠道ID", "任务ID", "计费单ID", "能力", "请求阶段", "模型", "状态", "HTTP状态", "耗时毫秒", "渠道并发上限", "供应商任务ID", "错误码", "错误"})
-	for _, log := range logs {
-		_ = writer.Write([]string{log.CreatedAt.UTC().Format(time.RFC3339), log.UserID, log.ChannelID, log.TaskID, log.BillingOrderID, log.Capability, log.RequestKind, log.Model, string(log.Status), strconv.Itoa(log.StatusCode), strconv.FormatInt(log.DurationMs, 10), strconv.Itoa(log.ConcurrencyLimit), log.ProviderRequestID, log.ErrorCode, log.Error})
-	}
-	writer.Flush()
-	if err := writer.Error(); err != nil {
-		return nil, err
-	}
-	return buffer.Bytes(), nil
-}
-
-func (s *Service) AdminAnalyticsCSV(actor *model.User, query AnalyticsQuery) ([]byte, error) {
-	if err := s.RequireAdmin(actor); err != nil {
-		return nil, err
-	}
-	filter := normalizeAnalyticsFilter(query)
-	logs, err := s.repo.AnalyticsAPICallLogs(filter)
-	if err != nil {
-		return nil, err
-	}
-	var buffer bytes.Buffer
-	buffer.WriteString("\xEF\xBB\xBF")
-	writer := csv.NewWriter(&buffer)
-	_ = writer.Write([]string{"时间", "用户ID", "渠道ID", "任务ID", "能力", "请求阶段", "模型", "状态", "状态码", "耗时毫秒", "输入Token", "输出Token", "缓存Token", "媒体数量", "视频秒数", "估算费用(微单位)", "币种", "错误类型"})
-	for _, log := range logs {
-		cost := ""
-		if log.CostAvailable {
-			cost = strconv.FormatInt(log.EstimatedCostMicros, 10)
-		}
-		inputTokens, outputTokens, cachedTokens := "", "", ""
-		if log.UsageAvailable {
-			inputTokens = strconv.FormatInt(log.InputTokens, 10)
-			outputTokens = strconv.FormatInt(log.OutputTokens, 10)
-			cachedTokens = strconv.FormatInt(log.CachedTokens, 10)
-		}
-		_ = writer.Write([]string{log.CreatedAt.Format(time.RFC3339), log.UserID, log.ChannelID, log.TaskID, log.Capability, log.RequestKind, log.Model, string(log.Status), strconv.Itoa(log.StatusCode), strconv.FormatInt(log.DurationMs, 10), inputTokens, outputTokens, cachedTokens, strconv.Itoa(log.MediaCount), strconv.Itoa(log.VideoSeconds), cost, log.Currency, classifyAPICallError(log)})
-	}
-	writer.Flush()
-	return buffer.Bytes(), writer.Error()
-}
-
 func (s *Service) AdminModelPricings(actor *model.User) ([]model.ModelPricing, error) {
 	if err := s.RequireAdmin(actor); err != nil {
 		return nil, err
@@ -310,26 +248,44 @@ func (s *Service) SaveModelPricing(actor *model.User, id string, req ModelPricin
 	if len(req.Currency) > 12 || hasNegativePricing(req) {
 		return nil, BadAuthRequest("价格配置格式无效")
 	}
-	pricing := &model.ModelPricing{ID: newID(), CreatedAt: time.Now()}
+	id = strings.TrimSpace(id)
+	var pricing *model.ModelPricing
+	action := "model_pricing.create"
+	summary := "创建模型成本基准"
 	if id != "" {
-		current, err := s.repo.ModelPricingByID(id)
-		if err != nil {
-			return nil, err
-		}
-		pricing = current
+		action = "model_pricing.update"
+		summary = "更新模型成本基准"
 	}
-	pricing.ChannelID = strings.TrimSpace(req.ChannelID)
-	pricing.Model = req.Model
-	pricing.Capability = req.Capability
-	pricing.Currency = req.Currency
-	pricing.InputPerMillionMicros = req.InputPerMillionMicros
-	pricing.OutputPerMillionMicros = req.OutputPerMillionMicros
-	pricing.CachedPerMillionMicros = req.CachedPerMillionMicros
-	pricing.PerRequestMicros = req.PerRequestMicros
-	pricing.PerMediaMicros = req.PerMediaMicros
-	pricing.PerVideoSecondMicros = req.PerVideoSecondMicros
-	pricing.UpdatedAt = time.Now()
-	if err := s.repo.Save(pricing); err != nil {
+	if err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		pricing = &model.ModelPricing{ID: newID(), CreatedAt: time.Now()}
+		if id != "" {
+			current, err := txRepo.ModelPricingByIDForUpdate(id)
+			if err != nil {
+				return err
+			}
+			pricing = current
+		}
+		pricing.ChannelID = strings.TrimSpace(req.ChannelID)
+		pricing.Model = req.Model
+		pricing.Capability = req.Capability
+		pricing.Currency = req.Currency
+		pricing.InputPerMillionMicros = req.InputPerMillionMicros
+		pricing.OutputPerMillionMicros = req.OutputPerMillionMicros
+		pricing.CachedPerMillionMicros = req.CachedPerMillionMicros
+		pricing.PerRequestMicros = req.PerRequestMicros
+		pricing.PerMediaMicros = req.PerMediaMicros
+		pricing.PerVideoSecondMicros = req.PerVideoSecondMicros
+		pricing.UpdatedAt = time.Now()
+		if err := txRepo.Save(pricing); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, action, "model_pricing", pricing.ID, summary, map[string]any{
+			"channelId": pricing.ChannelID, "model": pricing.Model, "capability": pricing.Capability, "currency": pricing.Currency,
+			"inputPerMillionMicros": pricing.InputPerMillionMicros, "outputPerMillionMicros": pricing.OutputPerMillionMicros,
+			"cachedPerMillionMicros": pricing.CachedPerMillionMicros, "perRequestMicros": pricing.PerRequestMicros,
+			"perMediaMicros": pricing.PerMediaMicros, "perVideoSecondMicros": pricing.PerVideoSecondMicros,
+		})
+	}); err != nil {
 		return nil, err
 	}
 	return pricing, nil
@@ -339,7 +295,19 @@ func (s *Service) DeleteModelPricing(actor *model.User, id string) error {
 	if err := s.RequireAdmin(actor); err != nil {
 		return err
 	}
-	return s.repo.DeleteModelPricing(id)
+	id = strings.TrimSpace(id)
+	return s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		pricing, err := txRepo.ModelPricingByIDForUpdate(id)
+		if err != nil {
+			return err
+		}
+		if err := txRepo.DeleteModelPricing(id); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "model_pricing.delete", "model_pricing", id, "删除模型成本基准", map[string]any{
+			"channelId": pricing.ChannelID, "model": pricing.Model, "capability": pricing.Capability, "currency": pricing.Currency,
+		})
+	})
 }
 
 func hasNegativePricing(req ModelPricingRequest) bool {
@@ -804,11 +772,17 @@ func (s *Service) estimateCallCost(log *model.ApiCallLog) {
 }
 
 func (s *Service) EnrichAPICallLog(log *model.ApiCallLog, responseBody []byte) {
-	if log == nil || len(responseBody) == 0 || !json.Valid(responseBody) {
+	if log == nil {
 		return
 	}
-	var payload map[string]any
-	if json.Unmarshal(responseBody, &payload) != nil {
+	if log.Status == model.ApiCallStatusFailed && log.StatusCode >= 300 {
+		log.Error = providerHTTPErrorMessage(providerHTTPError{StatusCode: log.StatusCode, Body: string(responseBody)})
+	}
+	if len(responseBody) == 0 {
+		return
+	}
+	payload := providerPayloadForAnalytics(responseBody)
+	if payload == nil {
 		return
 	}
 	if data, ok := payload["data"].(map[string]any); ok {
@@ -819,9 +793,9 @@ func (s *Service) EnrichAPICallLog(log *model.ApiCallLog, responseBody []byte) {
 		}
 	}
 	if log.Status == model.ApiCallStatusFailed {
-		errorCode, errorMessage := providerFailureDetails(payload)
+		errorCode, errorMessage := publicProviderFailureDetailsFromPayload(payload)
 		log.ErrorCode = errorCode
-		if errorMessage != "" {
+		if log.StatusCode < 300 && errorMessage != "" {
 			log.Error = errorMessage
 		}
 	}
@@ -843,7 +817,17 @@ func (s *Service) EnrichAPICallLog(log *model.ApiCallLog, responseBody []byte) {
 		log.OutputTokens = firstInt64(usageMetadata, "candidatesTokenCount")
 		log.CachedTokens = firstInt64(usageMetadata, "cachedContentTokenCount")
 	}
-	log.ProviderRequestID = firstNonEmpty(stringField(payload, "task_id"), stringField(payload, "id"), stringField(payload, "request_id"))
+	// 轮询与下载必须沿用创建阶段已确认的任务 ID；响应中的普通资源 id 不能反向覆盖它。
+	providerRequestID := strings.TrimSpace(log.ProviderRequestID)
+	if providerRequestID == "" {
+		providerRequestID = firstNonEmpty(stringField(payload, "task_id"), stringField(payload, "id"), stringField(payload, "request_id"))
+	}
+	// Gemini Veo 以 operation name 作为可恢复任务标识；只在视频创建响应中接受 name，
+	// 避免把其他 Gemini 资源对象的名称误记成供应商任务 ID。
+	if providerRequestID == "" && log.APIFormat == "gemini" && log.Capability == "video" && log.RequestKind == "create" {
+		providerRequestID = strings.TrimSpace(stringField(payload, "name"))
+	}
+	log.ProviderRequestID = providerRequestID
 	if log.Capability == "image" {
 		if data, ok := payload["data"].([]any); ok {
 			log.MediaCount = len(data)
@@ -869,5 +853,7 @@ func firstInt64(values map[string]any, keys ...string) int64 {
 }
 
 func (s *Service) recordActivity(userID string, event string, count int) {
-	_ = s.repo.RecordUserActivity(userID, event, count, time.Now())
+	if err := s.repo.RecordUserActivity(userID, event, count, time.Now()); err != nil {
+		log.Printf("user activity write failed user=%s event=%s: %v", userID, event, err)
+	}
 }

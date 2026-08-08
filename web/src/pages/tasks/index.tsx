@@ -8,11 +8,13 @@ import { ListToolbar, PageHeader, TableSurface, WorkspacePage } from "@/componen
 import { WorkspaceState } from "@/components/layout/workspace-state";
 import { CONTENT_MODERATION_ERROR_CODE, generationErrorMessage, isContentModerationError } from "@/lib/generation-error";
 import { formatTaskKind, operationOptions, statusLabel } from "@/lib/generation-task-display";
+import { prefersShortCinematicDelivery, resolveChannelProbeReadiness } from "@/lib/channel-probe-readiness";
 
-import { cancelGenerationTask, createAgentSession, createGenerationTask, listGenerationTasks, listTaskLogs, queryGenerationTask, retryGenerationTask, type CreateTaskInput, type GenerationTask, type TaskLog, type TaskStatus } from "@/services/api/task-center";
+import { cancelGenerationTask, createAgentSession, createGenerationTask, listGenerationTasks, listTaskLogs, queryFailedVideoProviderTask, queryGenerationTask, recoverGenerationTaskDelivery, retryGenerationTask, type CreateTaskInput, type GenerationTask, type TaskLog, type TaskStatus } from "@/services/api/task-center";
+import { isGenerationCostUncertainError } from "@/lib/canvas/canvas-generation-batch";
 import { syncGenerationTaskToCanvasStore } from "@/lib/canvas/canvas-generation-task-sync";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
-import { resolveModelRequestConfig, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { hasSystemModelPrice, modelOptionName, resolveModelChannel, resolveModelRequestConfig, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { formatCredits } from "@/constant/credits";
 import { listProjects, type ProjectSummary } from "@/services/api/projects";
 
@@ -24,7 +26,7 @@ function taskStatusFilter(value: string | null): TaskStatusFilter {
 }
 
 export default function TasksPage() {
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
     const [searchParams, setSearchParams] = useSearchParams();
     const effectiveConfig = useEffectiveConfig();
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
@@ -37,11 +39,11 @@ export default function TasksPage() {
     const [createOpen, setCreateOpen] = useState(false);
     const [creating, setCreating] = useState(false);
     const statusFilter = taskStatusFilter(searchParams.get("status"));
-    const setStatusFilter = (value: TaskStatusFilter) => {
+    const setStatusFilter = useCallback((value: TaskStatusFilter) => {
         const next = new URLSearchParams(searchParams);
         next.set("status", value);
         setSearchParams(next, { replace: true });
-    };
+    }, [searchParams, setSearchParams]);
     const [keyword, setKeyword] = useState("");
     const [projectFilter, setProjectFilter] = useState("all");
     const [page, setPage] = useState(1);
@@ -174,18 +176,154 @@ export default function TasksPage() {
         };
     }, [loadTasks]);
 
-    const runAction = async (id: string, action: "retry" | "cancel") => {
+    const runAction = useCallback(async (id: string, action: "retry" | "cancel", confirmNewProviderRequest = false) => {
         setActingId(id);
         try {
-            const next = action === "retry" ? await retryGenerationTask(id) : await cancelGenerationTask(id);
-            setTasks((items) => items.map((item) => (item.id === id ? next : item)));
+            const next = action === "retry" ? await retryGenerationTask(id, confirmNewProviderRequest) : await cancelGenerationTask(id);
+            setTasks((items) => items.map((item) => (item.id === id ? { ...item, ...next, billing: undefined } : item)));
             if (action === "retry") {
                 setStatusFilter("active");
                 setPage(1);
             }
-            message.success(action === "retry" ? "任务已重新入队" : "任务已取消");
+            window.dispatchEvent(new CustomEvent("wallet:updated"));
+            if (!(await loadTasks(false))) message.warning("操作已成功，但任务列表刷新失败，请稍后手动刷新");
+            if (action === "retry") {
+                message.success("任务已重新入队");
+            } else {
+                const cancellationDetails = next.error?.trim();
+                if (next.status === "failed") message.error(cancellationDetails || "任务已在取消生效前失败");
+                else if (cancellationDetails && (isGenerationCostUncertainError(cancellationDetails) || /核对|失败/.test(cancellationDetails))) message.warning(cancellationDetails);
+                else message.success(cancellationDetails || "任务已取消");
+            }
         } catch (error) {
+            window.dispatchEvent(new CustomEvent("wallet:updated"));
+            // 刷新函数会自行降级；无论刷新结果如何，都保留真正的写操作错误。
+            await loadTasks(false);
             message.error(error instanceof Error ? error.message : "操作失败");
+        } finally {
+            setActingId("");
+        }
+    }, [loadTasks, message, setStatusFilter]);
+
+    const retryTask = useCallback((task: GenerationTask) => {
+        if (task.deliveryRecoverable) {
+            message.warning("该任务已有可恢复的本地结果检查点，请先恢复已保存结果；恢复不会再次调用供应商");
+            return;
+        }
+        const billingPending = task.billing?.status === "reserved" || task.billing?.status === "running" || task.billing?.status === "uncertain";
+        if (billingPending && task.providerRequestId && canQueryProviderTask(task)) {
+            message.warning("上一笔视频任务仍有上游任务，请先打开详情并手动查询；无法恢复时再创建新的请求");
+            return;
+        }
+        const uncertainProviderFailure = billingPending || isGenerationCostUncertainError(task.error);
+        const mayUseStructureRepair = task.type === "agent_storyboard" || task.type === "agent_storyboard_rows";
+        modal.confirm({
+            title: uncertainProviderFailure ? "确认已核对原任务费用？" : "确认重新生成？",
+            content: uncertainProviderFailure
+                ? `原任务的费用状态仍可能待核对。继续会提交新的生成尝试并可能重复计费${mayUseStructureRepair ? "；若分镜结构仍不合法，还可能按原任务授权再发起 1 次修复请求" : ""}。确认后系统保留旧记录，不再要求先找管理员处理。`
+                : mayUseStructureRepair
+                    ? "重新生成会先发起 1 次文本请求；若分镜结构校验失败，将按原任务授权再发起最多 1 次修复请求。自定义 API Key 可能产生最多 2 次供应商调用费用。"
+                    : task.providerRequestId
+                        ? "此任务已有上游任务 ID。继续会清除旧的恢复状态并创建新的供应商请求，可能产生新费用；如只想取回旧结果，请先使用“手动查询任务”。"
+                        : "重新生成会创建一笔新的供应商请求并可能产生费用。请确认已经检查原任务失败原因和渠道配置。",
+            okText: "重新生成",
+            cancelText: "取消",
+            onOk: () => runAction(task.id, "retry", true),
+        });
+    }, [message, modal, runAction]);
+
+    const recoverTaskDelivery = useCallback(async (task: GenerationTask) => {
+        setActingId(task.id);
+        try {
+            const result = await recoverGenerationTaskDelivery(task.id);
+            setDetailTask((current) => current?.id === task.id ? result.task : current);
+            setTasks((items) => items.map((item) => item.id === task.id ? { ...item, ...result.task } : item));
+            window.dispatchEvent(new CustomEvent("wallet:updated"));
+            try {
+                await syncGenerationTaskToCanvasStore(result.task);
+            } catch (syncError) {
+                message.warning(syncError instanceof Error ? `任务已恢复，但本地画布回填失败：${syncError.message}` : "任务已恢复，但本地画布回填失败");
+            }
+            try {
+                setTaskLogs(await listTaskLogs(task.id));
+            } catch {
+                message.warning("任务已恢复，但日志刷新失败");
+            }
+            void loadTasks(false);
+            if (result.billingSettled) message.success("已从本地检查点恢复任务，未再次调用供应商");
+            else message.warning("已从本地检查点恢复任务，未再次调用供应商；积分结算仍需管理员核对");
+        } catch (error) {
+            await loadTasks(false);
+            try {
+                const latest = await queryGenerationTask(task.id);
+                setDetailTask((current) => current?.id === task.id ? latest : current);
+            } catch {
+                // 主错误已经包含恢复结果；详情读回失败只保留列表中的最新状态。
+            }
+            message.error(error instanceof Error ? error.message : "恢复已保存结果失败");
+        } finally {
+            setActingId("");
+        }
+    }, [loadTasks, message]);
+
+    const confirmCancelTask = useCallback((task: GenerationTask) => {
+        modal.confirm({
+            title: task.status === "running" ? "取消正在运行的任务？" : "取消排队任务？",
+            content: task.status === "running"
+                ? "系统会停止本地跟踪并请求后端取消，但不能保证供应商立即停止。原请求可能仍在执行并产生费用，取消后费用将进入待核对状态，请勿立即重试。"
+                : "排队任务通常会在调用供应商前取消并退回冻结积分；若任务恰好已经开始，供应商仍可能执行并产生费用，届时请先核对费用再重试。",
+            okText: "确认取消",
+            cancelText: "继续等待",
+            centered: true,
+            okButtonProps: { danger: true },
+            onOk: () => runAction(task.id, "cancel"),
+        });
+    }, [modal, runAction]);
+
+    const queryProviderTask = async (task: GenerationTask) => {
+        const waitText = providerQueryScheduleText(task.nextPollAt);
+        if (waitText && waitText !== "现在可以再次查询") {
+            message.info(`上游任务仍在处理中，${waitText}；当前不会访问供应商`);
+            return;
+        }
+        setActingId(task.id);
+        try {
+            const result = await queryFailedVideoProviderTask(task.id);
+            try {
+                setTaskLogs(await listTaskLogs(task.id));
+            } catch (logError) {
+                message.warning(logError instanceof Error ? `任务状态已查询，但日志刷新失败：${logError.message}` : "任务状态已查询，但日志刷新失败");
+            }
+            if (!result.recovered) {
+                setDetailTask((current) => current?.id === task.id ? result.task : current);
+                setTasks((items) => items.map((item) => (item.id === task.id ? { ...item, ...result.task } : item)));
+                const nextQuery = providerQueryScheduleText(result.task.nextPollAt);
+                message.info(`上游任务仍在处理中${result.providerStatus ? `（${result.providerStatus}）` : ""}${nextQuery ? `；${nextQuery}` : ""}`);
+                return;
+            }
+            setDetailTask(result.task);
+            setTasks((items) => items.map((item) => (item.id === task.id ? { ...item, ...result.task } : item)));
+            window.dispatchEvent(new CustomEvent("wallet:updated"));
+            void loadTasks(false);
+            try {
+                await syncGenerationTaskToCanvasStore(result.task);
+            } catch (syncError) {
+                const detail = syncError instanceof Error ? `：${syncError.message}` : "";
+                const billingNotice = result.billingSettled ? "" : "，且积分结算需要管理员核对";
+                message.warning(`上游视频已恢复${billingNotice}，但本地画布回填失败${detail}`);
+                return;
+            }
+            if (result.billingSettled) message.success("已获取上游视频，任务已恢复并完成结算");
+            else message.warning("视频已恢复，但积分结算需要管理员核对");
+        } catch (error) {
+            await loadTasks(false);
+            try {
+                const latest = await queryGenerationTask(task.id);
+                setDetailTask((current) => current?.id === task.id ? latest : current);
+            } catch {
+                // 上游查询的主错误优先展示；详情会在下一次轮询或手动打开时重读。
+            }
+            message.error(error instanceof Error ? error.message : "查询上游任务失败");
         } finally {
             setActingId("");
         }
@@ -193,16 +331,61 @@ export default function TasksPage() {
 
     const submitTask = async () => {
         const values = await form.validateFields();
+        let confirmedTextModel = "";
+        let confirmedChannelProbeTaskId = "";
+        let confirmedToolProbeTaskId = "";
+        let confirmedAgentRequestConfig: ReturnType<typeof resolveModelRequestConfig> | undefined;
+        if (values.operation === "agent_session") {
+            confirmedTextModel = values.model?.trim() || effectiveConfig.textModel || effectiveConfig.model;
+            if (!isAiConfigReady(effectiveConfig, confirmedTextModel)) {
+                message.error("请先在设置里配置可用的文本模型、Base URL 和 API Key");
+                return;
+            }
+            const requestConfig = resolveModelRequestConfig(effectiveConfig, confirmedTextModel);
+            // 费用确认前已经冻结渠道、协议和凭据；确认后不能再按裸模型名重新解析同名渠道。
+            confirmedAgentRequestConfig = requestConfig;
+            const channel = (requestConfig.resolvedChannelId && effectiveConfig.channels.find((item) => item.id === requestConfig.resolvedChannelId)) || resolveModelChannel(effectiveConfig, confirmedTextModel);
+            const modelLabel = modelOptionName(requestConfig.model) || requestConfig.model;
+            if (channel.scope === "system" && !hasSystemModelPrice(channel, modelLabel)) {
+                modal.warning({
+                    title: "系统模型尚未配置用户积分价格",
+                    content: `LLM 测活本身不扣积分，但任务中心创建 Agent 分镜需要先完成该模型的用户积分定价。本次没有创建任务或调用供应商，请联系管理员在模型管理中设置价格后再试。`,
+                    okText: "知道了",
+                    centered: true,
+                });
+                return;
+            }
+            const readiness = resolveChannelProbeReadiness(channel, modelLabel, requestConfig.interfaceType);
+            if (prefersShortCinematicDelivery(modelLabel, requestConfig.interfaceType)) {
+                const continueWithRisk = await new Promise<boolean>((resolve) => modal.confirm({
+                    title: "当前模型存在长请求超时风险",
+                    content: "这个兼容模型的长 JSON 分镜和工具请求可能在上游网关超时。测活只供管理员诊断，不会阻止用户调用；你仍可继续创建任务，若实际失败可按费用状态确认后重试，也可以回到画布使用手动交付降低等待风险。",
+                    okText: "继续创建",
+                    cancelText: "取消",
+                    centered: true,
+                    onOk: () => resolve(true),
+                    onCancel: () => resolve(false),
+                }));
+                if (!continueWithRisk) return;
+            }
+            confirmedChannelProbeTaskId = readiness.probeTaskId || "";
+            confirmedToolProbeTaskId = readiness.toolProbeTaskId || "";
+            const confirmed = await new Promise<boolean>((resolve) => modal.confirm({
+                title: "确认创建 Agent 分镜任务",
+                content: `模型：${modelLabel}。测活状态仅供管理员诊断，本次即使未测活或最近一次测活失败，仍会按当前配置发起请求；若上游实际失败，系统会保留真实错误和费用状态，用户可在确认后重试。系统先发起 1 次文本请求；若分镜结构校验失败，将自动发起最多 1 次修复请求。自定义 API Key 可能产生最多 2 次供应商调用费用。`,
+                okText: "确认并允许一次修复",
+                cancelText: "取消",
+                onOk: () => resolve(true),
+                onCancel: () => resolve(false),
+            }));
+            if (!confirmed) return;
+        }
         setCreating(true);
         try {
             if (values.operation === "agent_session") {
-                const textModel = values.model?.trim() || effectiveConfig.textModel || effectiveConfig.model;
-                if (!isAiConfigReady(effectiveConfig, textModel)) {
-                    message.error("请先在设置里配置可用的文本模型、Base URL 和 API Key");
-                    return;
-                }
-                const requestConfig = resolveModelRequestConfig(effectiveConfig, textModel);
-                const detail = await createAgentSession({ projectId: values.projectId, prompt: values.prompt, config: backendProviderConfig(requestConfig) });
+                const requestConfig = confirmedAgentRequestConfig;
+                if (!requestConfig) throw new Error("任务配置已失效，请重新打开创建窗口并确认模型");
+                const detail = await createAgentSession({ projectId: values.projectId, prompt: values.prompt, config: backendProviderConfig(requestConfig), channelProbeTaskId: confirmedChannelProbeTaskId || undefined, toolProbeTaskId: confirmedToolProbeTaskId || undefined, allowPaidStructureRepair: true });
                 setTasks((items) => [...detail.tasks, ...items]);
             } else {
                 const videoModel = values.model?.trim() || effectiveConfig.videoModel || effectiveConfig.model;
@@ -211,6 +394,11 @@ export default function TasksPage() {
                     return;
                 }
                 const requestConfig = resolveModelRequestConfig(effectiveConfig, videoModel);
+                const channel = (requestConfig.resolvedChannelId && effectiveConfig.channels.find((item) => item.id === requestConfig.resolvedChannelId)) || resolveModelChannel(effectiveConfig, videoModel);
+                if (channel.scope === "system" && !hasSystemModelPrice(channel, modelOptionName(requestConfig.model) || requestConfig.model)) {
+                    message.error("当前系统视频模型尚未配置用户积分价格；本次没有创建任务或调用供应商，请联系管理员先完成模型定价。");
+                    return;
+                }
                 const task = await createGenerationTask({
                     projectId: values.projectId,
                     type: `video_${values.operation}`,
@@ -282,11 +470,13 @@ export default function TasksPage() {
                                 <div className="truncate text-[10px] text-foreground/45">{formatTaskKind(task)} · {formatModelName(task)}</div>
                                 <div className="truncate text-[10px] text-foreground/38">{context.canvasName}{context.projectName ? ` · ${context.projectName}` : ""}</div>
                                 <div className="flex items-center justify-between gap-3">
-                                    <div className="flex min-w-0 items-center gap-2 text-[11px]"><span className={`size-1.5 shrink-0 rounded-full ${statusDotClassName(task.status)}`} /><span>{statusLabel[task.status]}</span><TaskBilling billing={task.billing} /></div>
+                                    <div className="flex min-w-0 items-center gap-2 text-[11px]"><span className={`size-1.5 shrink-0 rounded-full ${statusDotClassName(task.status)}`} /><span>{statusLabel[task.status]}</span><TaskBilling billing={task.billing} error={task.error} /></div>
                                     <Space size={0}>
                                         <Button type="text" size="small" aria-label="查看详情" icon={<Eye className="size-3.5" />} onClick={() => openTaskDetail(task)} />
-                                        {task.status === "failed" || task.status === "cancelled" ? <Button type="text" size="small" aria-label="重新生成" icon={<RotateCcw className="size-3.5" />} loading={actingId === task.id} disabled={task.errorCode === CONTENT_MODERATION_ERROR_CODE || isContentModerationError(task.error)} onClick={() => runAction(task.id, "retry")} /> : null}
-                                        {task.status === "queued" || task.status === "running" ? <Button type="text" size="small" aria-label="取消任务" danger icon={<X className="size-3.5" />} loading={actingId === task.id} onClick={() => runAction(task.id, "cancel")} /> : null}
+                                        {task.deliveryRecoverable
+                                            ? <Button type="text" size="small" aria-label="恢复已保存结果" title="不调用供应商，恢复本地已保存结果" icon={<RefreshCw className="size-3.5" />} loading={actingId === task.id} onClick={() => void recoverTaskDelivery(task)} />
+                                            : (task.status === "failed" || task.status === "cancelled") && task.type !== "channel_health_probe" ? <Button type="text" size="small" aria-label="重新生成" icon={<RotateCcw className="size-3.5" />} loading={actingId === task.id} disabled={task.errorCode === CONTENT_MODERATION_ERROR_CODE || isContentModerationError(task.error)} onClick={() => retryTask(task)} /> : null}
+                                        {task.status === "queued" || task.status === "running" ? <Button type="text" size="small" aria-label="取消任务" danger icon={<X className="size-3.5" />} loading={actingId === task.id} onClick={() => confirmCancelTask(task)} /> : null}
                                     </Space>
                                 </div>
                             </div>
@@ -329,7 +519,7 @@ export default function TasksPage() {
                 width: 130,
                 align: "right",
                 responsive: ["md"],
-                render: (_, task) => <TaskBilling billing={task.billing} />,
+                render: (_, task) => <TaskBilling billing={task.billing} error={task.error} />,
             },
             {
                 title: "操作",
@@ -339,13 +529,15 @@ export default function TasksPage() {
                 render: (_, task) => (
                     <Space size={2}>
                         <Button type="text" size="small" icon={<Eye className="size-3.5" />} onClick={() => openTaskDetail(task)}>详情</Button>
-                        {task.status === "failed" || task.status === "cancelled" ? <Button type="text" size="small" aria-label="重新生成" title={task.errorCode === CONTENT_MODERATION_ERROR_CODE || isContentModerationError(task.error) ? "内容审核未通过，请修改提示词后新建任务" : "重新生成"} icon={<RotateCcw className="size-3.5" />} loading={actingId === task.id} disabled={task.errorCode === CONTENT_MODERATION_ERROR_CODE || isContentModerationError(task.error)} onClick={() => runAction(task.id, "retry")}>重试</Button> : null}
-                        {task.status === "queued" || task.status === "running" ? <Button type="text" size="small" aria-label="取消任务" danger icon={<X className="size-3.5" />} loading={actingId === task.id} onClick={() => runAction(task.id, "cancel")}>取消</Button> : null}
+                        {task.deliveryRecoverable
+                            ? <Button type="text" size="small" icon={<RefreshCw className="size-3.5" />} loading={actingId === task.id} onClick={() => void recoverTaskDelivery(task)}>恢复结果</Button>
+                            : (task.status === "failed" || task.status === "cancelled") && task.type !== "channel_health_probe" ? <Button type="text" size="small" aria-label="重新生成" title={task.errorCode === CONTENT_MODERATION_ERROR_CODE || isContentModerationError(task.error) ? "内容审核未通过，请修改提示词后新建任务" : "重新生成"} icon={<RotateCcw className="size-3.5" />} loading={actingId === task.id} disabled={task.errorCode === CONTENT_MODERATION_ERROR_CODE || isContentModerationError(task.error)} onClick={() => retryTask(task)}>重试</Button> : null}
+                        {task.status === "queued" || task.status === "running" ? <Button type="text" size="small" aria-label="取消任务" danger icon={<X className="size-3.5" />} loading={actingId === task.id} onClick={() => confirmCancelTask(task)}>取消</Button> : null}
                     </Space>
                 ),
             },
         ],
-        [actingId, canvasById, domainProjectNameById, openTaskDetail],
+        [actingId, canvasById, confirmCancelTask, domainProjectNameById, openTaskDetail, recoverTaskDelivery, retryTask],
     );
 
     return (
@@ -421,7 +613,12 @@ export default function TasksPage() {
                             <InfoItem label="模型" value={formatModelName(detailTask)} />
                             <InfoItem label="尝试次数" value={`第 ${detailTask.attempts || 1} 次`} />
                             <InfoItem label="创建时间" value={formatDate(detailTask.createdAt)} />
+                            {detailTask.nextPollAt ? <InfoItem label="下次可查询" value={providerQueryScheduleText(detailTask.nextPollAt) || formatDate(detailTask.nextPollAt)} /> : null}
                         </div>
+                        {canQueryProviderTask(detailTask) || detailTask.deliveryRecoverable ? <div className="flex justify-end gap-2">
+                            {detailTask.deliveryRecoverable ? <Button type="primary" icon={<RefreshCw className="size-4" />} loading={actingId === detailTask.id} onClick={() => void recoverTaskDelivery(detailTask)}>恢复已保存结果</Button> : null}
+                            {canQueryProviderTask(detailTask) && !detailTask.deliveryRecoverable ? <Button icon={<RefreshCw className="size-4" />} title={providerQueryScheduleText(detailTask.nextPollAt)} loading={actingId === detailTask.id} onClick={() => void queryProviderTask(detailTask)}>手动查询任务</Button> : null}
+                        </div> : null}
                         {detailTask.error ? <pre className="max-h-28 overflow-auto whitespace-pre-wrap border-l-2 border-red-500 bg-red-50 px-3 py-2 text-xs text-red-700 dark:bg-red-950/30 dark:text-red-300">{generationErrorMessage(detailTask.error)}</pre> : null}
                         <TaskResultMedia value={detailTask.resultJson} taskType={detailTask.type} />
                         <DetailBlock title="输入" value={detailLoading ? "详情加载中..." : formatTaskJson(detailTask.inputJson)} />
@@ -459,11 +656,15 @@ function reconcileTaskSummaries(current: GenerationTask[], next: GenerationTask[
     let changed = false;
     const reconciled = next.map((task) => {
         const previous = currentById.get(task.id);
-        if (previous?.updatedAt === task.updatedAt && previous.previewUrl === task.previewUrl && previous.billing?.status === task.billing?.status && previous.billing?.amountMicrocredits === task.billing?.amountMicrocredits) return previous;
+        if (previous?.updatedAt === task.updatedAt && previous.previewUrl === task.previewUrl && previous.providerRequestId === task.providerRequestId && previous.billing?.status === task.billing?.status && previous.billing?.amountMicrocredits === task.billing?.amountMicrocredits) return previous;
         changed = true;
         return task;
     });
     return changed ? reconciled : current;
+}
+
+function canQueryProviderTask(task: GenerationTask) {
+    return (task.status === "failed" || task.status === "cancelled") && (task.type.startsWith("canvas_video") || task.type.startsWith("video_")) && Boolean(task.providerRequestId);
 }
 
 function TaskResultMedia({ value, taskType }: { value?: string; taskType: string }) {
@@ -493,9 +694,10 @@ function resultMediaUrls(value?: string) {
     const visit = (item: unknown, key = "") => {
         if (typeof item === "string") {
             const isInlineMedia = /^(data:image\/|data:video\/)/.test(item);
+            const isBackendResource = /^\/api\/resources\/[A-Za-z0-9_-]+\/file(?:$|[?#])/.test(item);
             const isMediaPath = /\.(png|jpe?g|webp|gif|avif|mp4|webm|mov)(?:$|\?)/i.test(item);
             const isNamedMediaUrl = /^(https?:|blob:)/.test(item) && /(url|image|video|result|output|media)/i.test(key);
-            if ((isInlineMedia || isMediaPath || isNamedMediaUrl) && !urls.includes(item)) urls.push(item);
+            if ((isInlineMedia || isBackendResource || isMediaPath || isNamedMediaUrl) && !urls.includes(item)) urls.push(item);
             return;
         }
         if (Array.isArray(item)) return item.forEach((value) => visit(value, key));
@@ -537,9 +739,9 @@ function getTaskCanvasContext(task: GenerationTask, canvasById: Map<string, { ti
 }
 
 function taskAttentionReason(task: GenerationTask) {
-    if (task.status === "cancelled") return "任务已取消，可按原输入重新提交";
     if (task.errorCode === CONTENT_MODERATION_ERROR_CODE || isContentModerationError(task.error)) return "内容审核未通过，请修改输入后新建任务";
     if (task.error) return generationErrorMessage(task.error);
+    if (task.status === "cancelled") return "任务已取消；重新生成前请先核对供应商状态和费用";
     return task.stage || "生成失败，打开详情查看原因";
 }
 
@@ -565,11 +767,14 @@ function TaskDate({ value }: { value?: string }) {
     return <div className="text-xs tabular-nums text-foreground/62"><div>{date.toLocaleDateString()}</div><div className="mt-1 text-[10px] text-foreground/38">{date.toLocaleTimeString()}</div></div>;
 }
 
-function TaskBilling({ billing }: { billing?: GenerationTask["billing"] }) {
-    if (!billing) return <span className="text-xs text-foreground/30">-</span>;
+function TaskBilling({ billing, error }: { billing?: GenerationTask["billing"]; error?: string }) {
+    const costUncertain = isGenerationCostUncertainError(error) || billing?.status === "uncertain";
+    if (!billing) {
+        return costUncertain ? <span className="text-xs font-medium text-amber-600 dark:text-amber-300">待核对</span> : <span className="text-xs text-foreground/30">-</span>;
+    }
     const amount = formatCredits(billing.amountMicrocredits);
-    const note = billing.status === "settled" ? "已结算" : billing.status === "refunded" ? "已退回" : billing.status === "uncertain" ? "待核对" : "预计";
-    return <div className="text-right"><div className="text-xs font-medium tabular-nums text-foreground/78">{amount}</div><div className={`mt-1 text-[10px] ${billing.status === "uncertain" ? "text-amber-600 dark:text-amber-300" : "text-foreground/38"}`}>{note}</div></div>;
+    const note = costUncertain ? "待核对" : billing.status === "settled" ? "已结算" : billing.status === "refunded" ? "已退回" : "预计";
+    return <div className="text-right"><div className="text-xs font-medium tabular-nums text-foreground/78">{amount}</div><div className={`mt-1 text-[10px] ${costUncertain ? "text-amber-600 dark:text-amber-300" : "text-foreground/38"}`}>{note}</div></div>;
 }
 
 function formatModelName(task: GenerationTask) {
@@ -588,6 +793,15 @@ function formatDate(value?: string) {
     if (!value) return "-";
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? "-" : date.toLocaleString();
+}
+
+function providerQueryScheduleText(value?: string) {
+    if (!value) return "";
+    const next = new Date(value);
+    if (Number.isNaN(next.getTime())) return "";
+    const seconds = Math.ceil((next.getTime() - Date.now()) / 1_000);
+    if (seconds > 0) return `约 ${seconds} 秒后可再次查询`;
+    return "现在可以再次查询";
 }
 
 function InfoItem({ label, value }: { label: string; value: string }) {
@@ -623,6 +837,9 @@ function formatTaskJson(value?: string) {
 
 function backendProviderConfig(config: ReturnType<typeof resolveModelRequestConfig>) {
     return {
+        // 系统渠道必须把发送前解析出的 ID 一并交给 Backend；只带代理 Base URL 会让旧配置依赖字符串推断。
+        // 测活 ID 仍可随任务保存供管理员审计，但不作为用户调用的必要授权证明。
+        channelId: config.channelId,
         apiFormat: config.apiFormat,
         interfaceType: config.interfaceType,
         baseUrl: config.baseUrl,

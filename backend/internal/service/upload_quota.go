@@ -42,19 +42,16 @@ func (s *Service) reserveUserStoredFileQuota(userID string, size int64, exclusiv
 		return "", BadAuthRequest(singleFileMessage)
 	}
 	day := time.Now().UTC().Format("2006-01-02")
-	s.storageMu.Lock()
-	defer s.storageMu.Unlock()
+	unlockStorage := s.lockUserStorage(userID)
+	defer unlockStorage()
 	storedBytes, err := s.repo.UserStoredFileBytes(userID)
 	if err != nil {
 		return "", err
 	}
-	if s.pendingStorage == nil {
-		s.pendingStorage = map[string]int64{}
-	}
-	if storedBytes+s.pendingStorage[userID]+size >= storedLimit {
+	if storedBytes+s.pendingStorageBytes(userID)+size >= storedLimit {
 		return "", BadAuthRequest(fmt.Sprintf("账号资源和会话附件已达到 %s 上限，请联系管理员清理历史文件", formatStorageLimit(storedLimit)))
 	}
-	s.pendingStorage[userID] += size
+	s.addPendingStorage(userID, size)
 	if err := s.repo.ReserveDailyUpload(userID, day, size, dailyLimit); err != nil {
 		s.decreasePendingStorage(userID, size)
 		if errors.Is(err, repository.ErrDailyUploadLimitExceeded) {
@@ -76,8 +73,8 @@ func (s *Service) releaseUserUploadQuota(userID string, day string, size int64) 
 	if day == "" || size <= 0 {
 		return
 	}
-	s.storageMu.Lock()
-	defer s.storageMu.Unlock()
+	unlockStorage := s.lockUserStorage(userID)
+	defer unlockStorage()
 	s.decreasePendingStorage(userID, size)
 	if err := s.repo.ReleaseDailyUpload(userID, day, size); err != nil {
 		log.Printf("release upload quota failed: user=%s day=%s size=%d error=%v", userID, day, size, err)
@@ -88,16 +85,30 @@ func (s *Service) commitUserUploadQuota(userID string, size int64) {
 	if size <= 0 {
 		return
 	}
-	s.storageMu.Lock()
-	defer s.storageMu.Unlock()
+	unlockStorage := s.lockUserStorage(userID)
+	defer unlockStorage()
 	s.decreasePendingStorage(userID, size)
 }
 
-func (s *Service) decreasePendingStorage(userID string, size int64) {
-	remaining := s.pendingStorage[userID] - size
-	if remaining > 0 {
-		s.pendingStorage[userID] = remaining
-		return
+// 崩溃恢复的 pending 资源已经计入当日上传量，只重新占用并发中的账号存储预留，避免重复累计日额度。
+func (s *Service) reserveRecoveredGeneratedResourceStorage(userID string, size int64) error {
+	policy, err := s.RuntimePolicy()
+	if err != nil {
+		return err
 	}
-	delete(s.pendingStorage, userID)
+	if size <= 0 || size > megabytes(policy.Resource.GeneratedFileMB) {
+		return BadAuthRequest(fmt.Sprintf("单个生成文件不能超过 %dMB", policy.Resource.GeneratedFileMB))
+	}
+	unlockStorage := s.lockUserStorage(userID)
+	defer unlockStorage()
+	storedBytes, err := s.repo.UserStoredFileBytes(userID)
+	if err != nil {
+		return err
+	}
+	storedLimit := gigabytes(policy.Resource.StoredFileGB)
+	if storedBytes+s.pendingStorageBytes(userID)+size >= storedLimit {
+		return BadAuthRequest(fmt.Sprintf("账号资源和会话附件已达到 %s 上限，请联系管理员清理历史文件", formatStorageLimit(storedLimit)))
+	}
+	s.addPendingStorage(userID, size)
+	return nil
 }

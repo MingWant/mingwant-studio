@@ -7,6 +7,7 @@ import (
 )
 
 type TaskStatus string
+type TaskProviderCallState string
 type SessionStatus string
 type UserRole string
 type UserStatus string
@@ -40,11 +41,16 @@ type AdminAuditEvent struct {
 }
 
 const (
-	TaskStatusQueued    TaskStatus = "queued"
-	TaskStatusRunning   TaskStatus = "running"
-	TaskStatusSucceeded TaskStatus = "succeeded"
-	TaskStatusFailed    TaskStatus = "failed"
-	TaskStatusCancelled TaskStatus = "cancelled"
+	TaskStatusQueued           TaskStatus            = "queued"
+	TaskStatusRunning          TaskStatus            = "running"
+	TaskStatusSucceeded        TaskStatus            = "succeeded"
+	TaskStatusFailed           TaskStatus            = "failed"
+	TaskStatusCancelled        TaskStatus            = "cancelled"
+	TaskProviderCallPending    TaskProviderCallState = "pending"
+	TaskProviderCallPreflight  TaskProviderCallState = "preflight"
+	TaskProviderCallDispatched TaskProviderCallState = "dispatched"
+	// prepared 是旧版只到“调用前检查完成”的模糊状态，不能作为尚未发送请求的证明。
+	TaskProviderCallPrepared TaskProviderCallState = "prepared"
 
 	SessionStatusActive    SessionStatus = "active"
 	SessionStatusCompleted SessionStatus = "completed"
@@ -61,11 +67,14 @@ const (
 
 	ChannelInterfaceChatCompletion ChannelInterfaceType = "chat-completion"
 	ChannelInterfaceOpenAIResponse ChannelInterfaceType = "openai-response"
+	ChannelInterfaceGeminiContent  ChannelInterfaceType = "gemini-content"
 	ChannelInterfaceOpenAIImage    ChannelInterfaceType = "openai-image"
+	ChannelInterfaceOpenAIAudio    ChannelInterfaceType = "openai-audio"
 	ChannelInterfaceNewAPIVideo    ChannelInterfaceType = "newapi"
 	ChannelInterfaceNewAPIChannel1 ChannelInterfaceType = "newapi-channel-1"
 	ChannelInterfaceNewAPIChannel2 ChannelInterfaceType = "newapi-channel-2"
 	ChannelInterfaceXAIVideo       ChannelInterfaceType = "xai-video"
+	ChannelInterfaceGeminiVeo      ChannelInterfaceType = "gemini-veo"
 
 	ApiCallStatusSucceeded ApiCallStatus = "succeeded"
 	ApiCallStatusFailed    ApiCallStatus = "failed"
@@ -190,7 +199,9 @@ type EmailVerificationCode struct {
 	Email     string     `json:"email" gorm:"index;size:160"`
 	CodeHash  string     `json:"-" gorm:"size:64"`
 	Purpose   string     `json:"purpose" gorm:"index;size:32"`
+	Attempts  int        `json:"attempts"`
 	ExpiresAt time.Time  `json:"expiresAt" gorm:"index"`
+	SentAt    *time.Time `json:"sentAt" gorm:"index"`
 	UsedAt    *time.Time `json:"usedAt" gorm:"index"`
 	CreatedAt time.Time  `json:"createdAt" gorm:"index"`
 }
@@ -213,19 +224,32 @@ type ModelChannel struct {
 }
 
 type ChannelModel struct {
-	ID                    string         `json:"id" gorm:"primaryKey;size:36"`
-	ChannelID             string         `json:"channelId" gorm:"size:36;index;uniqueIndex:idx_channel_model_key_active,priority:1,where:deleted_at IS NULL"`
-	ModelKey              string         `json:"modelKey" gorm:"size:120;uniqueIndex:idx_channel_model_key_active,priority:2,where:deleted_at IS NULL"`
-	DisplayName           string         `json:"displayName" gorm:"size:160"`
-	Capability            string         `json:"capability" gorm:"size:32;index"`
-	BillingMode           string         `json:"billingMode" gorm:"size:32"`
-	UnitPriceMicrocredits int64          `json:"unitPriceMicrocredits"`
-	PriceConfigured       bool           `json:"priceConfigured" gorm:"index"`
-	Enabled               bool           `json:"enabled" gorm:"index"`
-	PriceVersion          int64          `json:"priceVersion"`
-	CreatedAt             time.Time      `json:"createdAt"`
-	UpdatedAt             time.Time      `json:"updatedAt"`
-	DeletedAt             gorm.DeletedAt `json:"-" gorm:"index"`
+	ID                    string               `json:"id" gorm:"primaryKey;size:36"`
+	ChannelID             string               `json:"channelId" gorm:"size:36;index;uniqueIndex:idx_channel_model_key_active,priority:1,where:deleted_at IS NULL"`
+	ModelKey              string               `json:"modelKey" gorm:"size:120;uniqueIndex:idx_channel_model_key_active,priority:2,where:deleted_at IS NULL"`
+	DisplayName           string               `json:"displayName" gorm:"size:160"`
+	Capability            string               `json:"capability" gorm:"size:32;index"`
+	Protocol              ChannelInterfaceType `json:"protocol" gorm:"size:32;index"`
+	BillingMode           string               `json:"billingMode" gorm:"size:32"`
+	UnitPriceMicrocredits int64                `json:"unitPriceMicrocredits"`
+	PriceConfigured       bool                 `json:"priceConfigured" gorm:"index"`
+	Enabled               bool                 `json:"enabled" gorm:"index"`
+	PriceVersion          int64                `json:"priceVersion"`
+	CapabilityConfigJSON  string               `json:"-" gorm:"type:text"`
+	CapabilityVersion     int64                `json:"capabilityVersion"`
+	CapabilityConfig      map[string]any       `json:"capabilityConfig,omitempty" gorm:"-"`
+	ProbeStatus           string               `json:"probeStatus,omitempty" gorm:"size:24;index"`
+	ProbeTransport        string               `json:"probeTransport,omitempty" gorm:"size:40"`
+	ProbeDurationMs       int64                `json:"probeDurationMs,omitempty"`
+	ProbeCheckedAt        *time.Time           `json:"probeCheckedAt,omitempty" gorm:"index"`
+	ProbeConfigHash       string               `json:"-" gorm:"size:64"`
+	ToolProbeStatus       string               `json:"toolProbeStatus,omitempty" gorm:"size:24;index"`
+	ToolProbeCheckedAt    *time.Time           `json:"toolProbeCheckedAt,omitempty" gorm:"index"`
+	ToolProbeVerifierVersion string            `json:"toolProbeVerifierVersion,omitempty" gorm:"size:40"`
+	ToolProbeConfigHash   string               `json:"-" gorm:"size:64"`
+	CreatedAt             time.Time            `json:"createdAt"`
+	UpdatedAt             time.Time            `json:"updatedAt"`
+	DeletedAt             gorm.DeletedAt       `json:"-" gorm:"index"`
 }
 
 type ApiCallLog struct {
@@ -233,10 +257,10 @@ type ApiCallLog struct {
 	UserID              string        `json:"userId" gorm:"index;size:36;index:idx_api_logs_user_created,priority:1"`
 	ChannelID           string        `json:"channelId" gorm:"index;size:36;index:idx_api_logs_channel_created,priority:1"`
 	ChannelName         string        `json:"channelName" gorm:"-"`
-	TaskID              string        `json:"taskId,omitempty" gorm:"index;size:36"`
+	TaskID              string        `json:"taskId,omitempty" gorm:"index;size:36;index:idx_api_logs_task_created,priority:1"`
 	BillingOrderID      string        `json:"billingOrderId,omitempty" gorm:"index;size:36"`
 	Source              string        `json:"source" gorm:"index;size:64"`
-	Capability          string        `json:"capability" gorm:"index;size:32"`
+	Capability          string        `json:"capability" gorm:"index;size:32;index:idx_api_logs_capability_created,priority:1"`
 	Operation           string        `json:"operation" gorm:"size:64"`
 	RequestKind         string        `json:"requestKind" gorm:"index;size:24"`
 	Billable            bool          `json:"billable" gorm:"index"`
@@ -261,7 +285,7 @@ type ApiCallLog struct {
 	Error               string        `json:"error"`
 	ConcurrencyLimit    int           `json:"concurrencyLimit"`
 	UpstreamURL         string        `json:"upstreamUrl"`
-	CreatedAt           time.Time     `json:"createdAt" gorm:"index;index:idx_api_logs_user_created,priority:2;index:idx_api_logs_channel_created,priority:2;index:idx_api_logs_model_created,priority:2;index:idx_api_logs_status_created,priority:2"`
+	CreatedAt           time.Time     `json:"createdAt" gorm:"index;index:idx_api_logs_user_created,priority:2;index:idx_api_logs_channel_created,priority:2;index:idx_api_logs_task_created,priority:2;index:idx_api_logs_capability_created,priority:2;index:idx_api_logs_model_created,priority:2;index:idx_api_logs_status_created,priority:2"`
 }
 
 type CreditAccount struct {
@@ -420,13 +444,18 @@ type UserSkillState struct {
 }
 
 type Resource struct {
-	ID       string         `json:"id" gorm:"primaryKey;size:36"`
-	UserID   string         `json:"userId" gorm:"index;size:36;index:idx_resources_user_created,priority:1"`
-	Kind     string         `json:"kind" gorm:"index;size:24"`
-	Status   ResourceStatus `json:"status" gorm:"index;size:24"`
-	Provider string         `json:"provider" gorm:"size:24"`
-	Endpoint string         `json:"endpoint"`
-	Bucket   string         `json:"bucket" gorm:"size:160"`
+	ID            string         `json:"id" gorm:"primaryKey;size:36"`
+	UserID        string         `json:"userId" gorm:"index;size:36;index:idx_resources_user_created,priority:1"`
+	Kind          string         `json:"kind" gorm:"index;size:24"`
+	Status        ResourceStatus `json:"status" gorm:"index;size:24"`
+	Provider      string         `json:"provider" gorm:"size:24"`
+	Endpoint      string         `json:"endpoint"`
+	Bucket        string         `json:"bucket" gorm:"size:160"`
+	SourceTaskID  string         `json:"-" gorm:"index;size:36"`
+	SourceAttempt string         `json:"-" gorm:"size:80"`
+	SourcePath    string         `json:"-" gorm:"size:500"`
+	ContentSHA256 string         `json:"-" gorm:"size:64"`
+	QuotaDay      string         `json:"-" gorm:"size:10"`
 	// 用户 OSS 每次修改都会生成新版本，资源固定引用创建时的版本，避免历史资源因换密钥失效。
 	StorageSettingID string    `json:"-" gorm:"index;size:36"`
 	ObjectKey        string    `json:"objectKey" gorm:"index"`
@@ -516,12 +545,12 @@ type VoiceProfile struct {
 }
 
 type CharacterVoiceBinding struct {
-	ID               string    `json:"id" gorm:"primaryKey;size:36"`
-	AssetVersionID   string    `json:"assetVersionId" gorm:"uniqueIndex;size:36"`
-	VoiceProfileID   string    `json:"voiceProfileId" gorm:"index;size:36"`
-	Instructions     string    `json:"instructions" gorm:"type:text"`
-	CreatedAt        time.Time `json:"createdAt"`
-	UpdatedAt        time.Time `json:"updatedAt"`
+	ID             string    `json:"id" gorm:"primaryKey;size:36"`
+	AssetVersionID string    `json:"assetVersionId" gorm:"uniqueIndex;size:36"`
+	VoiceProfileID string    `json:"voiceProfileId" gorm:"index;size:36"`
+	Instructions   string    `json:"instructions" gorm:"type:text"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 // Project 是短剧领域聚合根；CanvasProject 仍代表可独立创作的画布文档。
@@ -563,16 +592,18 @@ type CanvasUnitLink struct {
 }
 
 type Shot struct {
-	ID          string    `json:"id" gorm:"primaryKey;size:36"`
-	ProjectID   string    `json:"projectId" gorm:"index;size:36"`
-	UnitID      string    `json:"unitId" gorm:"index;size:36"`
-	Title       string    `json:"title" gorm:"size:240"`
-	Description string    `json:"description" gorm:"type:text"`
-	Position    int       `json:"position"`
-	DurationMs  int64     `json:"durationMs"`
-	Status      string    `json:"status" gorm:"index;size:24"`
-	CreatedAt   time.Time `json:"createdAt"`
-	UpdatedAt   time.Time `json:"updatedAt"`
+	ID          string `json:"id" gorm:"primaryKey;size:36"`
+	ProjectID   string `json:"projectId" gorm:"index;size:36"`
+	UnitID      string `json:"unitId" gorm:"index;size:36"`
+	Title       string `json:"title" gorm:"size:240"`
+	Description string `json:"description" gorm:"type:text"`
+	// DefinitionJSON 保存镜头来源、资产版本与起止边界；展示字段不能反向覆盖这些制作事实。
+	DefinitionJSON string    `json:"definitionJson" gorm:"type:text"`
+	Position       int       `json:"position"`
+	DurationMs     int64     `json:"durationMs"`
+	Status         string    `json:"status" gorm:"index;size:24"`
+	CreatedAt      time.Time `json:"createdAt"`
+	UpdatedAt      time.Time `json:"updatedAt"`
 }
 
 type ShotAssetReference struct {
@@ -680,39 +711,56 @@ type UserAnnouncementRead struct {
 	ReadAt         time.Time `json:"readAt"`
 }
 
+// ChannelProbeSubmission 把每个浏览器提交键永久绑定到实际接管的探针任务，避免接管响应丢失后重复调用供应商。
+type ChannelProbeSubmission struct {
+	ID               string    `json:"-" gorm:"primaryKey;size:36"`
+	UserID           string    `json:"-" gorm:"index;size:36;uniqueIndex:idx_channel_probe_submission,priority:1"`
+	SubmissionKey    string    `json:"-" gorm:"size:64;uniqueIndex:idx_channel_probe_submission,priority:2"`
+	ConfigRequestKey string    `json:"-" gorm:"size:64"`
+	TaskID           string    `json:"-" gorm:"index;size:36"`
+	CreatedAt        time.Time `json:"-"`
+}
+
 type Task struct {
-	ID                string     `json:"id" gorm:"primaryKey;size:36"`
-	UserID            string     `json:"userId" gorm:"index;size:36;index:idx_tasks_user_created,priority:1"`
-	SessionID         string     `json:"sessionId" gorm:"index;size:36"`
-	ProjectID         string     `json:"projectId" gorm:"index;size:80"`
-	Type              string     `json:"type" gorm:"index;size:64"`
-	Status            TaskStatus `json:"status" gorm:"index;size:24;index:idx_tasks_status_created,priority:1;index:idx_tasks_claim,priority:1"`
-	Stage             string     `json:"stage" gorm:"size:80"`
-	Progress          int        `json:"progress"`
-	Prompt            string     `json:"prompt"`
-	Operation         string     `json:"operation" gorm:"size:64"`
-	Provider          string     `json:"provider" gorm:"size:64"`
-	Model             string     `json:"model" gorm:"size:120"`
-	BillingOrderID    string     `json:"billingOrderId,omitempty" gorm:"index;size:36"`
-	ProviderRequestID string     `json:"providerRequestId,omitempty" gorm:"index;size:160"`
-	PollStage         string     `json:"pollStage,omitempty" gorm:"size:32"`
-	NextPollAt        *time.Time `json:"nextPollAt,omitempty" gorm:"index"`
-	LeaseOwner        string     `json:"-" gorm:"index;size:120"`
-	LeaseExpiresAt    *time.Time `json:"-" gorm:"index;index:idx_tasks_claim,priority:2"`
-	InputJSON         string     `json:"inputJson" gorm:"type:text"`
-	ResultJSON        string     `json:"resultJson" gorm:"type:text"`
-	Error             string     `json:"error"`
-	Attempts          int        `json:"attempts"`
-	StartedAt         *time.Time `json:"startedAt"`
-	CompletedAt       *time.Time `json:"completedAt"`
-	CreatedAt         time.Time  `json:"createdAt" gorm:"index:idx_tasks_user_created,priority:2;index:idx_tasks_status_created,priority:2;index:idx_tasks_claim,priority:3"`
-	UpdatedAt         time.Time  `json:"updatedAt"`
+	ID                  string                `json:"id" gorm:"primaryKey;size:36"`
+	UserID              string                `json:"userId" gorm:"index;size:36;index:idx_tasks_user_created,priority:1"`
+	SessionID           string                `json:"sessionId" gorm:"index;size:36"`
+	ProjectID           string                `json:"projectId" gorm:"index;size:80"`
+	Type                string                `json:"type" gorm:"index;size:64"`
+	Status              TaskStatus            `json:"status" gorm:"index;size:24;index:idx_tasks_status_created,priority:1;index:idx_tasks_claim,priority:1;index:idx_tasks_status_next_poll,priority:1"`
+	Stage               string                `json:"stage" gorm:"size:80"`
+	Progress            int                   `json:"progress"`
+	Prompt              string                `json:"prompt"`
+	Operation           string                `json:"operation" gorm:"size:64"`
+	Provider            string                `json:"provider" gorm:"size:64"`
+	Model               string                `json:"model" gorm:"size:120"`
+	RequestKey          string                `json:"-" gorm:"index;size:64"`
+	ProbeRequestKey     string                `json:"-" gorm:"size:64"`
+	BillingOrderID      string                `json:"billingOrderId,omitempty" gorm:"index;size:36"`
+	ProviderRequestID   string                `json:"providerRequestId,omitempty" gorm:"index;size:160"`
+	PollStage           string                `json:"pollStage,omitempty" gorm:"size:32"`
+	NextPollAt          *time.Time            `json:"nextPollAt,omitempty" gorm:"index;index:idx_tasks_status_next_poll,priority:2"`
+	LeaseOwner          string                `json:"-" gorm:"index;size:120"`
+	LeaseExpiresAt      *time.Time            `json:"-" gorm:"index;index:idx_tasks_claim,priority:2"`
+	LeaseRecovered      bool                  `json:"-" gorm:"-"`
+	DeliveryRecoverable bool                  `json:"deliveryRecoverable,omitempty" gorm:"-"`
+	ProviderCallState   TaskProviderCallState `json:"-" gorm:"size:24"`
+	InputJSON           string                `json:"inputJson" gorm:"type:text"`
+	ResultJSON          string                `json:"resultJson" gorm:"type:text"`
+	DeliveryOpsJSON     string                `json:"-" gorm:"type:text"`
+	Error               string                `json:"error"`
+	Attempts            int                   `json:"attempts"`
+	StartedAt           *time.Time            `json:"startedAt"`
+	CompletedAt         *time.Time            `json:"completedAt"`
+	CreatedAt           time.Time             `json:"createdAt" gorm:"index:idx_tasks_user_created,priority:2;index:idx_tasks_status_created,priority:2;index:idx_tasks_claim,priority:3"`
+	UpdatedAt           time.Time             `json:"updatedAt"`
 }
 
 type Session struct {
 	ID                 string        `json:"id" gorm:"primaryKey;size:36"`
 	UserID             string        `json:"userId" gorm:"index;size:36"`
 	ProjectID          string        `json:"projectId" gorm:"index;size:80"`
+	RequestKey         string        `json:"-" gorm:"index;size:64"`
 	Status             SessionStatus `json:"status" gorm:"index;size:24"`
 	Prompt             string        `json:"prompt"`
 	CanvasSnapshotJSON string        `json:"canvasSnapshotJson" gorm:"type:text"`

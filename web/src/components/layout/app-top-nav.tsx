@@ -12,14 +12,18 @@ export function AppWorkspaceShell({ children }: { children: ReactNode }) {
     const { pathname } = useLocation();
     const navigate = useNavigate();
     const [mobileSidebarExpanded, setMobileSidebarExpanded] = useState(false);
-    const [sidebarCollapsed, setSidebarCollapsed] = useState(() => window.localStorage.getItem(WORKSPACE_SIDEBAR_STORAGE_KEY) === "1");
+    const [sidebarCollapsed, setSidebarCollapsed] = useState(() => readSidebarCollapsed());
     const hideChrome = pathname.startsWith("/admin") || /^\/canvas\/[^/]+/.test(pathname);
     const compactSidebar = sidebarCollapsed;
     const slug = pathname.split("/").filter(Boolean)[0];
     const activeToolSlug = navigationTools.some((tool) => tool.slug === slug) ? (slug as NavigationToolSlug) : undefined;
 
     useEffect(() => {
-        window.localStorage.setItem(WORKSPACE_SIDEBAR_STORAGE_KEY, sidebarCollapsed ? "1" : "0");
+        try {
+            window.localStorage.setItem(WORKSPACE_SIDEBAR_STORAGE_KEY, sidebarCollapsed ? "1" : "0");
+        } catch {
+            // 侧栏折叠只是界面偏好；浏览器禁止存储时保留当前会话状态，不阻断工作台渲染。
+        }
     }, [sidebarCollapsed]);
 
     useEffect(() => {
@@ -111,4 +115,14 @@ export function AppWorkspaceShell({ children }: { children: ReactNode }) {
             <ModelSetupGuide hidden={pathname === "/login" || pathname === "/register" || pathname.startsWith("/admin")} />
         </>
     );
+}
+
+function readSidebarCollapsed() {
+    if (typeof window === "undefined") return false;
+    try {
+        return window.localStorage.getItem(WORKSPACE_SIDEBAR_STORAGE_KEY) === "1";
+    } catch {
+        // 隐私模式或扩展拦截存储时使用展开状态，避免布局在初始化阶段抛错。
+        return false;
+    }
 }

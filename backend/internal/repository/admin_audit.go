@@ -27,10 +27,42 @@ func (r *Repository) AppendAdminAudit(event *model.AdminAuditEvent) error {
 	return r.db.Create(event).Error
 }
 
+func (r *Repository) UserForUpdate(id string) (*model.User, error) {
+	var user model.User
+	if err := r.db.Clauses(clause.Locking{Strength: "UPDATE"}).First(&user, "id = ?", id).Error; err != nil {
+		return nil, err
+	}
+	return &user, nil
+}
+
+// ActiveAdminIDsForUpdate 让所有可能减少可用管理员数量的事务按同一顺序串行，避免并发操作各自误以为仍有另一位管理员。
+func (r *Repository) ActiveAdminIDsForUpdate() ([]string, error) {
+	var users []model.User
+	err := r.db.Model(&model.User{}).
+		Clauses(clause.Locking{Strength: "UPDATE"}).
+		Select("id").
+		Where("role = ? AND status = ?", model.UserRoleAdmin, model.UserStatusActive).
+		Order("id asc").
+		Find(&users).Error
+	if err != nil {
+		return nil, err
+	}
+	ids := make([]string, 0, len(users))
+	for _, user := range users {
+		ids = append(ids, user.ID)
+	}
+	return ids, nil
+}
+
 // BulkDisableUsers 把管理员保留校验、会话清理、状态更新和审计写入放在同一事务中，避免部分停用。
 func (r *Repository) BulkDisableUsers(actorID string, userIDs []string, events []model.AdminAuditEvent, now time.Time) ([]model.User, error) {
 	var users []model.User
 	err := r.db.Transaction(func(tx *gorm.DB) error {
+		txRepo := New(tx)
+		activeAdminIDs, err := txRepo.ActiveAdminIDsForUpdate()
+		if err != nil {
+			return err
+		}
 		query := tx.Where("id IN ?", userIDs)
 		if r.Dialect() == "postgres" {
 			query = query.Clauses(clause.Locking{Strength: "UPDATE"})
@@ -46,11 +78,15 @@ func (r *Repository) BulkDisableUsers(actorID string, userIDs []string, events [
 				return ErrBulkCurrentAdmin
 			}
 		}
-		var remainingAdmins int64
-		if err := tx.Model(&model.User{}).
-			Where("role = ? AND status = ? AND id NOT IN ?", model.UserRoleAdmin, model.UserStatusActive, userIDs).
-			Count(&remainingAdmins).Error; err != nil {
-			return err
+		disabledIDs := make(map[string]struct{}, len(userIDs))
+		for _, userID := range userIDs {
+			disabledIDs[userID] = struct{}{}
+		}
+		remainingAdmins := 0
+		for _, adminID := range activeAdminIDs {
+			if _, disabled := disabledIDs[adminID]; !disabled {
+				remainingAdmins++
+			}
 		}
 		if remainingAdmins == 0 {
 			return ErrBulkLastActiveAdmin

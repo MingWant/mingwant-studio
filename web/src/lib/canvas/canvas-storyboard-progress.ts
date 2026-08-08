@@ -24,6 +24,7 @@ export type CanvasStoryboardPipelineProgress = {
     rows: StoryboardPipelineRow[];
     images: StoryboardPipelineStage;
     videos: StoryboardPipelineStage;
+    videoPrompts: StoryboardPipelineStage;
     final: StoryboardPipelineStage;
     successfulVideoNodeIds: string[];
     finalNodeIds: string[];
@@ -54,9 +55,24 @@ export function deriveStoryboardPipelineProgress(scriptNode: CanvasNodeData, nod
         rows: pipelineRows,
         images: summarizeStage(pipelineRows.map((item) => ({ state: item.imageState, node: item.imageNode })), rows.length),
         videos: summarizeStage(pipelineRows.map((item) => ({ state: item.videoState, node: item.videoNode })), rows.length),
+        videoPrompts: summarizePromptStage(rows),
         final: summarizeFinalStage(linkedFinalNodes, rows.length > 0 || linkedFinalNodes.length > 0),
         successfulVideoNodeIds,
         finalNodeIds: linkedFinalNodes.map((node) => node.id),
+    };
+}
+
+function summarizePromptStage(rows: StoryboardRow[]): StoryboardPipelineStage {
+    // 手动交付模式不创建视频任务；提示词本身是“已准备”的事实，不能借视频节点数量冒充进度。
+    const ready = rows.filter((row) => Boolean((row.videoMotionPrompt || "").trim())).length;
+    return {
+        total: rows.length,
+        created: ready,
+        success: ready,
+        failed: 0,
+        loading: 0,
+        incomplete: Math.max(0, rows.length - ready),
+        nodeIds: [],
     };
 }
 

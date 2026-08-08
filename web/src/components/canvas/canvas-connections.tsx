@@ -69,9 +69,9 @@ export const ConnectionPath = React.memo(function ConnectionPath({
             <path
                 d={pathD}
                 stroke={emphasized ? theme.accent.primary : theme.node.muted}
-                strokeWidth={emphasized ? 1.6 : 1}
+                strokeWidth={emphasized ? 1.6 : 1.2}
                 vectorEffect="non-scaling-stroke"
-                strokeOpacity={emphasized ? 0.52 : 0.24}
+                strokeOpacity={emphasized ? 0.58 : 0.34}
                 fill="none"
                 strokeLinecap="round"
                 style={{ pointerEvents: "none" }}

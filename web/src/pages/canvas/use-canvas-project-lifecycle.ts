@@ -167,7 +167,7 @@ export function useCanvasProjectLifecycle({
 
     const createAndOpenProject = useCallback(() => {
         void createCanvasProjectWithRemoteSync(`自由画布 ${useCanvasStore.getState().projects.length + 1}`).then(({ id, syncError }) => {
-            if (syncError) message.warning(syncError instanceof Error ? `画布已在本地创建，云端同步失败：${syncError.message}` : "画布已在本地创建，云端同步失败");
+            if (syncError) message.warning("画布已在本地创建，云端同步失败，请稍后从分享或保存入口重试");
             navigate(`/canvas/${id}`);
         });
     }, [message, navigate]);
@@ -207,9 +207,8 @@ export function useCanvasProjectLifecycle({
         try {
             await saveRemoteUserDataNow();
             message.success("画布布局和位置已保存");
-        } catch (error) {
-            const detail = error instanceof Error ? error.message : "未知错误";
-            message.warning(`本地画布布局已保存，云端同步失败：${detail}`);
+        } catch {
+            message.warning("本地画布布局已保存，云端同步失败，请稍后重试");
         }
     }, [activeChatId, backgroundMode, chatSessions, connectionsRef, currentProject?.directorScenes, message, nodesRef, projectId, showImageInfo, updateProject, viewportRef]);
 

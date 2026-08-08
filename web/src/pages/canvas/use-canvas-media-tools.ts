@@ -2,6 +2,7 @@ import { useCallback, useRef, useState, type Dispatch, type SetStateAction } fro
 import { App } from "antd";
 import { nanoid } from "nanoid";
 
+import type { CanvasImageAnnotationPayload } from "@/components/canvas/canvas-node-annotation-dialog";
 import type { CanvasImageCropRect } from "@/components/canvas/canvas-node-crop-dialog";
 import type { CanvasImageMaskEditPayload } from "@/components/canvas/canvas-node-mask-edit-dialog";
 import type { CanvasImageSplitParams } from "@/components/canvas/canvas-node-split-dialog";
@@ -26,7 +27,7 @@ import { mergeVideos, type MergeVideoProgress } from "@/lib/canvas/canvas-video-
 import { navigateToSettings } from "@/lib/settings-navigation";
 import { storeGeneratedVideo } from "@/services/api/video";
 import { getMediaBlob } from "@/services/file-storage";
-import { uploadImage } from "@/services/image-storage";
+import { imageToDataUrl, uploadImage } from "@/services/image-storage";
 import type { GenerationTask } from "@/services/api/task-center";
 import { defaultConfig, resolveModelRequestConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type ContextMenuState } from "@/types/canvas";
@@ -45,7 +46,8 @@ type UseCanvasMediaToolsOptions = {
     setContextMenu: Dispatch<SetStateAction<ContextMenuState | null>>;
     setHoveredNodeId: Dispatch<SetStateAction<string | null>>;
     setToolbarNodeId: Dispatch<SetStateAction<string | null>>;
-    setRunningNodeId: Dispatch<SetStateAction<string | null>>;
+    setRunningNode: (nodeId: string) => void;
+    clearRunningNode: (nodeId: string) => void;
     startUploadStatus: StartCanvasUploadStatus;
     startGenerationRequest: (targetNodeId: string, originNodeId: string, runningId?: string, controller?: AbortController) => AbortController;
     finishGenerationRequest: (targetNodeId: string, controller: AbortController) => void;
@@ -77,7 +79,8 @@ export function useCanvasMediaTools({
     setContextMenu,
     setHoveredNodeId,
     setToolbarNodeId,
-    setRunningNodeId,
+    setRunningNode,
+    clearRunningNode,
     startUploadStatus,
     startGenerationRequest,
     finishGenerationRequest,
@@ -142,18 +145,38 @@ export function useCanvasMediaTools({
         setCropNodeId(null);
     }, [setConnections, setDialogNodeId, setNodes, setSelectedNodeIds]);
 
-    const saveAnnotatedImageNode = useCallback(async (node: CanvasNodeData, dataUrl: string) => {
-        const image = await uploadImage(dataUrl);
-        const size = fitNodeSize(image.width, image.height, node.width, node.height);
-        const childId = nanoid();
-        const child: CanvasNodeData = { id: childId, type: CanvasNodeType.Image, title: `标注 · ${node.title || "图片"}`, position: { x: node.position.x + node.width + 96, y: node.position.y }, width: size.width, height: size.height, metadata: { ...imageMetadata(image), prompt: node.metadata?.prompt } };
-        setNodes((current) => [...current, child]);
-        setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
-        setSelectedNodeIds(new Set([childId]));
-        setSelectedConnectionId(null);
-        setDialogNodeId(null);
-        setAnnotationNodeId(null);
-        message.success("标注图片已保存为新节点");
+    const saveAnnotatedImageNode = useCallback(async (node: CanvasNodeData, payload: CanvasImageAnnotationPayload) => {
+        try {
+            const [image, mask] = await Promise.all([uploadImage(payload.markedDataUrl), uploadImage(payload.maskDataUrl)]);
+            const size = fitNodeSize(image.width, image.height, node.width, node.height);
+            const childId = nanoid();
+            const child: CanvasNodeData = {
+                id: childId,
+                type: CanvasNodeType.Image,
+                title: `标注 · ${payload.instruction.slice(0, 24)}`,
+                position: { x: node.position.x + node.width + 96, y: node.position.y },
+                width: size.width,
+                height: size.height,
+                metadata: {
+                    ...imageMetadata(image),
+                    prompt: node.metadata?.prompt,
+                    imageAnnotation: {
+                        sourceNodeId: node.id,
+                        instruction: payload.instruction,
+                        mask: { url: mask.url, storageKey: mask.storageKey },
+                    },
+                },
+            };
+            setNodes((current) => [...current, child]);
+            setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+            setSelectedNodeIds(new Set([childId]));
+            setSelectedConnectionId(null);
+            setDialogNodeId(null);
+            setAnnotationNodeId(null);
+            message.success("标注节点已保存，可交给 Canvas Agent 执行修改");
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "标注保存失败");
+        }
     }, [message, setConnections, setDialogNodeId, setNodes, setSelectedConnectionId, setSelectedNodeIds]);
 
     const extractVideoLastFrame = useCallback(async (node: CanvasNodeData) => {
@@ -320,17 +343,19 @@ export function useCanvasMediaTools({
         const childId = nanoid();
         const source = nodeReferenceImage(node);
         if (!source) return;
+        const annotationNode = payload.annotationNodeId ? nodesRef.current.find((item) => item.id === payload.annotationNodeId) : null;
+        const resultOrigin = annotationNode || node;
         const generationMetadata = buildImageGenerationMetadata("edit", generationConfig, 1, [source]);
         setMaskEditNodeId(null);
-        setRunningNodeId(childId);
-        setNodes((current) => [...current, { id: childId, type: CanvasNodeType.Image, title: userPrompt.slice(0, 32) || "局部编辑结果", position: { x: node.position.x + node.width + 96, y: node.position.y }, width: node.width, height: node.height, metadata: { prompt, status: NODE_STATUS_LOADING, ...generationMetadata } }]);
-        setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
+        setRunningNode(childId);
+        setNodes((current) => [...current, { id: childId, type: CanvasNodeType.Image, title: userPrompt.slice(0, 32) || "局部编辑结果", position: { x: resultOrigin.position.x + resultOrigin.width + 96, y: resultOrigin.position.y }, width: node.width, height: node.height, metadata: { prompt, status: NODE_STATUS_LOADING, ...generationMetadata, imageAnnotationResultOf: annotationNode?.id } }]);
+        setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }, ...(annotationNode ? [{ id: nanoid(), fromNodeId: annotationNode.id, toNodeId: childId }] : [])]);
         setSelectedNodeIds(new Set([childId]));
         setSelectedConnectionId(null);
         setDialogNodeId(childId);
         const controller = startGenerationRequest(childId, node.id, childId);
         try {
-            const result = await runBackendCanvasGenerationTask({ projectId, nodeId: childId, mode: "image", prompt, config: generationConfig, referenceImages: [source], mask: { id: `${node.id}-mask`, name: "mask.png", type: "image/png", dataUrl: payload.maskDataUrl }, signal: controller.signal, metadata: { sourceNodeId: node.id, edit: "mask" }, onTaskCreated: (task) => bindGenerationTask(childId, task) });
+            const result = await runBackendCanvasGenerationTask({ projectId, nodeId: childId, mode: "image", prompt, config: generationConfig, referenceImages: [source], mask: { id: `${node.id}-mask`, name: "mask.png", type: "image/png", dataUrl: payload.maskDataUrl }, signal: controller.signal, metadata: { sourceNodeId: node.id, edit: annotationNode ? "annotation" : "mask", annotationNodeId: annotationNode?.id }, onTaskCreated: (task) => bindGenerationTask(childId, task) });
             const image = result.images?.[0];
             if (!image?.dataUrl) throw new Error("后端任务没有返回图片");
             const uploaded = await uploadImage(image.dataUrl);
@@ -343,9 +368,34 @@ export function useCanvasMediaTools({
             setNodes((current) => current.map((item) => item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: details } } : item));
         } finally {
             finishGenerationRequest(childId, controller);
-            setRunningNodeId(null);
+        clearRunningNode(childId);
         }
-    }, [bindGenerationTask, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, projectId, setConnections, setDialogNodeId, setNodes, setRunningNodeId, setSelectedConnectionId, setSelectedNodeIds, startGenerationRequest]);
+    }, [bindGenerationTask, clearRunningNode, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, nodesRef, projectId, setConnections, setDialogNodeId, setNodes, setRunningNode, setSelectedConnectionId, setSelectedNodeIds, startGenerationRequest]);
+
+    const editAnnotatedImageNode = useCallback(async (annotationNodeId: string, promptOverride?: string) => {
+        const annotationNode = nodesRef.current.find((node) => node.id === annotationNodeId);
+        const annotation = annotationNode?.metadata?.imageAnnotation;
+        if (!annotationNode || annotationNode.type !== CanvasNodeType.Image || !annotation) {
+            message.error("没有找到可执行的图片标注节点");
+            return;
+        }
+        const sourceNode = nodesRef.current.find((node) => node.id === annotation.sourceNodeId);
+        if (!sourceNode || sourceNode.type !== CanvasNodeType.Image || !sourceNode.metadata?.content) {
+            message.error("标注对应的原图已不存在，无法执行修改");
+            return;
+        }
+        try {
+            const maskDataUrl = await imageToDataUrl(annotation.mask);
+            if (!maskDataUrl) throw new Error("标注遮罩读取失败");
+            await maskEditImageNode(sourceNode, {
+                prompt: promptOverride?.trim() || annotation.instruction,
+                maskDataUrl,
+                annotationNodeId,
+            });
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "标注修改启动失败");
+        }
+    }, [maskEditImageNode, message, nodesRef]);
 
     const upscaleImageNode = useCallback(async (node: CanvasNodeData, params: CanvasImageUpscaleParams) => {
         if (!node.metadata?.content) return;
@@ -376,7 +426,7 @@ export function useCanvasMediaTools({
         if (!source) return;
         const generationMetadata = buildImageGenerationMetadata("edit", generationConfig, 1, [source]);
         setAngleNodeId(null);
-        setRunningNodeId(childId);
+        setRunningNode(childId);
         setNodes((current) => [...current, { id: childId, type: CanvasNodeType.Image, title, position: { x: node.position.x + node.width + 96, y: node.position.y }, width: imageSpec.width, height: imageSpec.height, metadata: { prompt, status: NODE_STATUS_LOADING, ...generationMetadata } }]);
         setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
         setSelectedNodeIds(new Set([childId]));
@@ -395,9 +445,9 @@ export function useCanvasMediaTools({
             setNodes((current) => current.map((item) => item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: details } } : item));
         } finally {
             finishGenerationRequest(childId, controller);
-            setRunningNodeId(null);
+        clearRunningNode(childId);
         }
-    }, [bindGenerationTask, effectiveConfig, finishGenerationRequest, isAiConfigReady, projectId, setConnections, setDialogNodeId, setNodes, setRunningNodeId, setSelectedNodeIds, startGenerationRequest]);
+    }, [bindGenerationTask, clearRunningNode, effectiveConfig, finishGenerationRequest, isAiConfigReady, projectId, setConnections, setDialogNodeId, setNodes, setRunningNode, setSelectedNodeIds, startGenerationRequest]);
 
     const generateEmotionNode = useCallback(async (node: CanvasNodeData, payload: CanvasImageEmotionPayload) => {
         if (!node.metadata?.content) return;
@@ -427,7 +477,7 @@ export function useCanvasMediaTools({
         const generationMetadata = { ...buildImageGenerationMetadata("edit", generationConfig, 1, [source]), size: `${payload.imageWidth}x${payload.imageHeight}` };
         const emotionEdit = { sourceNodeId: node.id, characterName: payload.characterName, presetId: payload.presetId, intimacy: payload.intimacy, arousal: payload.arousal, label: payload.label, faceBox: payload.faceBox, editRegion: payload.editRegion, sourceWidth: payload.imageWidth, sourceHeight: payload.imageHeight, providerSize };
         setEmotionNodeId(null);
-        setRunningNodeId(childId);
+        setRunningNode(childId);
         setNodes((current) => [...current, { id: childId, type: CanvasNodeType.Image, title: `${payload.characterName} · ${payload.label}`, position: { x: node.position.x + node.width + 96, y: node.position.y }, width: node.width, height: node.height, metadata: { prompt: payload.prompt, status: NODE_STATUS_LOADING, ...generationMetadata, emotionEdit } }]);
         setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
         setSelectedNodeIds(new Set([childId]));
@@ -447,8 +497,8 @@ export function useCanvasMediaTools({
             const details = error instanceof Error ? error.message : "表情生成失败";
             message.error(details);
             setNodes((current) => current.map((item) => item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: details } } : item));
-        } finally { finishGenerationRequest(childId, controller); setRunningNodeId(null); }
-    }, [bindGenerationTask, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, projectId, setConnections, setDialogNodeId, setNodes, setRunningNodeId, setSelectedConnectionId, setSelectedNodeIds, startGenerationRequest]);
+        } finally { finishGenerationRequest(childId, controller); clearRunningNode(childId); }
+    }, [bindGenerationTask, clearRunningNode, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, projectId, setConnections, setDialogNodeId, setNodes, setRunningNode, setSelectedConnectionId, setSelectedNodeIds, startGenerationRequest]);
 
     return {
         angleNodeId,
@@ -457,6 +507,7 @@ export function useCanvasMediaTools({
         createImageReversePromptNodes,
         cropImageNode,
         cropNodeId,
+        editAnnotatedImageNode,
         extractVideoLastFrame,
         extractingVideoFrameNodeId,
         generateAngleNode,

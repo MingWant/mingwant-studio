@@ -25,7 +25,7 @@ export function startHttpServer() {
     app.get("/health", (_req, res) => res.json(session.health()));
     app.get("/config", (_req, res) => res.json({ ok: true, url: config.url, hasToken: true }));
     app.use((req, res, next) => {
-        if (validToken(req, requestUrl(req, config), config.token)) return next();
+        if (validToken(req, config.token)) return next();
         res.status(401).json({ ok: false, error: "invalid token" });
     });
     app.get("/events", (req, res) => session.openEvents(requestUrl(req, config), res));
@@ -127,7 +127,7 @@ function setCors(req: Request, res: Response, url: URL, config: CanvasAgentConfi
     res.setHeader("Access-Control-Allow-Private-Network", "true");
     if (!origin || req.method === "OPTIONS" || url.pathname === "/health" || url.pathname === "/config") return true;
     config.origins ||= [];
-    if (validToken(req, url, config.token) && !config.origins.includes(origin)) {
+    if (validToken(req, config.token) && !config.origins.includes(origin)) {
         config.origins.push(origin);
         saveConfig(config);
     }
@@ -135,7 +135,7 @@ function setCors(req: Request, res: Response, url: URL, config: CanvasAgentConfi
     return config.origins.includes(origin);
 }
 
-function validToken(req: Request, url: URL, token: string) {
+function validToken(req: Request, token: string) {
     const header = req.headers["x-canvas-agent-token"];
-    return url.searchParams.get("token") === token || header === token || (Array.isArray(header) && header.includes(token));
+    return header === token || (Array.isArray(header) && header.includes(token));
 }

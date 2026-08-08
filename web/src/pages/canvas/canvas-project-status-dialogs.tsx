@@ -10,8 +10,6 @@ type CanvasProjectStatusDialogsProps = {
     taskLogs: TaskLog[];
     taskLoading: boolean;
     onCloseTask: () => void;
-    superResolveNode: CanvasNodeData | null;
-    onCloseSuperResolve: () => void;
     previewNode: CanvasNodeData | null;
     onClosePreview: () => void;
     clearConfirmOpen: boolean;
@@ -19,7 +17,7 @@ type CanvasProjectStatusDialogsProps = {
     onConfirmClear: () => void;
 };
 
-export function CanvasProjectStatusDialogs({ theme, task, taskLogs, taskLoading, superResolveNode, previewNode, clearConfirmOpen, onCloseTask, onCloseSuperResolve, onClosePreview, onCancelClear, onConfirmClear }: CanvasProjectStatusDialogsProps) {
+export function CanvasProjectStatusDialogs({ theme, task, taskLogs, taskLoading, previewNode, clearConfirmOpen, onCloseTask, onClosePreview, onCancelClear, onConfirmClear }: CanvasProjectStatusDialogsProps) {
     return (
         <>
             <Modal title="任务详情" open={Boolean(task)} footer={null} width={760} onCancel={onCloseTask}>
@@ -41,10 +39,6 @@ export function CanvasProjectStatusDialogs({ theme, task, taskLogs, taskLoading,
                         </div>
                     </div>
                 ) : null}
-            </Modal>
-
-            <Modal title="AI 超分" open={Boolean(superResolveNode?.metadata?.content)} centered footer={null} onCancel={onCloseSuperResolve}>
-                <div className="py-8 text-center text-base font-medium">暂未实现</div>
             </Modal>
 
             <Modal title="视频预览" open={Boolean(previewNode?.metadata?.content && previewNode.type === CanvasNodeType.Video)} centered onCancel={onClosePreview} footer={null} width="min(1200px, calc(100vw - 32px))" styles={{ body: { padding: 0, display: "flex", justifyContent: "center", alignItems: "center", maxHeight: "84vh", overflow: "hidden", background: "#090909" } }}>

@@ -7,6 +7,7 @@ import (
 	"unicode/utf8"
 
 	"infinite-canvas/backend/internal/model"
+	"infinite-canvas/backend/internal/repository"
 
 	"gorm.io/gorm"
 )
@@ -72,7 +73,12 @@ func (s *Service) CreateAnnouncement(actor *model.User, req CreateAnnouncementRe
 		CreatedAt:   now,
 		UpdatedAt:   now,
 	}
-	if err := s.repo.Create(announcement); err != nil {
+	if err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		if err := txRepo.Create(announcement); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "announcement.create", "announcement", announcement.ID, "发布系统公告", map[string]any{"title": announcement.Title, "level": announcement.Level})
+	}); err != nil {
 		return nil, err
 	}
 	return announcement, nil
@@ -82,24 +88,36 @@ func (s *Service) CloseAnnouncement(actor *model.User, id string) (*model.Announ
 	if err := s.RequireAdmin(actor); err != nil {
 		return nil, err
 	}
-	announcement, err := s.repo.Announcement(strings.TrimSpace(id))
-	if err != nil {
-		if errors.Is(err, gorm.ErrRecordNotFound) {
-			return nil, BadAuthRequest("公告不存在")
+	id = strings.TrimSpace(id)
+	var closed *model.Announcement
+	err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		announcement, err := txRepo.Announcement(id)
+		if err != nil {
+			return err
 		}
-		return nil, err
+		if announcement.Status == model.AnnouncementStatusClosed {
+			return BadAuthRequest("公告已经关闭")
+		}
+		updated, err := txRepo.CloseAnnouncement(announcement.ID, time.Now())
+		if err != nil {
+			return err
+		}
+		if !updated {
+			return BadAuthRequest("公告状态已变化，请刷新后重试")
+		}
+		if err := appendAdminAuditWithRepository(txRepo, actor, "announcement.close", "announcement", announcement.ID, "关闭系统公告", map[string]any{"title": announcement.Title, "level": announcement.Level}); err != nil {
+			return err
+		}
+		closed, err = txRepo.Announcement(announcement.ID)
+		return err
+	})
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return nil, BadAuthRequest("公告不存在")
 	}
-	if announcement.Status == model.AnnouncementStatusClosed {
-		return nil, BadAuthRequest("公告已经关闭")
-	}
-	updated, err := s.repo.CloseAnnouncement(announcement.ID, time.Now())
 	if err != nil {
 		return nil, err
 	}
-	if !updated {
-		return nil, BadAuthRequest("公告状态已变化，请刷新后重试")
-	}
-	return s.repo.Announcement(announcement.ID)
+	return closed, nil
 }
 
 func (s *Service) UserAnnouncements(user *model.User) (*UserAnnouncementFeed, error) {

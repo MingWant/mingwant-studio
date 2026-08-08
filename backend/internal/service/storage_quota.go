@@ -75,9 +75,9 @@ func validateStructuredReplacementQuotaWithPolicy(usage repository.UserStorageUs
 }
 
 func (s *Service) createTaskWithinStorageQuota(task *model.Task, billingOrder *model.BillingOrder, policy RuntimePolicySetting) error {
-	s.storageMu.Lock()
-	defer s.storageMu.Unlock()
-	usage, err := s.repo.UserStorageUsage(task.UserID)
+	unlockStorage := s.lockUserStorage(task.UserID)
+	defer unlockStorage()
+	usage, err := s.repo.UserTaskStorageUsage(task.UserID)
 	if err != nil {
 		return err
 	}
@@ -91,21 +91,72 @@ func (s *Service) createTaskWithinStorageQuota(task *model.Task, billingOrder *m
 	return s.repo.CreateTaskWithActiveLimit(task, policy.Task.ActiveTaskLimit)
 }
 
+// 供应商媒体已经落盘后先保存任务结果引用，避免后续会话或画布事务失败时只能再次调用供应商。
+func (s *Service) checkpointTaskResultWithinStorageQuota(task *model.Task, resultJSON []byte, opsJSON []byte) error {
+	policy, err := s.RuntimePolicy()
+	if err != nil {
+		return err
+	}
+	unlockStorage := s.lockUserStorage(task.UserID)
+	defer unlockStorage()
+	usage, err := s.repo.UserTaskStorageUsage(task.UserID)
+	if err != nil {
+		return err
+	}
+	delta := int64(len(resultJSON) + len(opsJSON) - len(task.ResultJSON) - len(task.DeliveryOpsJSON))
+	if err := validateTaskDataGrowthQuotaWithPolicy(usage, delta, policy.Resource); err != nil {
+		return err
+	}
+	if err := s.repo.CheckpointClaimedTaskResult(task.ID, task.LeaseOwner, string(resultJSON), string(opsJSON), "持久化生成结果", 90); err != nil {
+		return err
+	}
+	task.ResultJSON = string(resultJSON)
+	task.DeliveryOpsJSON = string(opsJSON)
+	task.Stage = "持久化生成结果"
+	task.Progress = 90
+	return nil
+}
+
+func (s *Service) checkpointRecoveringTaskResultWithinStorageQuota(task *model.Task, resultJSON []byte, opsJSON []byte) error {
+	policy, err := s.RuntimePolicy()
+	if err != nil {
+		return err
+	}
+	unlockStorage := s.lockUserStorage(task.UserID)
+	defer unlockStorage()
+	usage, err := s.repo.UserTaskStorageUsage(task.UserID)
+	if err != nil {
+		return err
+	}
+	delta := int64(len(resultJSON) + len(opsJSON) - len(task.ResultJSON) - len(task.DeliveryOpsJSON))
+	if err := validateTaskDataGrowthQuotaWithPolicy(usage, delta, policy.Resource); err != nil {
+		return err
+	}
+	if err := s.repo.CheckpointRecoveringTaskResult(task.ID, task.LeaseOwner, string(resultJSON), string(opsJSON), "人工恢复已保存生成结果", 90); err != nil {
+		return err
+	}
+	task.ResultJSON = string(resultJSON)
+	task.DeliveryOpsJSON = string(opsJSON)
+	task.Stage = "人工恢复已保存生成结果"
+	task.Progress = 90
+	return nil
+}
+
 // 任务完成会同时扩张任务历史和 Agent 会话数据，必须在同一临界区核算并原子写入。
 func (s *Service) saveTaskCompletionWithinStorageQuota(task *model.Task, resultJSON []byte, opsJSON []byte, hasCanvasOps bool) error {
 	policy, err := s.RuntimePolicy()
 	if err != nil {
 		return err
 	}
-	s.storageMu.Lock()
-	defer s.storageMu.Unlock()
+	unlockStorage := s.lockUserStorage(task.UserID)
+	defer unlockStorage()
 
 	usage, err := s.repo.UserStorageUsage(task.UserID)
 	if err != nil {
 		return err
 	}
 	publicInputJSON := publicTaskInputJSON(task.InputJSON)
-	taskDelta := int64(len(resultJSON) + len(publicInputJSON) - len(task.ResultJSON) - len(task.InputJSON))
+	taskDelta := int64(len(resultJSON) + len(publicInputJSON) - len(task.ResultJSON) - len(task.DeliveryOpsJSON) - len(task.InputJSON))
 
 	var session *model.Session
 	var message *model.Message
@@ -141,14 +192,21 @@ func (s *Service) saveTaskCompletionWithinStorageQuota(task *model.Task, resultJ
 		return err
 	}
 
+	expectedStatus := task.Status
+	expectedLeaseOwner := task.LeaseOwner
 	completed := *task
 	completed.Status = model.TaskStatusSucceeded
 	completed.Stage = "任务完成"
 	completed.Progress = 100
 	completed.ResultJSON = string(resultJSON)
+	completed.DeliveryOpsJSON = ""
 	completed.InputJSON = publicInputJSON
+	completed.PollStage = "completed"
+	completed.NextPollAt = nil
+	completed.LeaseOwner = ""
+	completed.LeaseExpiresAt = nil
 	completed.CompletedAt = ptr(time.Now())
-	if err := s.repo.SaveTaskCompletion(&completed, session, message, results); err != nil {
+	if err := s.repo.SaveTaskCompletion(&completed, expectedStatus, expectedLeaseOwner, session, message, results); err != nil {
 		return err
 	}
 	*task = completed

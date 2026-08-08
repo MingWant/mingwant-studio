@@ -12,11 +12,15 @@ import (
 	"time"
 )
 
-const maxOutboundRedirects = 5
+const (
+	maxOutboundRedirects         = 5
+	outboundURLValidationTimeout = 5 * time.Second
+)
 
 var (
 	outboundTransport          = newOutboundTransport(resolveOutboundHost)
 	customRelayTransport       = newOutboundTransport(resolveCustomRelayHost)
+	lookupOutboundIP           = net.DefaultResolver.LookupIP
 	blockedCustomRelayPrefixes = []netip.Prefix{
 		netip.MustParsePrefix("0.0.0.0/8"),
 		netip.MustParsePrefix("100.64.0.0/10"),
@@ -32,6 +36,10 @@ var (
 )
 
 func ValidateOutboundURL(rawURL string) (*url.URL, error) {
+	return ValidateOutboundURLContext(context.Background(), rawURL)
+}
+
+func ValidateOutboundURLContext(ctx context.Context, rawURL string) (*url.URL, error) {
 	parsed, err := url.Parse(strings.TrimSpace(rawURL))
 	if err != nil || parsed.Hostname() == "" {
 		return nil, BadAuthRequest("外部服务地址无效")
@@ -42,7 +50,7 @@ func ValidateOutboundURL(rawURL string) (*url.URL, error) {
 	if parsed.User != nil {
 		return nil, BadAuthRequest("外部服务地址不允许包含认证信息")
 	}
-	if err := validateOutboundHost(parsed.Hostname()); err != nil {
+	if err := validateOutboundHost(ctx, parsed.Hostname()); err != nil {
 		return nil, err
 	}
 	return parsed, nil
@@ -51,6 +59,10 @@ func ValidateOutboundURL(rawURL string) (*url.URL, error) {
 // 用户自定义渠道必须使用更严格的出口策略：只允许 HTTPS，不接受 URL 凭据，
 // 仅部署者精确配置的主机可以路由到私网。
 func ValidateCustomRelayURL(rawURL string) (*url.URL, error) {
+	return ValidateCustomRelayURLContext(context.Background(), rawURL)
+}
+
+func ValidateCustomRelayURLContext(ctx context.Context, rawURL string) (*url.URL, error) {
 	if len(strings.TrimSpace(rawURL)) > 4096 {
 		return nil, BadAuthRequest("自定义渠道地址过长")
 	}
@@ -67,7 +79,7 @@ func ValidateCustomRelayURL(rawURL string) (*url.URL, error) {
 	if parsed.Fragment != "" {
 		return nil, BadAuthRequest("自定义渠道地址不允许包含片段")
 	}
-	if err := validateCustomRelayHost(parsed.Hostname()); err != nil {
+	if err := validateCustomRelayHost(ctx, parsed.Hostname()); err != nil {
 		return nil, err
 	}
 	return parsed, nil
@@ -81,7 +93,7 @@ func OutboundHTTPClient(timeout time.Duration) *http.Client {
 			if len(via) >= maxOutboundRedirects {
 				return errors.New("外部服务重定向次数过多")
 			}
-			_, err := ValidateOutboundURL(req.URL.String())
+			_, err := ValidateOutboundURLContext(req.Context(), req.URL.String())
 			return err
 		},
 	}
@@ -120,13 +132,31 @@ func newOutboundTransport(resolveHost func(context.Context, string) ([]net.IP, e
 	}
 }
 
-func validateOutboundHost(host string) error {
-	_, err := resolveOutboundHost(context.Background(), host)
-	return err
+func validateOutboundHost(parent context.Context, host string) error {
+	return validateOutboundHostWithResolver(parent, host, resolveOutboundHost)
 }
 
-func validateCustomRelayHost(host string) error {
-	_, err := resolveCustomRelayHost(context.Background(), host)
+func validateCustomRelayHost(parent context.Context, host string) error {
+	return validateOutboundHostWithResolver(parent, host, resolveCustomRelayHost)
+}
+
+// URL 预检发生在 HTTP 客户端建连前，必须自带短截止时间；否则异常 DNS 解析器会绕过请求总时限并长期占住 Worker。
+func validateOutboundHostWithResolver(parent context.Context, host string, resolver func(context.Context, string) ([]net.IP, error)) error {
+	if parent == nil {
+		parent = context.Background()
+	}
+	ctx, cancel := context.WithTimeout(parent, outboundURLValidationTimeout)
+	defer cancel()
+	_, err := resolver(ctx, host)
+	if err == nil {
+		return nil
+	}
+	if parentErr := parent.Err(); parentErr != nil {
+		return parentErr
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return errors.Join(BadAuthRequest("外部服务域名解析超时，请检查 DNS 或服务地址"), err)
+	}
 	return err
 }
 
@@ -159,8 +189,11 @@ func resolveOutboundHostWithPolicy(ctx context.Context, host string, allowPrivat
 	if !allowPrivateHost && (host == "localhost" || strings.HasSuffix(host, ".localhost")) {
 		return nil, BadAuthRequest("不允许访问本机或内网地址")
 	}
-	addresses, err := net.DefaultResolver.LookupIP(ctx, "ip", host)
+	addresses, err := lookupOutboundIP(ctx, "ip", host)
 	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return nil, ctxErr
+		}
 		return nil, BadAuthRequest("外部服务域名解析失败")
 	}
 	if len(addresses) == 0 {

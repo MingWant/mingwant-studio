@@ -41,7 +41,11 @@ export default function UsersPanel({ onUserChanged }: { onUserChanged?: (user: L
     const hasFilters = Boolean(state.filter || state.role !== "all" || state.status !== "all");
 
     useEffect(() => {
-        window.localStorage.setItem(columnStorageKey, JSON.stringify([...visibleColumns]));
+        try {
+            window.localStorage.setItem(columnStorageKey, JSON.stringify([...visibleColumns]));
+        } catch {
+            // 表格列显示只是管理员本地偏好；存储不可用时不影响用户管理操作。
+        }
     }, [visibleColumns]);
 
     useEffect(() => {

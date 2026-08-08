@@ -64,7 +64,13 @@ export default function RegisterPage() {
         try {
             await register({ username, email, emailCode, displayName, password });
             await applyUserSession(await getAuthSession());
-            if (!settings?.firstUser) window.sessionStorage.setItem("infinite-canvas:model-setup-guide", "1");
+            if (!settings?.firstUser) {
+                try {
+                    window.sessionStorage.setItem("infinite-canvas:model-setup-guide", "1");
+                } catch {
+                    // 引导只是一次性偏好；注册已经成功时不能因隐私模式存储失败而误报注册失败。
+                }
+            }
             message.success(settings?.firstUser ? "管理员账号已创建" : "注册成功");
             navigate(next, { replace: true });
         } catch (error) {

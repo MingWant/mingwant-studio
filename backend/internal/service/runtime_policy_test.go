@@ -2,6 +2,7 @@ package service
 
 import (
 	"testing"
+	"time"
 
 	"infinite-canvas/backend/internal/model"
 	"infinite-canvas/backend/internal/repository"
@@ -11,8 +12,15 @@ import (
 )
 
 func TestRuntimePolicyDefaultsAndSelfUseModeValidate(t *testing.T) {
-	if err := validateRuntimePolicy(defaultRuntimePolicy()); err != nil {
+	defaults := defaultRuntimePolicy()
+	if err := validateRuntimePolicy(defaults); err != nil {
 		t.Fatalf("default runtime policy error = %v", err)
+	}
+	if defaults.Task.TextTimeoutMinutes != 15 || defaults.Task.StoryboardTimeoutMinutes != 30 {
+		t.Fatalf("slow model timeouts = text %d, storyboard %d", defaults.Task.TextTimeoutMinutes, defaults.Task.StoryboardTimeoutMinutes)
+	}
+	if defaults.Request.CustomRelayTimeoutMinutes != 35 {
+		t.Fatalf("custom relay timeout = %d", defaults.Request.CustomRelayTimeoutMinutes)
 	}
 	selfUse := selfUseRuntimePolicy()
 	if err := validateRuntimePolicy(selfUse); err != nil {
@@ -20,6 +28,34 @@ func TestRuntimePolicyDefaultsAndSelfUseModeValidate(t *testing.T) {
 	}
 	if selfUse.Task.WorkerConcurrency != 999 || selfUse.Resource.ResourceUploadMB != 999 {
 		t.Fatalf("self-use maxima = worker %d, upload %d", selfUse.Task.WorkerConcurrency, selfUse.Resource.ResourceUploadMB)
+	}
+}
+
+func TestRuntimePolicyCannotExceedShutdownDrainWindow(t *testing.T) {
+	svc := &Service{shutdownDrainTimeout: 40 * time.Minute}
+	policy := defaultRuntimePolicy()
+	if err := svc.validateRuntimePolicyShutdownWindow(policy); err != nil {
+		t.Fatal(err)
+	}
+	policy.Request.CustomRelayTimeoutMinutes = 41
+	if err := svc.validateRuntimePolicyShutdownWindow(policy); err == nil {
+		t.Fatal("relay timeout above shutdown drain window must be rejected")
+	}
+	policy = defaultRuntimePolicy()
+	policy.Task.StoryboardTimeoutMinutes = 41
+	if err := svc.validateRuntimePolicyShutdownWindow(policy); err == nil {
+		t.Fatal("task timeout above shutdown drain window must be rejected")
+	}
+}
+
+func TestSelfUseRuntimePolicyIsCappedToShutdownDrainWindow(t *testing.T) {
+	svc := &Service{shutdownDrainTimeout: 40 * time.Minute}
+	result, err := svc.AdminSelfUseRuntimePolicy(&model.User{Role: model.UserRoleAdmin})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task.TextTimeoutMinutes != 40 || result.Task.StoryboardTimeoutMinutes != 40 || result.Request.CustomRelayTimeoutMinutes != 40 {
+		t.Fatalf("self-use timeouts = text %d, storyboard %d, relay %d", result.Task.TextTimeoutMinutes, result.Task.StoryboardTimeoutMinutes, result.Request.CustomRelayTimeoutMinutes)
 	}
 }
 

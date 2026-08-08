@@ -53,12 +53,13 @@ func (s *Service) FetchChannelModels(ctx context.Context, actor *model.User, inp
 
 	target := apiURL(baseURL, "/models")
 	if apiFormat == "gemini" {
-		if !strings.HasSuffix(strings.ToLower(baseURL), "/v1beta") {
+		lowerBaseURL := strings.ToLower(baseURL)
+		if !strings.HasSuffix(lowerBaseURL, "/v1") && !strings.HasSuffix(lowerBaseURL, "/v1beta") {
 			baseURL += "/v1beta"
 		}
 		target = baseURL + "/models"
 	}
-	if _, err := ValidateOutboundURL(target); err != nil {
+	if _, err := ValidateOutboundURLContext(ctx, target); err != nil {
 		return nil, err
 	}
 
@@ -73,31 +74,47 @@ func (s *Service) FetchChannelModels(ctx context.Context, actor *model.User, inp
 	}
 
 	// 只代理固定的模型目录 GET；用户密钥仅用于本次请求，不写入数据库或日志。
-	data, _, err := doBinary(request)
+	data, _, err := doBinaryWithResponseLimit(request, maxChannelModelCatalogResponseMB<<20)
 	if err != nil {
 		return nil, channelModelsUpstreamError(err)
 	}
 	var payload channelModelsPayload
 	if err := json.Unmarshal(data, &payload); err != nil {
-		return nil, &AuthError{Status: http.StatusBadGateway, Message: "模型服务返回的不是有效 JSON"}
+		return nil, errors.Join(&AuthError{Status: http.StatusBadGateway, Message: "模型服务返回的不是有效 JSON"}, fmt.Errorf("decode model catalog response: %w", err))
 	}
 	if payload.Error != nil && strings.TrimSpace(payload.Error.Message) != "" {
-		return nil, &AuthError{Status: http.StatusBadGateway, Message: payload.Error.Message}
+		return nil, &AuthError{Status: http.StatusBadGateway, Message: "模型服务返回错误，请检查渠道配置和供应商状态"}
 	}
 	if payload.Code != nil && *payload.Code != 0 {
-		return nil, &AuthError{Status: http.StatusBadGateway, Message: firstNonEmpty(strings.TrimSpace(payload.Msg), "模型服务返回失败")}
+		return nil, &AuthError{Status: http.StatusBadGateway, Message: "模型服务返回错误，请检查渠道配置和供应商状态"}
 	}
+	return channelModelNamesFromPayload(payload, apiFormat)
+}
 
+func channelModelNamesFromPayload(payload channelModelsPayload, apiFormat string) ([]string, error) {
 	items := payload.Data
 	if apiFormat == "gemini" {
 		items = payload.Models
 	}
+	if len(payload.Data) > maxChannelModelCatalogEntries || len(payload.Models) > maxChannelModelCatalogEntries {
+		return nil, errors.Join(&AuthError{Status: http.StatusBadGateway, Message: "模型服务返回的目录条目过多，已拒绝写入"}, errors.New("model catalog exceeds entry limit"))
+	}
 	seen := make(map[string]bool, len(items))
 	models := make([]string, 0, len(items))
 	for _, item := range items {
-		name := strings.TrimPrefix(strings.TrimSpace(firstNonEmpty(item.ID, item.Name)), "models/")
-		if name == "" || seen[name] {
+		rawName := firstNonEmpty(item.ID, item.Name)
+		if strings.TrimPrefix(strings.TrimSpace(rawName), "models/") == "" && !channelModelValueHasControl(rawName) {
 			continue
+		}
+		name, validationErr := normalizeChannelModelKey(rawName)
+		if validationErr != nil {
+			return nil, errors.Join(&AuthError{Status: http.StatusBadGateway, Message: "模型服务返回了不受支持的模型标识，已拒绝写入"}, validationErr)
+		}
+		if seen[name] {
+			continue
+		}
+		if len(models) >= maxChannelModelsPerChannel {
+			return nil, errors.Join(&AuthError{Status: http.StatusBadGateway, Message: "模型服务返回的有效模型过多，已拒绝写入"}, errors.New("model catalog exceeds unique model limit"))
 		}
 		seen[name] = true
 		models = append(models, name)
@@ -109,11 +126,11 @@ func (s *Service) FetchChannelModels(ctx context.Context, actor *model.User, inp
 func channelModelsUpstreamError(err error) error {
 	var authErr *AuthError
 	if errors.As(err, &authErr) {
-		return authErr
+		return err
 	}
 	var httpErr providerHTTPError
 	if !errors.As(err, &httpErr) {
-		return &AuthError{Status: http.StatusBadGateway, Message: "连接模型服务失败：" + err.Error()}
+		return errors.Join(&AuthError{Status: http.StatusBadGateway, Message: "连接模型服务失败，请检查地址、网络和供应商状态"}, err)
 	}
 	switch httpErr.StatusCode {
 	case http.StatusUnauthorized, http.StatusForbidden:

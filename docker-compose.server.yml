@@ -44,10 +44,12 @@ services:
       REDIS_URL: ${REDIS_URL:-redis://redis:6379/0}
       CANVAS_WORKER_CONCURRENCY: ${CANVAS_WORKER_CONCURRENCY:-3}
       CANVAS_CHANNEL_CONCURRENCY: ${CANVAS_CHANNEL_CONCURRENCY:-3}
+      CANVAS_SHUTDOWN_DRAIN_TIMEOUT: ${CANVAS_SHUTDOWN_DRAIN_TIMEOUT:-40m}
+      CANVAS_CONTAINER_STOP_GRACE_PERIOD: ${CANVAS_CONTAINER_STOP_GRACE_PERIOD:-45m}
       CANVAS_REGISTRATION_ENABLED: ${CANVAS_REGISTRATION_ENABLED:-false}
       CANVAS_ALLOW_PRIVATE_UPSTREAMS: ${CANVAS_ALLOW_PRIVATE_UPSTREAMS:-false}
       CANVAS_ALLOWED_PRIVATE_UPSTREAM_HOSTS: ${CANVAS_ALLOWED_PRIVATE_UPSTREAM_HOSTS:-}
-      CANVAS_CORS_ORIGINS: ${CANVAS_CORS_ORIGINS:-*}
+      CANVAS_CORS_ORIGINS: ${CANVAS_CORS_ORIGINS:-}
       GIN_MODE: release
     volumes:
       - ${CANVAS_DATA_PATH:-./data}:/data
@@ -56,6 +58,7 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    stop_grace_period: ${CANVAS_CONTAINER_STOP_GRACE_PERIOD:-45m}
     restart: unless-stopped
 
   web:
@@ -69,4 +72,6 @@ services:
     depends_on:
       backend:
         condition: service_healthy
+    stop_signal: SIGQUIT
+    stop_grace_period: ${CANVAS_CONTAINER_STOP_GRACE_PERIOD:-45m}
     restart: unless-stopped

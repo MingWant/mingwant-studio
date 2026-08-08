@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"infinite-canvas/backend/internal/model"
+	"infinite-canvas/backend/internal/repository"
 
 	"gorm.io/gorm"
 )
@@ -56,7 +57,12 @@ func (s *Service) UpdateRegistrationSetting(actor *model.User, req RegistrationS
 	if current != nil {
 		setting.CreatedAt = current.CreatedAt
 	}
-	if err := s.repo.SaveSystemSetting(&setting); err != nil {
+	if err := s.repo.WithTransaction(func(txRepo *repository.Repository) error {
+		if err := saveSystemSettingUnchanged(txRepo, &setting, current); err != nil {
+			return err
+		}
+		return appendAdminAuditWithRepository(txRepo, actor, "registration_setting.update", "system_setting", registrationSettingKey, "更新开放注册设置", map[string]any{"enabled": req.Enabled})
+	}); err != nil {
 		return nil, err
 	}
 	return publicRegistrationSetting(&setting, registrationSettingValue{Enabled: req.Enabled}), nil

@@ -5,10 +5,10 @@ import { buildNodeGenerationContext, hydrateNodeGenerationContext } from "@/comp
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import { buildGenerationConfig, isGenerationCanceled, supportsVideoReferenceAudio } from "@/lib/canvas/canvas-project-generation";
 import { isGenerationTaskCapacityError } from "@/lib/canvas/canvas-generation-batch";
+import { hasPendingCanvasGenerationTask } from "@/lib/canvas/canvas-generation-task-state";
 import { expandSkillMentions } from "@/lib/canvas/canvas-skill-mentions";
 import { generationFailureMetadata } from "@/lib/generation-error";
 import { navigateToSettings } from "@/lib/settings-navigation";
-import { isDesktopVideoWorkflowAvailable } from "@/services/desktop-video-workflow";
 import type { UpdreamSkill } from "@/services/api/skills";
 import type { GenerationTask } from "@/services/api/task-center";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -29,7 +29,8 @@ type UseCanvasGenerationExecutorOptions = {
     setSelectedNodeIds: Dispatch<SetStateAction<Set<string>>>;
     setSelectedConnectionId: Dispatch<SetStateAction<string | null>>;
     setDialogNodeId: Dispatch<SetStateAction<string | null>>;
-    setRunningNodeId: Dispatch<SetStateAction<string | null>>;
+    setRunningNode: (nodeId: string) => void;
+    clearRunningNode: (nodeId: string) => void;
     startGenerationRequest: (targetNodeId: string, originNodeId: string, runningId?: string, controller?: AbortController) => AbortController;
     finishGenerationRequest: (targetNodeId: string, controller: AbortController) => void;
     bindGenerationTask: (targetNodeId: string, task: GenerationTask) => void;
@@ -42,6 +43,10 @@ const NODE_STATUS_ERROR = "error" as const;
 export type CanvasNodeGenerationOptions = {
     controller?: AbortController;
     waitForTaskCapacity?: boolean;
+    sourceTaskId?: string;
+    confirmNewProviderRequest?: boolean;
+    /** 批量调度在供应商调用前失败时需要终止当前条目，避免提交状态被反复放回等待队列。 */
+    onPreflightFailure?: (errorDetails: string) => void;
 };
 
 export function useCanvasGenerationExecutor({
@@ -55,7 +60,8 @@ export function useCanvasGenerationExecutor({
     setSelectedNodeIds,
     setSelectedConnectionId,
     setDialogNodeId,
-    setRunningNodeId,
+    setRunningNode,
+    clearRunningNode,
     startGenerationRequest,
     finishGenerationRequest,
     bindGenerationTask,
@@ -66,19 +72,29 @@ export function useCanvasGenerationExecutor({
 
     return useCallback(
         async (nodeId: string, mode: CanvasNodeGenerationMode, prompt: string, options?: CanvasNodeGenerationOptions) => {
+            const reportPreflightFailure = (errorDetails: string) => {
+                if (!options?.onPreflightFailure || options.controller?.signal.aborted) return;
+                options.onPreflightFailure(errorDetails);
+            };
             const sourceNode = nodesRef.current.find((node) => node.id === nodeId);
+            if (hasPendingCanvasGenerationTask(sourceNode)) {
+                message.warning("该节点仍绑定排队中或运行中的后台任务，请等待结果或从任务详情取消，勿重复提交。");
+                return;
+            }
             if (sourceNode?.type === CanvasNodeType.Video && sourceNode.metadata?.videoEditOperation === "concat") {
-                message.info("合并成片不调用模型生成；请同时选择至少 2 段源视频和这个槽位，再点“合并选中视频”");
+                const errorDetails = "合并成片不调用模型生成；请同时选择至少 2 段源视频和这个槽位，再点“合并选中视频”";
+                message.info(errorDetails);
+                reportPreflightFailure(errorDetails);
                 return;
             }
             let generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, mode);
-            const desktopVideoWorkflow = mode === "video" && isDesktopVideoWorkflowAvailable();
-            if (!desktopVideoWorkflow && !isAiConfigReady(generationConfig, generationConfig.model)) {
+            if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+                reportPreflightFailure("生成模型配置已变化，请重新确认模型后再提交");
                 navigateToSettings({ continueCreation: true });
                 return;
             }
 
-            setRunningNodeId(nodeId);
+            setRunningNode(nodeId);
             const controller = startGenerationRequest(nodeId, nodeId, nodeId, options?.controller);
             const sourceTextContent = sourceNode?.type === CanvasNodeType.Text ? sourceNode.metadata?.content?.trim() || "" : "";
             const editingTextNode = mode === "text" && Boolean(sourceTextContent);
@@ -113,15 +129,16 @@ export function useCanvasGenerationExecutor({
                     projectId,
                     domainProjectId,
                     mode,
-                    mode === "video" && (desktopVideoWorkflow || supportsVideoReferenceAudio(generationConfig)),
+                    mode === "video" && supportsVideoReferenceAudio(generationConfig),
                 );
             } catch (error) {
                 const errorDetails = error instanceof Error ? error.message : "生成任务准备失败";
+                reportPreflightFailure(errorDetails);
                 if (isPreparingEmptyImage) {
                     setNodes((current) => current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: controller.signal.aborted ? NODE_STATUS_IDLE : NODE_STATUS_ERROR, taskStage: undefined, taskProgress: undefined, taskCreatedAt: undefined, errorDetails: controller.signal.aborted ? undefined : errorDetails } } : node)));
                 }
                 finishGenerationRequest(nodeId, controller);
-                setRunningNodeId(null);
+                clearRunningNode(nodeId);
                 if (!controller.signal.aborted) message.error(errorDetails);
                 return;
             }
@@ -131,15 +148,17 @@ export function useCanvasGenerationExecutor({
             const generationContext = { ...rawGenerationContext, prompt: effectivePrompt };
             if (mode === "audio" && generationContext.characterReferences.length) {
                 if (generationContext.characterReferences.length !== 1) {
+                    reportPreflightFailure("角色配音一次只能引用一个角色卡");
                     finishGenerationRequest(nodeId, controller);
-                    setRunningNodeId(null);
+                    clearRunningNode(nodeId);
                     message.error("角色配音一次只能引用一个角色卡");
                     return;
                 }
                 const voice = generationContext.resolvedCharacterVoices[0];
                 if (!voice) {
+                    reportPreflightFailure("角色尚未绑定可用声音，无法创建角色配音任务");
                     finishGenerationRequest(nodeId, controller);
-                    setRunningNodeId(null);
+                    clearRunningNode(nodeId);
                     message.error("角色尚未绑定可用声音，无法创建角色配音任务");
                     return;
                 }
@@ -148,15 +167,16 @@ export function useCanvasGenerationExecutor({
             if (controller.signal.aborted) {
                 if (isPreparingEmptyImage) setNodes((current) => current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_IDLE, taskStage: undefined, taskProgress: undefined, taskCreatedAt: undefined } } : node)));
                 finishGenerationRequest(nodeId, controller);
-                setRunningNodeId(null);
+                clearRunningNode(nodeId);
                 return;
             }
 
             const markSourceStatus = sourceNode?.type !== CanvasNodeType.Image && !editingTextNode;
             const statusPrompt = sourceNode?.type === CanvasNodeType.Config ? effectivePrompt : prompt;
             if (!effectivePrompt && (mode === "text" || mode === "audio")) {
+                reportPreflightFailure("生成提示词为空");
                 finishGenerationRequest(nodeId, controller);
-                setRunningNodeId(null);
+                clearRunningNode(nodeId);
                 return;
             }
             if (markSourceStatus) setNodes((current) => current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, prompt: statusPrompt, status: NODE_STATUS_LOADING, errorDetails: undefined, generationErrorCode: undefined, failedPromptFingerprint: undefined } } : node)));
@@ -171,6 +191,8 @@ export function useCanvasGenerationExecutor({
                 generationConfig,
                 generationContext,
                 controller,
+                sourceTaskId: options?.sourceTaskId,
+                confirmNewProviderRequest: options?.confirmNewProviderRequest,
                 editingTextNode,
                 setNodes,
                 setConnections,
@@ -204,6 +226,7 @@ export function useCanvasGenerationExecutor({
                         delete metadata.taskStage;
                         delete metadata.taskCreatedAt;
                         delete metadata.taskUpdatedAt;
+                        delete metadata.taskRecoveryUncertain;
                         return { ...node, metadata };
                     }));
                     return;
@@ -212,9 +235,9 @@ export function useCanvasGenerationExecutor({
                 setNodes((current) => current.map((node) => (node.id === nodeId || pendingNodeIds.includes(node.id) ? (node.id === nodeId && !markSourceStatus ? node : { ...node, metadata: { ...node.metadata, status: NODE_STATUS_ERROR, ...failure } }) : node)));
             } finally {
                 finishGenerationRequest(nodeId, controller);
-                setRunningNodeId(null);
+                clearRunningNode(nodeId);
             }
         },
-        [activatedSkills, bindGenerationTask, domainProjectId, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, nodesRef, connectionsRef, projectId, setConnections, setDialogNodeId, setNodes, setRunningNodeId, setSelectedConnectionId, setSelectedNodeIds, startGenerationRequest],
+        [activatedSkills, bindGenerationTask, clearRunningNode, domainProjectId, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, nodesRef, connectionsRef, projectId, setConnections, setDialogNodeId, setNodes, setRunningNode, setSelectedConnectionId, setSelectedNodeIds, startGenerationRequest],
     );
 }

@@ -1,7 +1,6 @@
 package handler
 
 import (
-	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -20,7 +19,7 @@ func RegisterCanvasShareRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		share, err := svc.CanvasShareStatus(user.ID, c.Param("id"))
 		if err != nil {
-			fail(c, http.StatusNotFound, errors.New("画布不存在"))
+			failNotFound(c, "画布不存在", err)
 			return
 		}
 		ok(c, gin.H{"share": share})
@@ -65,7 +64,7 @@ func RegisterCanvasShareRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		share, err := svc.PublicCanvasShare(c.Param("token"))
 		if err != nil {
-			fail(c, http.StatusNotFound, errors.New("分享链接无效或已失效"))
+			failNotFound(c, "分享链接无效或已失效", err)
 			return
 		}
 		c.Header("Cache-Control", "no-store")
@@ -80,7 +79,7 @@ func RegisterCanvasShareRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		stream, err := svc.OpenSharedCanvasResourceRange(c.Param("token"), c.Param("resourceId"), c.GetHeader("Range"))
 		if err != nil {
-			fail(c, http.StatusNotFound, errors.New("分享资源不存在"))
+			failNotFound(c, "分享资源不存在", err)
 			return
 		}
 		defer stream.Body.Close()

@@ -30,7 +30,7 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		projects, err := svc.ListProjects(user.ID)
 		if err != nil {
-			fail(c, http.StatusInternalServerError, err)
+			failService(c, err)
 			return
 		}
 		ok(c, gin.H{"projects": projects})
@@ -62,11 +62,7 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		detail, err := svc.ProjectDetail(user.ID, c.Param("id"))
 		if err != nil {
-			if service.IsProjectNotFound(err) {
-				fail(c, http.StatusNotFound, err)
-				return
-			}
-			fail(c, http.StatusInternalServerError, err)
+			failNotFound(c, "项目不存在", err)
 			return
 		}
 		ok(c, detail)
@@ -85,10 +81,6 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		project, err := svc.UpdateProject(user.ID, c.Param("id"), req)
 		if err != nil {
-			if service.IsProjectNotFound(err) {
-				fail(c, http.StatusNotFound, err)
-				return
-			}
 			failService(c, err)
 			return
 		}
@@ -101,11 +93,7 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 			return
 		}
 		if err := svc.DeleteProject(user.ID, c.Param("id")); err != nil {
-			if service.IsProjectNotFound(err) {
-				fail(c, http.StatusNotFound, err)
-				return
-			}
-			failService(c, err)
+			failNotFound(c, "项目不存在", err)
 			return
 		}
 		ok(c, gin.H{"id": c.Param("id")})
@@ -124,10 +112,6 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		unit, err := svc.CreateProjectUnit(user.ID, c.Param("id"), req)
 		if err != nil {
-			if service.IsProjectNotFound(err) {
-				fail(c, http.StatusNotFound, err)
-				return
-			}
 			failService(c, err)
 			return
 		}
@@ -141,11 +125,7 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		unit, err := svc.GetProjectUnit(user.ID, c.Param("id"), c.Param("unitId"))
 		if err != nil {
-			if service.IsProjectNotFound(err) {
-				fail(c, http.StatusNotFound, err)
-				return
-			}
-			failService(c, err)
+			failNotFound(c, "项目章节不存在", err)
 			return
 		}
 		ok(c, gin.H{"unit": unit})
@@ -165,10 +145,6 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		units, err := svc.ImportProjectUnits(user.ID, c.Param("id"), req)
 		if err != nil {
-			if service.IsProjectNotFound(err) {
-				fail(c, http.StatusNotFound, err)
-				return
-			}
 			failService(c, err)
 			return
 		}
@@ -191,10 +167,6 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 			return
 		}
 		if err := svc.ReorderProjectUnits(user.ID, c.Param("id"), req); err != nil {
-			if service.IsProjectNotFound(err) {
-				fail(c, http.StatusNotFound, err)
-				return
-			}
 			failService(c, err)
 			return
 		}
@@ -214,10 +186,6 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		unit, err := svc.UpdateProjectUnit(user.ID, c.Param("id"), c.Param("unitId"), req)
 		if err != nil {
-			if service.IsProjectNotFound(err) {
-				fail(c, http.StatusNotFound, err)
-				return
-			}
 			failService(c, err)
 			return
 		}
@@ -230,11 +198,7 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 			return
 		}
 		if err := svc.DeleteProjectUnit(user.ID, c.Param("id"), c.Param("unitId")); err != nil {
-			if service.IsProjectNotFound(err) {
-				fail(c, http.StatusNotFound, err)
-				return
-			}
-			failService(c, err)
+			failNotFound(c, "项目章节不存在", err)
 			return
 		}
 		ok(c, gin.H{"id": c.Param("unitId")})
@@ -253,10 +217,6 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		link, err := svc.LinkCanvasUnit(user.ID, c.Param("id"), req)
 		if err != nil {
-			if service.IsProjectNotFound(err) {
-				fail(c, http.StatusNotFound, err)
-				return
-			}
 			failService(c, err)
 			return
 		}
@@ -269,10 +229,6 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 			return
 		}
 		if err := svc.UnlinkCanvasUnit(user.ID, c.Param("id"), c.Param("canvasId"), c.Param("unitId")); err != nil {
-			if service.IsProjectNotFound(err) {
-				fail(c, http.StatusNotFound, err)
-				return
-			}
 			failService(c, err)
 			return
 		}
@@ -285,10 +241,6 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 			return
 		}
 		if err := svc.UnlinkCanvasProject(user.ID, c.Param("id"), c.Param("canvasId")); err != nil {
-			if service.IsProjectNotFound(err) {
-				fail(c, http.StatusNotFound, err)
-				return
-			}
 			failService(c, err)
 			return
 		}
@@ -458,6 +410,19 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 			return
 		}
 		ok(c, gin.H{"asset": asset})
+	})
+	r.GET("/projects/:id/assets/:assetId/versions", func(c *gin.Context) {
+		user, err := currentUser(c, svc)
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		versions, err := svc.ProjectAssetVersions(user.ID, c.Param("id"), c.Param("assetId"))
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		ok(c, gin.H{"versions": versions})
 	})
 	r.POST("/projects/:id/assets/:assetId/versions", func(c *gin.Context) {
 		user, err := currentUser(c, svc)

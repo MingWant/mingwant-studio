@@ -10,14 +10,18 @@ import { useUserStore } from "@/stores/use-user-store";
 export function ModelSetupGuide({ hidden = false }: { hidden?: boolean }) {
     const reducedMotion = useReducedMotion();
     const [dismissed, setDismissed] = useState(false);
-    const registrationGuide = typeof window !== "undefined" && window.sessionStorage.getItem("infinite-canvas:model-setup-guide") === "1";
+    const registrationGuide = readRegistrationGuideFlag();
     const hydrated = useUserStore((state) => state.hydrated);
     const user = useUserStore((state) => state.user);
     const models = useConfigStore((state) => state.config.models);
     if (hidden || dismissed || !hydrated || !user || user.role === "admin" || (!registrationGuide && models.length > 0)) return null;
 
     const close = () => {
-        window.sessionStorage.removeItem("infinite-canvas:model-setup-guide");
+        try {
+            window.sessionStorage.removeItem("infinite-canvas:model-setup-guide");
+        } catch {
+            // 引导关闭状态只是一次性界面偏好；会话存储不可用时仍允许本次关闭。
+        }
         setDismissed(true);
     };
 
@@ -39,4 +43,13 @@ export function ModelSetupGuide({ hidden = false }: { hidden?: boolean }) {
             </div>
         </motion.aside>
     );
+}
+
+function readRegistrationGuideFlag() {
+    if (typeof window === "undefined") return false;
+    try {
+        return window.sessionStorage.getItem("infinite-canvas:model-setup-guide") === "1";
+    } catch {
+        return false;
+    }
 }

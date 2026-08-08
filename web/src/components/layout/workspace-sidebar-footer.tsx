@@ -1,5 +1,5 @@
 import { App, Popover, Switch } from "antd";
-import { BookOpenCheck, ChevronRight, Coins, LogIn, LogOut, Moon, Settings2, ShieldCheck, Sun, UserRound } from "lucide-react";
+import { BookOpenCheck, ChevronRight, Coins, LogIn, LogOut, MonitorX, Moon, Settings2, ShieldCheck, Sun, UserRound } from "lucide-react";
 import { useEffect, useState, type ReactNode } from "react";
 import { Link, useNavigate } from "react-router";
 
@@ -9,7 +9,7 @@ import { SystemAnnouncementCenter } from "@/components/layout/system-announcemen
 import { useWalletBalance } from "@/hooks/use-wallet-balance";
 import { applyUserSession } from "@/lib/user-session";
 import { cn } from "@/lib/utils";
-import { logout } from "@/services/api/auth";
+import { logout, revokeOtherAuthSessions } from "@/services/api/auth";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useUserStore, type LocalUser } from "@/stores/use-user-store";
 
@@ -25,7 +25,7 @@ export function WorkspaceSidebarFooter({ expandedClassName, collapsedClassName, 
     const user = useUserStore((state) => state.user);
     const hydrated = useUserStore((state) => state.hydrated);
     const navigate = useNavigate();
-    const { message } = App.useApp();
+    const { message, modal } = App.useApp();
     const [menuOpen, setMenuOpen] = useState(false);
     const { availableMicrocredits } = useWalletBalance(user?.id, true);
     const balance = availableMicrocredits === null
@@ -42,6 +42,26 @@ export function WorkspaceSidebarFooter({ expandedClassName, collapsedClassName, 
         } catch (error) {
             message.error(error instanceof Error ? error.message : "退出失败");
         }
+    };
+
+    const handleRevokeOtherSessions = () => {
+        setMenuOpen(false);
+        modal.confirm({
+            title: "退出其他登录会话？",
+            content: "当前浏览器会继续保持登录；其他浏览器和设备上的会话会立即失效，需要重新登录。",
+            okText: "退出其他会话",
+            cancelText: "取消",
+            okButtonProps: { danger: true },
+            async onOk() {
+                try {
+                    const result = await revokeOtherAuthSessions();
+                    message.success(result.revoked > 0 ? `已撤销 ${result.revoked} 个其他登录会话` : "没有其他有效登录会话");
+                } catch (error) {
+                    message.error(error instanceof Error ? error.message : "撤销其他登录会话失败");
+                    throw error;
+                }
+            },
+        });
     };
 
     if (!hydrated) return <div className="h-24 animate-pulse rounded-md bg-foreground/[.035]" />;
@@ -89,6 +109,7 @@ export function WorkspaceSidebarFooter({ expandedClassName, collapsedClassName, 
                                 <span className="ml-2 flex-1 text-xs text-foreground/65">深色模式</span>
                                 <Switch size="small" checked={theme === "dark"} onChange={(checked) => setTheme(checked ? "dark" : "light")} aria-label="深色模式" />
                             </div>
+                            <button type="button" className="flex h-9 w-full items-center gap-2 rounded px-2 text-xs text-foreground/55 hover:bg-amber-500/[.08] hover:text-amber-600" onClick={handleRevokeOtherSessions}><MonitorX className="size-3.5" />退出其他会话</button>
                             <button type="button" className="flex h-9 w-full items-center gap-2 rounded px-2 text-xs text-foreground/55 hover:bg-red-500/[.08] hover:text-red-600" onClick={() => void handleLogout()}><LogOut className="size-3.5" />退出登录</button>
                         </div>
                     )}

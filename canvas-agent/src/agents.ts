@@ -405,6 +405,7 @@ function toolName(name: string) {
     if (name === "canvas_apply_ops") return "画布操作";
     if (name === "canvas_get_state") return "读取画布";
     if (name === "canvas_get_selection") return "读取选区";
+    if (name === "canvas_get_image_annotations") return "读取图片标注";
     if (name === "canvas_export_snapshot") return "导出快照";
     if (name === "canvas_create_text_node") return "创建文本";
     if (name === "canvas_create_image_prompt_flow") return "创建生图流程";
@@ -414,6 +415,7 @@ function toolName(name: string) {
     if (name === "canvas_generate_video") return "生成视频";
     if (name === "canvas_generate_audio") return "生成音频";
     if (name === "canvas_run_generation") return "触发生成";
+    if (name === "canvas_edit_image_annotation") return "执行标注改图";
     return name;
 }
 

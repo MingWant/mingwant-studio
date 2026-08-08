@@ -36,6 +36,8 @@ services:
       REDIS_URL: redis://redis:6379/0
       CANVAS_WORKER_CONCURRENCY: ${CANVAS_WORKER_CONCURRENCY:-3}
       CANVAS_CHANNEL_CONCURRENCY: ${CANVAS_CHANNEL_CONCURRENCY:-3}
+      CANVAS_SHUTDOWN_DRAIN_TIMEOUT: ${CANVAS_SHUTDOWN_DRAIN_TIMEOUT:-40m}
+      CANVAS_CONTAINER_STOP_GRACE_PERIOD: ${CANVAS_CONTAINER_STOP_GRACE_PERIOD:-45m}
       CANVAS_REGISTRATION_ENABLED: ${CANVAS_REGISTRATION_ENABLED:-false}
       CANVAS_ALLOW_PRIVATE_UPSTREAMS: ${CANVAS_ALLOW_PRIVATE_UPSTREAMS:-false}
       CANVAS_ALLOWED_PRIVATE_UPSTREAM_HOSTS: ${CANVAS_ALLOWED_PRIVATE_UPSTREAM_HOSTS:-}
@@ -48,15 +50,19 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    stop_grace_period: ${CANVAS_CONTAINER_STOP_GRACE_PERIOD:-45m}
     restart: unless-stopped
 
   web:
     image: ${MINGWANT_WEB_IMAGE:-mingwant-studio-web:server}
     ports:
-      - "${CANVAS_HTTP_PORT:-3000}:3000"
+      # 生产 Web 只作为本机 HTTPS 反向代理的上游，避免把未加密入口直接暴露到公网。
+      - "127.0.0.1:${CANVAS_HTTP_PORT:-3000}:3000"
     depends_on:
       backend:
         condition: service_healthy
+    stop_signal: SIGQUIT
+    stop_grace_period: ${CANVAS_CONTAINER_STOP_GRACE_PERIOD:-45m}
     restart: unless-stopped
 
 volumes:

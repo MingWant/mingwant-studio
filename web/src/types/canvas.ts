@@ -23,11 +23,10 @@ export enum CanvasNodeType {
 
 export type CanvasNodeStatus = "idle" | "success" | "loading" | "error";
 export type CanvasMediaPerformanceMode = "auto" | "quality" | "performance";
-export type CanvasWorkspaceMode = "simple" | "professional";
+export type CanvasWorkspaceMode = "simple" | "professional" | "manual";
 export type StoryboardShotDuration = "auto" | "5" | "10" | "15" | "30";
 export type StoryboardShotCount = "auto" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9" | "10";
 export type CanvasGenerationMode = "text" | "image" | "video" | "audio";
-export type DesktopVideoProvider = "lumina" | "dola" | "dreamina";
 export type CanvasGenerationBatchMode = "storyboard_image" | "storyboard_video" | "action_board";
 export type CanvasGenerationBatchStatus = "queued" | "running" | "partial_failed" | "completed" | "cancelled";
 export type CanvasGenerationBatchItemStatus = "waiting" | "submitting" | "queued" | "running" | "succeeded" | "failed" | "cancelled";
@@ -65,13 +64,62 @@ export type StoryboardCharacterReference = {
     characterImageNodeId?: string;
 };
 
+export type StoryboardSourceRef = {
+    unitId: string;
+    blockId?: string;
+    role: string;
+    unitUpdatedAt?: string;
+};
+
+export type StoryboardAssetBinding = {
+    assetVersionId: string;
+    role: string;
+};
+
+export type StoryboardBoundary = {
+    positions: string[];
+    facing: string[];
+    gaze: string[];
+    hands: string[];
+    heldProps: string[];
+    visibleState: string[];
+};
+
+export type StoryboardMotionAction = {
+    order: number;
+    actor: string;
+    trigger?: string;
+    action: string;
+    pathOrContact?: string;
+    result: string;
+};
+
+export type StoryboardMotionSpec = {
+    startAnchor: string;
+    orderedSubjectMotion: StoryboardMotionAction[];
+    performanceArc: string;
+    camera: string;
+    environmentAndAudio: string[];
+    timingPlan: string;
+    endReport: string;
+};
+
 export type StoryboardRow = {
     id: string;
+    domainShotId?: string;
+    shotCode?: string;
     shotNumber: number;
     durationSeconds: number;
     plotDescription: string;
     dialogue: string;
     characters: StoryboardCharacterReference[];
+    purpose?: string;
+    informationChange?: string;
+    sourceRefs?: StoryboardSourceRef[];
+    assetBindings?: StoryboardAssetBinding[];
+    startBoundary?: StoryboardBoundary;
+    endBoundary?: StoryboardBoundary;
+    motionSpec?: StoryboardMotionSpec;
     shotSize: string;
     emotion: string;
     lightingAndAtmosphere: string;
@@ -87,6 +135,7 @@ export type StoryboardRow = {
     videoNodeId?: string;
     status?: CanvasNodeStatus;
     errorDetails?: string;
+    contractWarning?: string;
 };
 
 export type StoryboardData = {
@@ -100,10 +149,13 @@ export type CanvasGenerationBatchItem = {
     rowId: string;
     nodeId: string;
     taskId?: string;
+    retrySourceTaskId?: string;
     status: CanvasGenerationBatchItemStatus;
     retryCount: number;
     errorDetails?: string;
     costUncertain?: boolean;
+    /** 页面刷新或停止等待后无法确认创建请求是否已到达后端；必须先恢复/核对，不能自动回到 waiting。 */
+    submissionRecoveryUncertain?: boolean;
 };
 
 export type CanvasGenerationBatch = {
@@ -127,6 +179,15 @@ export type CanvasSkillSnapshot = {
     outputContract: string;
     version: number;
     tags: string[];
+};
+
+export type CanvasImageAnnotation = {
+    sourceNodeId: string;
+    instruction: string;
+    mask: {
+        url: string;
+        storageKey: string;
+    };
 };
 
 export type CanvasNodeMetadata = {
@@ -168,6 +229,8 @@ export type CanvasNodeMetadata = {
     storageKey?: string;
     mimeType?: string;
     bytes?: number;
+    imageAnnotation?: CanvasImageAnnotation;
+    imageAnnotationResultOf?: string;
     durationMs?: number;
     assetId?: string;
     assetTags?: string[];
@@ -215,12 +278,8 @@ export type CanvasNodeMetadata = {
     taskStage?: string;
     taskCreatedAt?: string;
     taskUpdatedAt?: string;
-    desktopVideoProvider?: DesktopVideoProvider;
-    desktopVideoResultProvider?: DesktopVideoProvider;
-    desktopVideoTaskId?: string;
-    desktopVideoAccountId?: string;
-    desktopVideoAccountName?: string;
-    desktopVideoSourceFileName?: string;
+    /** 刷新后无法确认原后台任务时的安全锁；不能让用户直接重试造成重复供应商调用。 */
+    taskRecoveryUncertain?: boolean;
     sessionId?: string;
     videoEditOperation?: CanvasVideoEditOperation;
     videoCameraMoveId?: string;
@@ -329,13 +388,32 @@ export type CanvasAssistantMessage = {
     references?: CanvasAssistantReference[];
 };
 
-export type CanvasAssistantPendingBackendSession = {
-    id: string;
+type CanvasAssistantPendingBackendSessionBase = {
     kind: "cinematic";
     messageId: string;
-    status: "pending";
+    canvasId?: string;
+    channelProbeTaskId?: string;
+    toolProbeTaskId?: string;
+    // 只记录用户是否明确允许一次额外结构修复；旧本地记录缺失时按未授权处理，避免恢复路径扩大费用。
+    allowPaidStructureRepair?: boolean;
     startedAt: string;
 };
+
+export type CanvasAssistantPendingBackendSession = CanvasAssistantPendingBackendSessionBase & (
+    | {
+        status: "creating";
+        requestKey: string;
+        prompt: string;
+        configIdentity: string;
+    }
+    | {
+        status: "pending";
+        id: string;
+        requestKey?: string;
+        prompt?: string;
+        configIdentity?: string;
+    }
+);
 
 export type CanvasAssistantSession = {
     id: string;

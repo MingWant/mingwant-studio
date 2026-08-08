@@ -15,6 +15,7 @@ import type { CanvasExportFile } from "@/types/canvas-export";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
+import { consumeCanvasAgentLaunchCredentials } from "@/lib/canvas/canvas-agent-launch";
 import { createCommerceWorkflowTemplate } from "@/lib/canvas/canvas-commerce-workflow";
 import { saveCanvasDrawing, type CanvasDrawingRenderDraft } from "@/lib/canvas/canvas-drawing-storage";
 import { createCanvasProjectWithRemoteSync, saveRemoteUserDataNow } from "@/services/user-data-sync";
@@ -41,22 +42,26 @@ export default function CanvasPage() {
     const [associationProjectId, setAssociationProjectId] = useState("");
     const projectQuery = useQuery({ queryKey: ["projects"], queryFn: listProjects });
 
+    useEffect(() => {
+        consumeCanvasAgentLaunchCredentials();
+    }, []);
+
     const mode = searchParams.get("mode");
     const agentMode = mode === "new" || mode === "recent" || mode === "choose";
-    const agentQuery = agentMode ? `?${searchParams.toString()}` : "";
+    const agentQuery = agentMode ? `?mode=${encodeURIComponent(mode)}` : "";
     const enterProject = (id: string) => {
         navigate(`/canvas/${id}${agentQuery}`);
     };
     const createAndEnter = () => {
         void createCanvasProjectWithRemoteSync(`自由画布 ${projects.length + 1}`).then(({ id, syncError }) => {
-            if (syncError) message.warning(syncError instanceof Error ? `画布已在本地创建，云端同步失败：${syncError.message}` : "画布已在本地创建，云端同步失败");
+            if (syncError) message.warning("画布已在本地创建，云端同步失败，请稍后从分享或保存入口重试");
             enterProject(id);
         });
     };
     const createCommerceAndEnter = () => {
         const template = createCommerceWorkflowTemplate();
         void createCanvasProjectWithRemoteSync(`AI 带货批次 ${projects.length + 1}`, undefined, template).then(({ id, syncError }) => {
-            if (syncError) message.warning(syncError instanceof Error ? `带货工作流已在本地创建，云端同步失败：${syncError.message}` : "带货工作流已在本地创建，云端同步失败");
+            if (syncError) message.warning("带货工作流已在本地创建，云端同步失败，请稍后从保存入口重试");
             enterProject(id);
         });
     };
@@ -78,7 +83,7 @@ export default function CanvasPage() {
             message.success(projectId ? "已加入项目" : "已移出项目，画布仍保留");
             setAssociationOpen(false);
         } catch (error) {
-            message.error(error instanceof Error ? `画布关系保存失败：${error.message}` : "画布关系保存失败");
+            message.error("画布关系保存失败，请稍后重试");
         }
     };
     const importCanvas = async (file?: File) => {
@@ -134,7 +139,7 @@ export default function CanvasPage() {
             return;
         }
         void createCanvasProjectWithRemoteSync(`自由画布 ${projects.length + 1}`).then(({ id, syncError }) => {
-            if (syncError) message.warning(syncError instanceof Error ? `画布已在本地创建，云端同步失败：${syncError.message}` : "画布已在本地创建，云端同步失败");
+            if (syncError) message.warning("画布已在本地创建，云端同步失败，请稍后从分享或保存入口重试");
             enterProject(id);
         });
     }, [hydrated, message, mode, projects]);

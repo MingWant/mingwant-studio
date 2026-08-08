@@ -1,5 +1,3 @@
-# syntax=docker/dockerfile:1.7
-
 FROM golang:1.25-alpine AS backend-build
 
 ARG GOPROXY=https://proxy.golang.org,direct
@@ -9,9 +7,9 @@ RUN apk add --no-cache build-base
 
 WORKDIR /src/backend
 COPY backend/go.mod backend/go.sum ./
-RUN --mount=type=cache,target=/go/pkg/mod go mod download
+RUN go mod download
 COPY backend ./
-RUN --mount=type=cache,target=/root/.cache/go-build CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mingwant-studio-backend ./cmd/server \
+RUN CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/mingwant-studio-backend ./cmd/server \
     && CGO_ENABLED=1 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/migrate-sqlite-postgres ./cmd/migrate-sqlite-postgres
 
 FROM alpine:3.22
@@ -31,5 +29,6 @@ COPY --from=backend-build /out/migrate-sqlite-postgres /usr/local/bin/migrate-sq
 
 USER app
 EXPOSE 8080
+STOPSIGNAL SIGTERM
 HEALTHCHECK --interval=30s --timeout=3s --start-period=10s --retries=3 CMD wget -qO- http://127.0.0.1:8080/api/health >/dev/null || exit 1
 CMD ["mingwant-studio-backend"]

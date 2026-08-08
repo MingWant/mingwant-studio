@@ -33,7 +33,6 @@ type UseCanvasRenderModelOptions = {
     annotationNodeId: string | null;
     splitNodeId: string | null;
     upscaleNodeId: string | null;
-    superResolveNodeId: string | null;
     angleNodeId: string | null;
     emotionNodeId: string | null;
     previewNodeId: string | null;
@@ -64,7 +63,6 @@ export function useCanvasRenderModel({
     annotationNodeId,
     splitNodeId,
     upscaleNodeId,
-    superResolveNodeId,
     angleNodeId,
     emotionNodeId,
     previewNodeId,
@@ -148,7 +146,6 @@ export function useCanvasRenderModel({
     const annotationNode = annotationNodeId ? nodeById.get(annotationNodeId) || null : null;
     const splitNode = splitNodeId ? nodeById.get(splitNodeId) || null : null;
     const upscaleNode = upscaleNodeId ? nodeById.get(upscaleNodeId) || null : null;
-    const superResolveNode = superResolveNodeId ? nodeById.get(superResolveNodeId) || null : null;
     const angleNode = angleNodeId ? nodeById.get(angleNodeId) || null : null;
     const emotionNode = emotionNodeId ? nodeById.get(emotionNodeId) || null : null;
     const previewNode = previewNodeId ? nodeById.get(previewNodeId) || null : null;
@@ -282,7 +279,6 @@ export function useCanvasRenderModel({
         semanticNodes,
         skillMentionReferences,
         splitNode,
-        superResolveNode,
         toolbarNode,
         upscaleNode,
         versionCompareNodes,

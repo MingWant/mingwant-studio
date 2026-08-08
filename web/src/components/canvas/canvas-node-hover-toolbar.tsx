@@ -9,7 +9,6 @@ import { canvasNodeAssetCategory } from "@/lib/canvas/canvas-node-asset";
 import { formatBytes, getDataUrlByteSize } from "@/lib/image-utils";
 import { CONTENT_MODERATION_ERROR_CODE, isContentModerationError } from "@/lib/generation-error";
 import { useCopyText } from "@/hooks/use-copy-text";
-import { desktopVideoProviderLabel } from "@/services/desktop-video-workflow";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { FloatingDock, type FloatingDockEntry } from "@/components/ui/aceternity/floating-dock";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeMetadata, type CanvasWorkspaceMode, type ViewportTransform } from "@/types/canvas";
@@ -37,7 +36,6 @@ type CanvasNodeHoverToolbarProps = {
     onCrop: (node: CanvasNodeData) => void;
     onSplit: (node: CanvasNodeData) => void;
     onUpscale: (node: CanvasNodeData) => void;
-    onSuperResolve: (node: CanvasNodeData) => void;
     onAngle: (node: CanvasNodeData) => void;
     onViewImage: (node: CanvasNodeData) => void;
     onExtractVideoLastFrame: (node: CanvasNodeData) => void;
@@ -100,7 +98,6 @@ export function CanvasNodeHoverToolbar({
     onCrop,
     onSplit,
     onUpscale,
-    onSuperResolve,
     onAngle,
     onViewImage,
     onExtractVideoLastFrame,
@@ -131,12 +128,20 @@ export function CanvasNodeHoverToolbar({
             const parsed = JSON.parse(stored) as unknown;
             setQuickImageToolIds(readImageQuickToolsConfig(parsed));
         } catch {
-            window.localStorage.removeItem(IMAGE_QUICK_TOOLS_STORAGE_KEY);
+            try {
+                window.localStorage.removeItem(IMAGE_QUICK_TOOLS_STORAGE_KEY);
+            } catch {
+                // 快捷工具偏好损坏或不可写时直接回到内存默认值，不影响节点操作。
+            }
         }
     }, []);
 
     useEffect(() => {
-        setShowDockLabels(window.localStorage.getItem(NODE_DOCK_LABELS_STORAGE_KEY) !== "0");
+        try {
+            setShowDockLabels(window.localStorage.getItem(NODE_DOCK_LABELS_STORAGE_KEY) !== "0");
+        } catch {
+            setShowDockLabels(true);
+        }
     }, []);
 
     useEffect(() => {
@@ -213,7 +218,7 @@ export function CanvasNodeHoverToolbar({
         }
         void copyText(prompt, "提示词已复制");
     };
-    const imageTools = buildImageToolbarTools(node, { onUpload, onToggleFreeResize, onAnnotate, onMaskEdit, onEmotion, onCrop, onSplit, onUpscale, onSuperResolve, onAngle, onViewImage, onCopyPrompt: copyImagePrompt, onReversePrompt });
+    const imageTools = buildImageToolbarTools(node, { onUpload, onToggleFreeResize, onAnnotate, onMaskEdit, onEmotion, onCrop, onSplit, onUpscale, onAngle, onViewImage, onCopyPrompt: copyImagePrompt, onReversePrompt });
 
     function openImageToolSettings() {
         onKeep(activeNode.id);
@@ -272,8 +277,12 @@ export function CanvasNodeHoverToolbar({
     const saveImageToolSettings = () => {
         setQuickImageToolIds(draftImageToolIds);
         setShowDockLabels(draftShowDockLabels);
-        window.localStorage.setItem(IMAGE_QUICK_TOOLS_STORAGE_KEY, JSON.stringify(draftImageToolIds));
-        window.localStorage.setItem(NODE_DOCK_LABELS_STORAGE_KEY, draftShowDockLabels ? "1" : "0");
+        try {
+            window.localStorage.setItem(IMAGE_QUICK_TOOLS_STORAGE_KEY, JSON.stringify(draftImageToolIds));
+            window.localStorage.setItem(NODE_DOCK_LABELS_STORAGE_KEY, draftShowDockLabels ? "1" : "0");
+        } catch {
+            // 节点快捷工具仍应立即按内存配置生效；偏好无法持久化不应阻断关闭弹窗。
+        }
         closeImageToolSettings();
     };
 
@@ -415,9 +424,6 @@ export function CanvasNodeInfoModal({ node, open, onClose, onMetadataChange, rea
                                     <InfoRow label="位置" value={`${Math.round(node.position.x)}, ${Math.round(node.position.y)}`} />
                                     {batchCount > 1 ? <InfoRow label="图片组" value={`${batchCount} 张`} /> : null}
                                     {imageBytes ? <InfoRow label="图片大小" value={formatBytes(imageBytes)} /> : null}
-                                    {node.type === CanvasNodeType.Video && (node.metadata?.desktopVideoResultProvider || node.metadata?.desktopVideoProvider) ? <InfoRow label={node.metadata.desktopVideoResultProvider ? "生成平台" : "网页平台选择"} value={desktopVideoProviderLabel(node.metadata.desktopVideoResultProvider || node.metadata.desktopVideoProvider)} /> : null}
-                                    {node.type === CanvasNodeType.Video && node.metadata?.desktopVideoAccountName ? <InfoRow label="生成账号" value={node.metadata.desktopVideoAccountName} /> : null}
-                                    {node.type === CanvasNodeType.Video && node.metadata?.desktopVideoSourceFileName ? <InfoRow label="源文件" value={node.metadata.desktopVideoSourceFileName} /> : null}
                                 </div>
                                 {node.type === CanvasNodeType.Image ? (
                                     <div className="border-t pt-3" style={{ borderColor: theme.toolbar.border }}>

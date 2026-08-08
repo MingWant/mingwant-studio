@@ -1,13 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type Dispatch, type SetStateAction } from "react";
 
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
-import { applyCanvasAgentOps, summarizeCanvasAgentOps, type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
+import { applyCanvasAgentOps, MANUAL_DELIVERY_VIDEO_MESSAGE, summarizeCanvasAgentOps, type CanvasAgentOp, type CanvasAgentSnapshot } from "@/lib/canvas/canvas-agent-ops";
 import type { CanvasConnection, CanvasNodeData, ContextMenuState, ViewportTransform } from "@/types/canvas";
 
 type UseCanvasAgentOperationsOptions = {
     projectId: string;
     domainProjectId?: string;
     projectTitle: string;
+    manualDelivery?: boolean;
     nodes: CanvasNodeData[];
     connections: CanvasConnection[];
     selectedNodeIds: Set<string>;
@@ -17,6 +18,7 @@ type UseCanvasAgentOperationsOptions = {
     selectedNodeIdsRef: { current: Set<string> };
     viewportRef: { current: ViewportTransform };
     generateNodeRef: { current: ((nodeId: string, mode: CanvasNodeGenerationMode, prompt: string) => Promise<void>) | null };
+    editImageAnnotationRef: { current: ((annotationNodeId: string, prompt?: string) => Promise<void>) | null };
     setNodes: Dispatch<SetStateAction<CanvasNodeData[]>>;
     setConnections: Dispatch<SetStateAction<CanvasConnection[]>>;
     setSelectedNodeIds: Dispatch<SetStateAction<Set<string>>>;
@@ -39,6 +41,7 @@ export function useCanvasAgentOperations({
     projectId,
     domainProjectId,
     projectTitle,
+    manualDelivery = false,
     nodes,
     connections,
     selectedNodeIds,
@@ -48,6 +51,7 @@ export function useCanvasAgentOperations({
     selectedNodeIdsRef,
     viewportRef,
     generateNodeRef,
+    editImageAnnotationRef,
     setNodes,
     setConnections,
     setSelectedNodeIds,
@@ -56,6 +60,8 @@ export function useCanvasAgentOperations({
     setContextMenu,
     focusSelection,
 }: UseCanvasAgentOperationsOptions) {
+    const manualDeliveryRef = useRef(manualDelivery);
+    manualDeliveryRef.current = manualDelivery;
     const undoStackRef = useRef<CanvasAgentUndoBatch[]>([]);
     const [undoOpsCount, setUndoOpsCount] = useState(0);
     const [lastAgentChange, setLastAgentChange] = useState<CanvasAgentChange | null>(null);
@@ -83,7 +89,20 @@ export function useCanvasAgentOperations({
         const safeOps = Array.isArray(ops) ? ops.filter((op) => op?.type) : [];
         const before = { projectId, domainProjectId, title: projectTitle, nodes: nodesRef.current, connections: connectionsRef.current, selectedNodeIds: Array.from(selectedNodeIdsRef.current), viewport: viewportRef.current };
         const generationOps = safeOps.filter((op): op is Extract<CanvasAgentOp, { type: "run_generation" }> => op.type === "run_generation" && Boolean(op.nodeId));
-        const next = applyCanvasAgentOps(before, safeOps.filter((op) => op.type !== "run_generation"));
+        const manualVideoNodeOps = safeOps.some((op) => op.type === "add_node" && (
+            op.nodeType === "video" || op.metadata?.generationMode === "video"
+        ));
+        const manualVideoGenerationOps = generationOps.some((op) => {
+            const target = before.nodes.find((node) => node.id === op.nodeId);
+            const addedTarget = safeOps.find((candidate): candidate is Extract<CanvasAgentOp, { type: "add_node" }> => candidate.type === "add_node" && candidate.id === op.nodeId);
+            return (op.mode || target?.metadata?.generationMode || addedTarget?.metadata?.generationMode) === "video";
+        });
+        if (manualDeliveryRef.current && (manualVideoGenerationOps || manualVideoNodeOps)) {
+            // 在 Agent 入口拦截整批操作，避免先写入配置节点再偷偷提交视频任务。
+            throw new Error(MANUAL_DELIVERY_VIDEO_MESSAGE);
+        }
+        const annotationOps = safeOps.filter((op): op is Extract<CanvasAgentOp, { type: "run_image_annotation" }> => op.type === "run_image_annotation" && Boolean(op.annotationNodeId));
+        const next = applyCanvasAgentOps(before, safeOps.filter((op) => op.type !== "run_generation" && op.type !== "run_image_annotation"));
         const beforeNodeIds = new Set(before.nodes.map((node) => node.id));
         const addedNodeIds = next.nodes.filter((node) => !beforeNodeIds.has(node.id)).map((node) => node.id);
         const addedNodeIdSet = new Set(addedNodeIds);
@@ -115,8 +134,11 @@ export function useCanvasAgentOperations({
                 void generateNodeRef.current?.(op.nodeId, op.mode || target?.metadata?.generationMode || "image", prompt);
             }));
         }
+        if (annotationOps.length) {
+            queueMicrotask(() => annotationOps.forEach((op) => void editImageAnnotationRef.current?.(op.annotationNodeId, op.prompt)));
+        }
         return { ...next, projectId, title: projectTitle, selectedNodeIds: nextSelectedNodeIds };
-    }, [connectionsRef, domainProjectId, focusSelection, generateNodeRef, nodesRef, projectId, projectTitle, selectedNodeIdsRef, setConnections, setContextMenu, setNodes, setSelectedConnectionId, setSelectedNodeIds, setViewport, viewportRef]);
+    }, [connectionsRef, domainProjectId, editImageAnnotationRef, focusSelection, generateNodeRef, nodesRef, projectId, projectTitle, selectedNodeIdsRef, setConnections, setContextMenu, setNodes, setSelectedConnectionId, setSelectedNodeIds, setViewport, viewportRef]);
 
     const undoOps = useCallback(() => {
         const batch = undoStackRef.current.at(-1);
@@ -164,6 +186,7 @@ function agentAffectedNodeIds(ops: CanvasAgentOp[], nodes: CanvasNodeData[]) {
     ops.forEach((op) => {
         if ((op.type === "add_node" || op.type === "update_node" || op.type === "run_generation") && "id" in op && op.id && existingIds.has(op.id)) ids.add(op.id);
         if (op.type === "run_generation" && existingIds.has(op.nodeId)) ids.add(op.nodeId);
+        if (op.type === "run_image_annotation" && existingIds.has(op.annotationNodeId)) ids.add(op.annotationNodeId);
         if (op.type === "select_nodes") op.ids.filter((id) => existingIds.has(id)).forEach((id) => ids.add(id));
     });
     return [...ids];

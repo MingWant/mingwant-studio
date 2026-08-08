@@ -1,6 +1,7 @@
 package handler
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -29,7 +30,7 @@ func RegisterTaskRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		task, err := svc.CreateTask(user.ID, req)
 		if err != nil {
-			fail(c, http.StatusBadRequest, err)
+			failService(c, err)
 			return
 		}
 		ok(c, task)
@@ -47,7 +48,7 @@ func RegisterTaskRoutes(r *gin.RouterGroup, svc *service.Service) {
 			ActiveOnly: c.Query("activeOnly") == "true",
 		})
 		if err != nil {
-			fail(c, http.StatusInternalServerError, err)
+			failService(c, err)
 			return
 		}
 		ok(c, tasks)
@@ -58,9 +59,18 @@ func RegisterTaskRoutes(r *gin.RouterGroup, svc *service.Service) {
 			failService(c, err)
 			return
 		}
+		if c.Query("includeBilling") == "true" {
+			task, err := svc.TaskWithBilling(user.ID, c.Param("id"))
+			if err != nil {
+				failNotFound(c, "任务不存在", err)
+				return
+			}
+			ok(c, task)
+			return
+		}
 		task, err := svc.Task(user.ID, c.Param("id"))
 		if err != nil {
-			fail(c, http.StatusNotFound, err)
+			failNotFound(c, "任务不存在", err)
 			return
 		}
 		ok(c, task)
@@ -71,12 +81,50 @@ func RegisterTaskRoutes(r *gin.RouterGroup, svc *service.Service) {
 			failService(c, err)
 			return
 		}
-		task, err := svc.RetryTask(user.ID, c.Param("id"))
+		policy, available := loadRuntimePolicy(c, svc)
+		if !available || !enforceRateLimit(c, "tasks:"+user.ID, policy.Request.TaskCreatePerMinute, time.Minute) {
+			return
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, 4<<10)
+		var req struct {
+			ConfirmNewProviderRequest bool `json:"confirmNewProviderRequest"`
+		}
+		if err := c.ShouldBindJSON(&req); err != nil {
+			fail(c, http.StatusBadRequest, errors.New("重试确认参数格式错误"))
+			return
+		}
+		task, err := svc.RetryTask(user.ID, c.Param("id"), req.ConfirmNewProviderRequest)
 		if err != nil {
-			fail(c, http.StatusBadRequest, err)
+			failService(c, err)
 			return
 		}
 		ok(c, task)
+	})
+	r.POST("/tasks/:id/query-provider", func(c *gin.Context) {
+		user, err := currentUser(c, svc)
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		result, err := svc.QueryFailedVideoTask(c.Request.Context(), user.ID, c.Param("id"))
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		ok(c, result)
+	})
+	r.POST("/tasks/:id/recover-delivery", func(c *gin.Context) {
+		user, err := currentUser(c, svc)
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		result, err := svc.RecoverTaskDelivery(user.ID, c.Param("id"))
+		if err != nil {
+			failService(c, err)
+			return
+		}
+		ok(c, result)
 	})
 	r.POST("/tasks/:id/cancel", func(c *gin.Context) {
 		user, err := currentUser(c, svc)
@@ -86,7 +134,7 @@ func RegisterTaskRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		task, err := svc.CancelTask(user.ID, c.Param("id"))
 		if err != nil {
-			fail(c, http.StatusBadRequest, err)
+			failService(c, err)
 			return
 		}
 		ok(c, task)
@@ -99,7 +147,7 @@ func RegisterTaskRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		logs, err := svc.TaskLogs(user.ID, c.Param("id"))
 		if err != nil {
-			fail(c, http.StatusInternalServerError, err)
+			failService(c, err)
 			return
 		}
 		ok(c, logs)
@@ -125,7 +173,7 @@ func RegisterSessionRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		detail, err := svc.CreateSession(user.ID, req)
 		if err != nil {
-			fail(c, http.StatusBadRequest, err)
+			failService(c, err)
 			return
 		}
 		ok(c, detail)
@@ -138,7 +186,7 @@ func RegisterSessionRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		detail, err := svc.SessionDetail(user.ID, c.Param("id"))
 		if err != nil {
-			fail(c, http.StatusNotFound, err)
+			failNotFound(c, "会话不存在", err)
 			return
 		}
 		ok(c, detail)
@@ -161,7 +209,7 @@ func RegisterSessionRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		item, err := svc.StoreUpload(user.ID, c.PostForm("sessionId"), file)
 		if err != nil {
-			fail(c, http.StatusInternalServerError, err)
+			failService(c, err)
 			return
 		}
 		ok(c, item)
@@ -174,7 +222,7 @@ func RegisterSessionRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		detail, err := svc.SessionDetail(user.ID, c.Param("id"))
 		if err != nil {
-			fail(c, http.StatusNotFound, err)
+			failNotFound(c, "会话不存在", err)
 			return
 		}
 		ok(c, detail.Results)

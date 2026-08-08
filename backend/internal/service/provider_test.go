@@ -11,9 +11,50 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"infinite-canvas/backend/internal/model"
 )
 
 const testReferenceImageDataURL = "data:image/png;base64,aGVsbG8="
+
+func TestSystemChannelIDFromBaseURLOnlyAcceptsRelativeProxyPath(t *testing.T) {
+	if got := systemChannelIDFromBaseURL("/api/ai/system/channel-1"); got != "channel-1" {
+		t.Fatalf("relative system proxy path = %q", got)
+	}
+	for _, value := range []string{
+		"https://attacker.example/api/ai/system/channel-1",
+		"https://attacker.example/prefix/api/ai/system/channel-1",
+		"api/ai/system/channel-1",
+		"/api/ai/system/channel-1/other",
+		"/api/ai/system/channel-1?redirect=https://attacker.example",
+	} {
+		if got := systemChannelIDFromBaseURL(value); got != "" {
+			t.Fatalf("systemChannelIDFromBaseURL(%q) = %q, want empty", value, got)
+		}
+	}
+}
+
+func TestPostJSONRejectsUnserializableBodyBeforeSupplierCall(t *testing.T) {
+	calls := 0
+	server := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		calls++
+		writer.Header().Set("Content-Type", "application/json")
+		_, _ = writer.Write([]byte(`{"ok":true}`))
+	}))
+	defer server.Close()
+
+	var target map[string]interface{}
+	err := postJSON(context.Background(), providerConfig{BaseURL: server.URL, APIKey: "secret"}, "/v1/test", map[string]interface{}{"invalid": func() {}}, &target)
+	if err == nil || calls != 0 {
+		t.Fatalf("postJSON() error = %v, supplier calls = %d", err, calls)
+	}
+	if message := taskFailureMessage(err); message != providerRequestSerializationFailureMessage {
+		t.Fatalf("taskFailureMessage() = %q", message)
+	}
+	if billingFailureUncertain(err) {
+		t.Fatalf("serialization before request must remain refundable: %v", err)
+	}
+}
 
 func TestWriteMediaPartSanitizesFilenameAndSetsMimeType(t *testing.T) {
 	var body bytes.Buffer
@@ -54,10 +95,20 @@ func TestWriteMediaPartSanitizesFilenameAndSetsMimeType(t *testing.T) {
 	}
 }
 
-func TestProviderHTTPErrorWarnsAboutUncertain524Billing(t *testing.T) {
-	message := (providerHTTPError{StatusCode: 524, Status: "524 A Timeout Occurred"}).Error()
-	if !strings.Contains(message, "可能仍在服务端执行并产生费用") || !strings.Contains(message, "请勿立即重试") {
-		t.Fatalf("providerHTTPError.Error() = %q", message)
+func TestProviderHTTPErrorWarnsAboutUncertainGatewayBilling(t *testing.T) {
+	for _, statusCode := range []int{http.StatusRequestTimeout, 499, http.StatusInternalServerError, http.StatusBadGateway, http.StatusServiceUnavailable, http.StatusGatewayTimeout, 524, 599} {
+		message := (providerHTTPError{StatusCode: statusCode}).Error()
+		if !strings.Contains(message, "可能仍在") || !strings.Contains(message, "产生费用") || !strings.Contains(message, "请勿立即重试") {
+			t.Fatalf("providerHTTPError(%d).Error() = %q", statusCode, message)
+		}
+	}
+}
+
+func TestProviderHTTPStatusKeepsExplicitRejectionsRefundable(t *testing.T) {
+	for _, statusCode := range []int{http.StatusBadRequest, http.StatusUnauthorized, http.StatusForbidden, http.StatusNotFound, http.StatusUnprocessableEntity, http.StatusTooManyRequests, http.StatusNotImplemented} {
+		if ProviderHTTPStatusRequiresBillingReview(statusCode) {
+			t.Fatalf("status %d must remain an explicit rejection", statusCode)
+		}
 	}
 }
 
@@ -581,7 +632,7 @@ func TestNewAPIChannel1VideoBodyMapsFramesAndReferences(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	defer server.Close()
 
-	body, err := newAPIChannel1VideoBody(canvasGenerationInput{
+	body, err := newAPIChannel1VideoBody(context.Background(), canvasGenerationInput{
 		Prompt: "make it move",
 		Config: providerConfig{Model: "seedance-2.0", Size: "9:16", VQuality: "1080", VideoSeconds: "15", VideoWatermark: "true"},
 		ReferenceImages: []providerMedia{
@@ -614,7 +665,7 @@ func TestNewAPIChannel1VideoBodyMapsFramesAndReferences(t *testing.T) {
 }
 
 func TestNewAPIChannel1VideoBodyRejectsInlineMedia(t *testing.T) {
-	_, err := newAPIChannel1VideoBody(canvasGenerationInput{
+	_, err := newAPIChannel1VideoBody(context.Background(), canvasGenerationInput{
 		Prompt:          "make it move",
 		Config:          providerConfig{Model: "seedance-2.0"},
 		ReferenceImages: []providerMedia{{ID: "image", DataURL: testReferenceImageDataURL}},
@@ -688,12 +739,17 @@ func TestRunNewAPIChannel2VideoTaskDownloadsTemporaryResult(t *testing.T) {
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 				t.Fatalf("decode request: %v", err)
 			}
-			if body["model"] != "grok-image-video" || body["seconds"] != float64(10) || body["aspect_ratio"] != "9:16" || body["resolution"] != "720p" {
+			if body["model"] != "grok-image-video" || body["seconds"] != "10" || body["aspect_ratio"] != "9:16" || body["resolution"] != "720p" {
 				t.Errorf("body = %#v", body)
 			}
 			images, ok := body["image_urls"].([]interface{})
 			if !ok || len(images) != 2 || images[0] != testReferenceImageDataURL {
 				t.Errorf("image_urls = %#v", body["image_urls"])
+			}
+			videos, _ := body["video_urls"].([]interface{})
+			audios, _ := body["audio_urls"].([]interface{})
+			if len(videos) != 1 || len(audios) != 1 || body["generate_audio"] != true {
+				t.Errorf("multi-reference body = %#v", body)
 			}
 			w.Header().Set("Content-Type", "application/json")
 			_, _ = w.Write([]byte(`{"task_id":"grok-task","status":"queued"}`))
@@ -716,7 +772,9 @@ func TestRunNewAPIChannel2VideoTaskDownloadsTemporaryResult(t *testing.T) {
 			{ID: "image-1", DataURL: testReferenceImageDataURL},
 			{ID: "image-2", DataURL: testReferenceImageDataURL},
 		},
-		Metadata: map[string]interface{}{"videoEditOperation": "image_to_video"},
+		ReferenceVideos: []providerMedia{{ID: "video-1", URL: server.URL + "/reference.mp4"}},
+		ReferenceAudios: []providerMedia{{ID: "audio-1", URL: server.URL + "/reference.mp3"}},
+		Metadata:        map[string]interface{}{"videoEditOperation": "image_to_video"},
 	})
 	if err != nil {
 		t.Fatalf("runVideoTask() error = %v", err)
@@ -728,6 +786,56 @@ func TestRunNewAPIChannel2VideoTaskDownloadsTemporaryResult(t *testing.T) {
 	want := "POST /v1/video/generations,GET /v1/video/generations/grok-task,GET /video.mp4"
 	if got := strings.Join(paths, ","); got != want {
 		t.Fatalf("paths = %q, want %q", got, want)
+	}
+}
+
+func TestRunGeminiVeoVideoTaskUsesLongRunningOperation(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	paths := make([]string, 0, 3)
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if r.Header.Get("x-goog-api-key") != "test-key" {
+			t.Errorf("x-goog-api-key = %q", r.Header.Get("x-goog-api-key"))
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "POST /v1beta/models/veo-test:predictLongRunning":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"name":"operations/op-1"}`))
+		case "GET /v1beta/operations/op-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"done":true,"response":{"generatedSamples":[{"video":{"uri":"` + server.URL + `/video.mp4"}}]}}`))
+		case "GET /video.mp4":
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write([]byte("video"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := runVideoTask(context.Background(), canvasGenerationInput{
+		Prompt: "make it move",
+		Config: providerConfig{BaseURL: server.URL, APIKey: "test-key", APIFormat: "gemini", Model: "veo-test", InterfaceType: "gemini-veo", VideoSeconds: "6", Size: "16:9", VQuality: "720"},
+	})
+	if err != nil {
+		t.Fatalf("runVideoTask() error = %v", err)
+	}
+	video := result["video"].(map[string]interface{})
+	if video["dataUrl"] != "data:video/mp4;base64,dmlkZW8=" {
+		t.Fatalf("video = %#v", video)
+	}
+	want := "POST /v1beta/models/veo-test:predictLongRunning,GET /v1beta/operations/op-1,GET /video.mp4"
+	if got := strings.Join(paths, ","); got != want {
+		t.Fatalf("paths = %q, want %q", got, want)
+	}
+}
+
+func TestEnrichAPICallLogReadsGeminiVeoOperationName(t *testing.T) {
+	log := model.ApiCallLog{APIFormat: "gemini", Capability: "video", RequestKind: "create"}
+	(&Service{}).EnrichAPICallLog(&log, []byte(`{"name":"operations/op-1"}`))
+	if log.ProviderRequestID != "operations/op-1" {
+		t.Fatalf("ProviderRequestID = %q", log.ProviderRequestID)
 	}
 }
 

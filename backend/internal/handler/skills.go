@@ -149,7 +149,7 @@ func proxySkillImage(c *gin.Context) {
 	defer cancel()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, target.String(), nil)
 	if err != nil {
-		fail(c, http.StatusBadRequest, err)
+		fail(c, http.StatusBadRequest, errInvalidSkillImageURL())
 		return
 	}
 	req.Header.Set("Accept", "image/avif,image/webp,image/apng,image/svg+xml,image/*,*/*;q=0.8")
@@ -164,7 +164,7 @@ func proxySkillImage(c *gin.Context) {
 	}
 	resp, err := client.Do(req)
 	if err != nil {
-		fail(c, http.StatusBadGateway, err)
+		failInternal(c, http.StatusBadGateway, "技能图片读取失败，请稍后再试", err)
 		return
 	}
 	defer resp.Body.Close()

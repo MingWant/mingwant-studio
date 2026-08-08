@@ -1,6 +1,7 @@
 package service
 
 import (
+	"strings"
 	"testing"
 
 	"infinite-canvas/backend/internal/model"
@@ -83,7 +84,7 @@ func TestSaveTaskCompletionPersistsRelatedRowsTogether(t *testing.T) {
 		t.Fatal(err)
 	}
 	session := model.Session{ID: "session-1", UserID: "user-1", Status: model.SessionStatusActive}
-	task := model.Task{ID: "task-1", UserID: "user-1", SessionID: session.ID, Status: model.TaskStatusRunning, InputJSON: `{"mode":"text"}`}
+	task := model.Task{ID: "task-1", UserID: "user-1", SessionID: session.ID, Status: model.TaskStatusRunning, LeaseOwner: "worker-test", InputJSON: `{"mode":"text"}`}
 	if err := db.Create(&session).Error; err != nil {
 		t.Fatal(err)
 	}
@@ -104,5 +105,126 @@ func TestSaveTaskCompletionPersistsRelatedRowsTogether(t *testing.T) {
 	}
 	if task.Status != model.TaskStatusSucceeded || messageCount != 1 || resultCount != 2 {
 		t.Fatalf("completion = status:%s messages:%d results:%d", task.Status, messageCount, resultCount)
+	}
+}
+
+func TestCheckpointTaskResultPersistsBeforeCompletionTransaction(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.SystemSetting{}, &model.Task{}, &model.TaskLog{}, &model.Result{}, &model.ApiCallLog{}); err != nil {
+		t.Fatal(err)
+	}
+	task := model.Task{ID: "task-checkpoint", UserID: "user-1", Status: model.TaskStatusRunning, LeaseOwner: "worker-1"}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{repo: repository.New(db)}
+	if err := svc.checkpointTaskResultWithinStorageQuota(&task, []byte(`{"image":{"resourceId":"resource-1"}}`), []byte(`[{"op":"add"}]`)); err != nil {
+		t.Fatal(err)
+	}
+	stored, err := svc.repo.Task(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ResultJSON != task.ResultJSON || stored.DeliveryOpsJSON != task.DeliveryOpsJSON || stored.Stage != "持久化生成结果" || stored.Progress != 90 {
+		t.Fatalf("checkpoint = result:%q stage:%q progress:%d", stored.ResultJSON, stored.Stage, stored.Progress)
+	}
+	task.LeaseOwner = "worker-2"
+	if err := svc.checkpointTaskResultWithinStorageQuota(&task, []byte(`{"unexpected":true}`), []byte("null")); err == nil {
+		t.Fatal("checkpoint with wrong lease owner error = nil")
+	}
+}
+
+func TestCheckpointProviderResultAfterLocalFailureBlocksPaidRetryPath(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.SystemSetting{}, &model.Task{}, &model.TaskLog{}, &model.Result{}, &model.ApiCallLog{}); err != nil {
+		t.Fatal(err)
+	}
+	task := model.Task{ID: "task-local-failure", UserID: "user-1", Status: model.TaskStatusRunning, LeaseOwner: "worker-1"}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{repo: repository.New(db)}
+	checkpointed := svc.checkpointProviderResultAfterLocalFailure(&task, map[string]interface{}{
+		"images": []interface{}{map[string]interface{}{"dataUrl": "data:image/png;base64,YQ=="}},
+	}, nil)
+	if !checkpointed {
+		t.Fatal("checkpointProviderResultAfterLocalFailure() = false")
+	}
+	stored, err := svc.repo.Task(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.ResultJSON == "" || stored.DeliveryOpsJSON != "null" || taskForOutput(*stored).DeliveryRecoverable {
+		t.Fatalf("stored recovery checkpoint = %#v", stored)
+	}
+	stored.Status = model.TaskStatusFailed
+	if !taskForOutput(*stored).DeliveryRecoverable {
+		t.Fatal("terminal task with checkpoint was not exposed as recoverable")
+	}
+}
+
+func TestTaskListProjectsRecoveryMarkerWithoutLargeCheckpointBody(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.Task{}); err != nil {
+		t.Fatal(err)
+	}
+	fullResult := `{"payload":"` + strings.Repeat("x", 1<<20) + `"}`
+	task := model.Task{
+		ID: "task-large-checkpoint", UserID: "user-1", Status: model.TaskStatusFailed,
+		ResultJSON: fullResult, DeliveryOpsJSON: "null",
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	tasks, err := repository.New(db).Tasks(task.UserID, 10, "", false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(tasks) != 1 || tasks[0].ResultJSON != "{}" || tasks[0].DeliveryOpsJSON != "1" {
+		t.Fatalf("task list projection = %#v", tasks)
+	}
+	if !taskSummaryForOutput(tasks[0]).DeliveryRecoverable {
+		t.Fatal("large local checkpoint was not exposed as recoverable")
+	}
+}
+
+func TestRecoverTaskDeliveryUsesCheckpointWithoutProviderCall(t *testing.T) {
+	db, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := db.AutoMigrate(&model.SystemSetting{}, &model.Asset{}, &model.CanvasProject{}, &model.Session{}, &model.Message{}, &model.Task{}, &model.TaskLog{}, &model.Result{}, &model.ApiCallLog{}); err != nil {
+		t.Fatal(err)
+	}
+	task := model.Task{
+		ID: "task-delivery", UserID: "user-1", Status: model.TaskStatusFailed, Stage: "任务交付失败",
+		ResultJSON: `{"image":{"resourceId":"resource-1"}}`, DeliveryOpsJSON: "null", Error: providerResultDeliveryFailureMessage,
+	}
+	if err := db.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	svc := &Service{repo: repository.New(db)}
+	result, err := svc.RecoverTaskDelivery("user-1", task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.Task.Status != model.TaskStatusSucceeded || result.Task.DeliveryRecoverable || !result.BillingSettled {
+		t.Fatalf("recovery = %#v", result)
+	}
+	stored, err := svc.repo.Task(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if stored.Status != model.TaskStatusSucceeded || stored.DeliveryOpsJSON != "" || stored.ResultJSON != task.ResultJSON || stored.Error != "" {
+		t.Fatalf("stored task = status:%s ops:%q result:%q error:%q", stored.Status, stored.DeliveryOpsJSON, stored.ResultJSON, stored.Error)
 	}
 }

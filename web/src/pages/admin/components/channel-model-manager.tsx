@@ -4,6 +4,11 @@ import type { ColumnsType } from "antd/es/table";
 import { ArrowLeft, Plus, RefreshCw, Search, Trash2 } from "lucide-react";
 
 import { ListToolbar, TableSurface } from "@/components/layout/workspace-page";
+import { ChannelProbeButton } from "@/components/channel-probe-button";
+import { ModelCapabilityEditor } from "@/components/model-capability-editor";
+import { CHANNEL_PROBE_VERIFIER_VERSION } from "@/lib/channel-probe-readiness";
+import { defaultModelCapabilityConfig, type ModelCapabilityConfig } from "@/lib/model-capabilities";
+import { MODEL_PROTOCOL_OPTIONS, modelProtocolCapability, modelProtocolDefinition, modelProtocolLabel, modelProtocolSummary, type ModelProtocol } from "@/lib/model-protocols";
 import { createAdminChannelModel, deleteAdminChannelModel, fetchAdminChannelModels, listAdminChannelModels, updateAdminChannelModel, type ChannelModel } from "@/services/api/wallet";
 import type { ModelChannel } from "@/stores/use-config-store";
 
@@ -11,6 +16,8 @@ type FormValues = {
     modelKey: string;
     displayName?: string;
     capability: ChannelModel["capability"];
+    protocol: ModelProtocol;
+    capabilityConfig?: ModelCapabilityConfig;
     billingMode: ChannelModel["billingMode"];
     unitPrice: number;
     enabled: boolean;
@@ -32,6 +39,7 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
     const [form] = Form.useForm<FormValues>();
     const billingMode = Form.useWatch("billingMode", form) || "fixed_request";
     const modelCapability = Form.useWatch("capability", form);
+    const modelProtocol = Form.useWatch("protocol", form);
 
     const reload = async () => {
         if (!channel) return;
@@ -74,13 +82,14 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
 
     const startCreate = () => {
         setEditing(null);
-        form.setFieldsValue({ modelKey: "", displayName: "", capability: capabilityFromInterface(channel?.interfaceType), billingMode: "fixed_request", unitPrice: 0, enabled: true });
+        const capability = capabilityFromInterface(channel?.interfaceType);
+        form.setFieldsValue({ modelKey: "", displayName: "", capability, protocol: channel.interfaceType || "chat-completion", capabilityConfig: capability === "video" ? defaultModelCapabilityConfig(channel.interfaceType) : undefined, billingMode: "fixed_request", unitPrice: 0, enabled: true });
         setEditorOpen(true);
     };
 
     const startEdit = (item: ChannelModel) => {
         setEditing(item);
-        form.setFieldsValue({ modelKey: item.modelKey, displayName: item.displayName, capability: item.capability, billingMode: item.billingMode, unitPrice: item.unitPriceMicrocredits / 1_000_000, enabled: item.enabled });
+        form.setFieldsValue({ modelKey: item.modelKey, displayName: item.displayName, capability: item.capability, protocol: item.protocol || channel.interfaceType || "chat-completion", capabilityConfig: item.capabilityConfig || (item.capability === "video" ? defaultModelCapabilityConfig(item.protocol || channel.interfaceType) : undefined), billingMode: item.billingMode, unitPrice: item.unitPriceMicrocredits / 1_000_000, enabled: item.enabled });
         setEditorOpen(true);
     };
 
@@ -92,6 +101,8 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
                 modelKey: values.modelKey.trim(),
                 displayName: values.displayName?.trim() || values.modelKey.trim(),
                 capability: values.capability,
+                protocol: values.protocol,
+                capabilityConfig: values.capability === "video" ? values.capabilityConfig : undefined,
                 billingMode: values.billingMode,
                 unitPriceMicrocredits: Math.round(values.unitPrice * 1_000_000),
                 priceConfigured: true,
@@ -122,6 +133,11 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
         }
     };
 
+    const refreshAfterProbe = async () => {
+        await reload();
+        await onChanged();
+    };
+
     const columns: ColumnsType<ChannelModel> = [
         {
             title: "模型",
@@ -133,14 +149,17 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
             ),
         },
         { title: "能力", dataIndex: "capability", width: 90, render: capabilityLabel },
+        { title: "请求协议", dataIndex: "protocol", width: 230, render: (value: ModelProtocol) => <div><div className="text-xs font-medium">{modelProtocolLabel(value || channel.interfaceType)}</div><div className="truncate text-[10px] text-foreground/45">{modelProtocolDefinition(value || channel.interfaceType)?.create}</div></div> },
         { title: "计费", width: 165, render: (_, item) => (item.priceConfigured ? `${formatCredits(item.unitPriceMicrocredits)} 积分 / ${item.billingMode === "per_second" ? "秒" : "次"}` : <Tag color="orange">未配置价格</Tag>) },
+        { title: "LLM 测活", width: 135, render: (_, item) => channelModelProbeState(item) },
         { title: "版本", dataIndex: "priceVersion", width: 75, render: (value) => `v${value}` },
         { title: "状态", dataIndex: "enabled", width: 85, render: (enabled) => (enabled ? <Tag color="green">启用</Tag> : <Tag>停用</Tag>) },
         {
             title: "操作",
-            width: 120,
+            width: 180,
             render: (_, item) => (
                 <Space>
+                    {item.capability === "text" ? <ChannelProbeButton channel={channel} models={[{ model: item.modelKey, label: item.displayName || item.modelKey, protocol: textProbeProtocol(channel, item) }]} onCompleted={refreshAfterProbe} onToolCompleted={refreshAfterProbe} /> : null}
                     <Button size="small" onClick={() => startEdit(item)}>编辑</Button>
                     <Popconfirm title="删除模型" description="删除后模型不再显示，历史账单仍会保留。该操作不能在页面恢复。" okText="删除" cancelText="取消" onConfirm={() => void remove(item)}>
                         <Button size="small" danger title="删除模型" aria-label="删除模型" icon={<Trash2 className="size-3.5" />} />
@@ -166,7 +185,7 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
                     <Button aria-label="返回系统渠道" icon={<ArrowLeft className="size-4" />} onClick={onClose} />
                     <div className="min-w-0">
                         <h2 className="truncate text-lg font-semibold">{channel.name} / 模型管理</h2>
-                        <p className="mt-1 text-xs text-foreground/50">维护模型能力、计费单位、积分单价与启用状态。</p>
+                        <p className="mt-1 text-xs text-foreground/50">维护模型能力、请求协议、计费与启用状态。</p>
                     </div>
                 </div>
                 <Space wrap>
@@ -192,10 +211,10 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
                     columns={columns}
                     dataSource={filteredItems}
                     pagination={{ current: page, pageSize, total: filteredItems.length, showSizeChanger: true, pageSizeOptions: [20, 50, 100], showTotal: (total, range) => `${range[0]}-${range[1]} / 共 ${total} 个模型`, onChange: (nextPage, nextPageSize) => { setPage(nextPageSize !== pageSize ? 1 : nextPage); setPageSize(nextPageSize); } }}
-                    scroll={{ x: 760 }}
+                    scroll={{ x: 1125 }}
                 />
             </TableSurface>
-            <Drawer title={editing ? "编辑模型" : "新增模型"} open={editorOpen} size="min(520px, 100vw)" onClose={() => setEditorOpen(false)} styles={{ body: { paddingBottom: 88 } }} extra={editing ? <Button size="small" icon={<Plus className="size-3.5" />} onClick={startCreate}>新增</Button> : null}>
+            <Drawer title={editing ? "编辑模型" : "新增模型"} open={editorOpen} size="min(720px, 100vw)" onClose={() => setEditorOpen(false)} styles={{ body: { paddingBottom: 88 } }} extra={editing ? <Button size="small" icon={<Plus className="size-3.5" />} onClick={startCreate}>新增</Button> : null}>
                 <Form form={form} layout="vertical" requiredMark={false}>
                     <Form.Item name="modelKey" label="模型标识" rules={[{ required: true, message: "请输入模型标识" }]}>
                         <Input placeholder="gpt-image-2" />
@@ -204,8 +223,16 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
                         <Input placeholder="不填则使用模型标识" />
                     </Form.Item>
                     <Form.Item name="capability" label="能力" rules={[{ required: true }]}>
-                        <Select onChange={(value) => { if (value !== "video") form.setFieldValue("billingMode", "fixed_request"); }} options={[{ label: "文本", value: "text" }, { label: "图片", value: "image" }, { label: "视频", value: "video" }, { label: "音频", value: "audio" }]} />
+                        <Select onChange={(value) => { if (value !== "video") { form.setFieldValue("billingMode", "fixed_request"); form.setFieldValue("capabilityConfig", undefined); } else if (!form.getFieldValue("capabilityConfig")) form.setFieldValue("capabilityConfig", defaultModelCapabilityConfig(form.getFieldValue("protocol"))); const current = form.getFieldValue("protocol") as ModelProtocol; if (modelProtocolCapability(current) !== value) { const protocol = MODEL_PROTOCOL_OPTIONS.flatMap((group) => group.options).find((item) => modelProtocolCapability(item.value) === value)?.value; form.setFieldValue("protocol", protocol); if (value === "video") form.setFieldValue("capabilityConfig", defaultModelCapabilityConfig(protocol)); } }} options={[{ label: "文本", value: "text" }, { label: "图片", value: "image" }, { label: "视频", value: "video" }, { label: "音频", value: "audio" }]} />
                     </Form.Item>
+                    <Form.Item name="protocol" label="请求协议" rules={[{ required: true, message: "请选择模型请求协议" }]} extra="协议决定创建路径、Content-Type、请求字段和轮询方式。">
+                        <Select onChange={(protocol) => { if (modelCapability === "video") form.setFieldValue("capabilityConfig", defaultModelCapabilityConfig(protocol)); }} options={MODEL_PROTOCOL_OPTIONS.map((group) => ({ ...group, options: group.options.filter((item) => modelProtocolCapability(item.value) === modelCapability) }))} />
+                    </Form.Item>
+                    <div className="mb-5 rounded-md border border-border/70 bg-foreground/[.025] px-3 py-2.5">
+                        <div className="text-xs font-semibold">实际请求预览</div>
+                        <div className="mt-1 font-mono text-[11px] leading-5 text-foreground/60">{modelProtocolSummary(modelProtocol)}</div>
+                    </div>
+                    {modelCapability === "video" ? <Form.Item name="capabilityConfig" noStyle><ModelCapabilityEditor protocol={modelProtocol} /></Form.Item> : null}
                     <Form.Item name="billingMode" label="计费方式" rules={[{ required: true }]}>
                         <Segmented block options={[{ label: "按次计费", value: "fixed_request" }, { label: "按秒计费", value: "per_second", disabled: modelCapability !== "video" }]} />
                     </Form.Item>
@@ -223,9 +250,13 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
 }
 
 function capabilityFromInterface(value?: ModelChannel["interfaceType"]): ChannelModel["capability"] {
-    if (value === "openai-image") return "image";
-    if (value === "newapi" || value === "newapi-channel-1" || value === "newapi-channel-2" || value === "xai-video") return "video";
-    return "text";
+    return modelProtocolCapability(value) || "text";
+}
+
+function textProbeProtocol(channel: ModelChannel, item: ChannelModel): ModelProtocol {
+    if (item.protocol && modelProtocolCapability(item.protocol) === "text") return item.protocol;
+    if (channel.interfaceType && modelProtocolCapability(channel.interfaceType) === "text") return channel.interfaceType;
+    return channel.apiFormat === "gemini" ? "gemini-content" : "chat-completion";
 }
 
 function capabilityLabel(value: ChannelModel["capability"]) {
@@ -234,4 +265,25 @@ function capabilityLabel(value: ChannelModel["capability"]) {
 
 function formatCredits(value: number) {
     return (value / 1_000_000).toLocaleString("zh-CN", { maximumFractionDigits: 6 });
+}
+
+function channelModelProbeState(item: ChannelModel) {
+    const textTag = !item.probeCheckedAt
+        ? <Tag>未测活</Tag>
+        : (() => {
+            const title = `${new Date(item.probeCheckedAt).toLocaleString()}${item.probeDurationMs ? ` · ${Math.round(item.probeDurationMs / 1_000)} 秒` : ""}`;
+            if (Date.now() - Date.parse(item.probeCheckedAt) > 7 * 24 * 60 * 60 * 1_000) return <Tag color="orange" title={title}>需重测</Tag>;
+            if (item.probeStatus !== "succeeded") return <Tag color="red" title={title}>未通过</Tag>;
+            if (item.probeTransport === "stream") return <Tag color="green" title={title}>流式通过</Tag>;
+            if (item.probeTransport === "stream-unverified") return <Tag color="orange" title={title}>SSE 疑似缓冲</Tag>;
+            return <Tag color="orange" title={title}>非流式风险</Tag>;
+        })();
+    if (!item.toolProbeCheckedAt) return textTag;
+    const toolTitle = new Date(item.toolProbeCheckedAt).toLocaleString();
+    const toolTag = Date.now() - Date.parse(item.toolProbeCheckedAt) > 7 * 24 * 60 * 60 * 1_000 || item.toolProbeVerifierVersion !== CHANNEL_PROBE_VERIFIER_VERSION
+        ? <Tag color="orange" title={toolTitle}>工具需重测</Tag>
+        : item.toolProbeStatus === "succeeded"
+            ? <Tag color="green" title={toolTitle}>工具通过</Tag>
+            : <Tag color="red" title={toolTitle}>工具未通过</Tag>;
+    return <Space size={4}>{textTag}{toolTag}</Space>;
 }

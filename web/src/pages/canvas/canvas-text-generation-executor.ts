@@ -17,6 +17,8 @@ export async function executeTextGeneration({
     generationConfig,
     generationContext,
     controller,
+    sourceTaskId,
+    confirmNewProviderRequest,
     editingTextNode,
     projectId,
     setNodes,
@@ -56,7 +58,7 @@ export async function executeTextGeneration({
     const answers = await Promise.all(
         textTargetIds.map((targetNodeId) => {
             let localStreamed = "";
-            return runBackendCanvasGenerationTask({ projectId, nodeId: targetNodeId, mode: "text", prompt: effectivePrompt, config: generationConfig, referenceImages: generationContext.referenceImages, signal: controller.signal, metadata: { sourceNodeId: nodeId, resolvedCharacterVersions: generationContext.resolvedCharacterVersions }, onTaskCreated: (task) => bindGenerationTask(targetNodeId, task) })
+            return runBackendCanvasGenerationTask({ projectId, nodeId: targetNodeId, mode: "text", prompt: effectivePrompt, config: generationConfig, referenceImages: generationContext.referenceImages, signal: controller.signal, sourceTaskId, confirmNewProviderRequest, metadata: { sourceNodeId: nodeId, resolvedCharacterVersions: generationContext.resolvedCharacterVersions }, onTaskCreated: (task) => bindGenerationTask(targetNodeId, task) })
                 .then((result) => {
                     localStreamed = result.text || "";
                     streamed = localStreamed;

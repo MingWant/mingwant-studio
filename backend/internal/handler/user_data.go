@@ -125,7 +125,7 @@ func RegisterUserDataRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		resource, err := svc.Resource(user.ID, c.Param("id"))
 		if err != nil {
-			fail(c, http.StatusNotFound, err)
+			failNotFound(c, "资源不存在", err)
 			return
 		}
 		ok(c, gin.H{"resource": resource})
@@ -138,7 +138,7 @@ func RegisterUserDataRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		resource, err := svc.Resource(user.ID, c.Param("id"))
 		if err != nil {
-			fail(c, http.StatusNotFound, err)
+			failNotFound(c, "资源不存在", err)
 			return
 		}
 		ossURL, err := svc.DirectResourceURL(user.ID, resource.ID)
@@ -159,7 +159,7 @@ func RegisterUserDataRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		resource, err := svc.Resource(user.ID, c.Param("id"))
 		if err != nil {
-			fail(c, http.StatusNotFound, err)
+			failNotFound(c, "资源不存在", err)
 			return
 		}
 		if c.Query("direct") == "1" && resource.Provider != "local" {
@@ -238,7 +238,7 @@ func RegisterUserDataRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		asset, err := svc.UserAsset(user.ID, c.Param("id"))
 		if err != nil {
-			fail(c, http.StatusNotFound, err)
+			failNotFound(c, "素材不存在", err)
 			return
 		}
 		ok(c, gin.H{"asset": asset})
@@ -308,7 +308,7 @@ func RegisterUserDataRoutes(r *gin.RouterGroup, svc *service.Service) {
 		}
 		project, err := svc.UserCanvasProject(user.ID, c.Param("id"))
 		if err != nil {
-			fail(c, http.StatusNotFound, err)
+			failNotFound(c, "画布不存在", err)
 			return
 		}
 		ok(c, gin.H{"project": project})

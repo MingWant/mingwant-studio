@@ -1,6 +1,7 @@
 import { AnimatePresence, LayoutGroup, motion, useReducedMotion } from "motion/react";
 import { ChevronDown, ChevronUp, Clock3, Coins, ListTodo, LoaderCircle } from "lucide-react";
 import { useEffect, useState } from "react";
+import { Link } from "react-router";
 
 import { formatCredits } from "@/constant/credits";
 import { aceternityMotion } from "@/lib/aceternity-motion";
@@ -39,7 +40,7 @@ export function CanvasActiveTaskPanel({ tasks }: { tasks: GenerationTask[] }) {
                 animate={{ opacity: 1, y: 0, scale: 1 }}
                 exit={{ opacity: 0, y: -8, scale: 0.98 }}
                 transition={motionTransition}
-                className="pointer-events-none absolute right-3 top-[72px] z-[120] w-[min(332px,calc(100vw-24px))]"
+                className="pointer-events-none absolute right-3 top-[96px] z-[120] w-[min(332px,calc(100vw-24px))] sm:top-[72px]"
             >
                 <LayoutGroup id="canvas-active-tasks">
                     <motion.section
@@ -96,6 +97,9 @@ export function CanvasActiveTaskPanel({ tasks }: { tasks: GenerationTask[] }) {
                                 </motion.div>
                             ) : null}
                         </AnimatePresence>
+                        <div className="flex justify-end border-t px-3 py-2" style={{ borderColor: theme.toolbar.border }}>
+                            <Link to="/tasks" className="text-[11px] font-medium transition-opacity hover:opacity-75" style={{ color: theme.accent.primary }}>打开任务中心 →</Link>
+                        </div>
                     </motion.section>
                 </LayoutGroup>
             </motion.div>

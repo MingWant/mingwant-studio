@@ -26,6 +26,7 @@ export default function LogsPage() {
     const [loading, setLoading] = useState(true);
     const [selectedIds, setSelectedIds] = useState<string[]>([]);
     const [detailLogId, setDetailLogId] = useState<string | null>(null);
+    const [refreshRevision, setRefreshRevision] = useState(0);
     const requestSequence = useRef(0);
     const hasFilters = Boolean(keyword || status !== "all");
     const userNameById = useMemo(() => new Map(references.users.map((user) => [user.id, user.displayName || user.username])), [references.users]);
@@ -53,7 +54,7 @@ export default function LogsPage() {
             })
             .catch((error) => sequence === requestSequence.current && message.error(error instanceof Error ? error.message : "读取请求明细失败"))
             .finally(() => sequence === requestSequence.current && setLoading(false));
-    }, [debouncedKeyword, status, page, pageSize]);
+    }, [debouncedKeyword, status, page, pageSize, refreshRevision]);
 
     const columns: ColumnsType<ApiCallLog> = [
         { title: "时间", dataIndex: "createdAt", width: 170, render: formatTime },
@@ -79,7 +80,7 @@ export default function LogsPage() {
             <TableSurface>
                 {loading && logs.length === 0 ? <AdminTableSkeleton rows={8} columns={11} /> : <Table className="app-data-table" size="middle" rowKey="id" loading={loading} rowSelection={{ selectedRowKeys: selectedIds, preserveSelectedRowKeys: false, onChange: (keys) => setSelectedIds(keys.map(String)) }} columns={columns} dataSource={logs} locale={{ emptyText: <AdminTableEmpty filtered={hasFilters} /> }} pagination={{ current: page, pageSize, total, showSizeChanger: true, pageSizeOptions: [20, 50, 100], showTotal: (value, range) => `${range[0]}-${range[1]} / 共 ${value} 条`, onChange: (nextPage, nextSize) => updateUrl({ page: nextSize !== pageSize ? 1 : nextPage, pageSize: nextSize }) }} scroll={{ x: 1280 }} />}
             </TableSurface>
-            <ApiLogDetailDrawer logId={detailLogId} onClose={() => setDetailLogId(null)} />
+            <ApiLogDetailDrawer logId={detailLogId} onClose={() => setDetailLogId(null)} onTaskQueried={() => setRefreshRevision((value) => value + 1)} />
         </AdminPageFrame>
     );
 }
@@ -89,4 +90,4 @@ function normalizePageSize(value: string | null) { const parsed = positiveInt(va
 function normalizeStatus(value: string | null): "all" | "succeeded" | "failed" { return value === "succeeded" || value === "failed" ? value : "all"; }
 function formatTime(value?: string) { return value ? new Date(value).toLocaleString("zh-CN", { hour12: false }) : "--"; }
 function capabilityText(value: string) { return ({ text: "文本", image: "图片", video: "视频", audio: "音频" } as Record<string, string>)[value] || "未知"; }
-function requestKindText(value: string) { return ({ create: "创建", poll: "轮询", download: "下载", repair: "修复" } as Record<string, string>)[value] || "请求"; }
+function requestKindText(value: string) { return ({ create: "创建", poll: "轮询", download: "下载", repair: "修复", health_check: "测活" } as Record<string, string>)[value] || "请求"; }

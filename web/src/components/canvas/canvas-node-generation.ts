@@ -8,6 +8,7 @@ import { getGenerationResourceNodes } from "@/lib/canvas/canvas-resource-referen
 import { resolveCanvasDrawingReference } from "@/lib/canvas/canvas-drawing-reference";
 import { compileCharacterReferencePrompt } from "@/lib/canvas/canvas-character-reference";
 import { nodeReferenceImage } from "@/lib/canvas/canvas-project-generation";
+import { projectShotGenerationBlockReason, storyboardRowGenerationContract } from "@/lib/canvas/project-shot-contract";
 
 export type CharacterGenerationReference = {
     nodeId: string;
@@ -61,12 +62,13 @@ export function buildNodeGenerationContext(nodeId: string, nodes: CanvasNodeData
     const storyboardInputs = getConnectedStoryboardRows(nodeId, nodes, connections);
     const hasExplicitNodeMention = /@\[node:[^\]]+\]/.test(normalizeLegacyNodeMentions(prompt, inputs));
     if ((sourceNode?.type === CanvasNodeType.Config && Boolean(sourceNode.metadata?.composerContent?.trim())) || hasExplicitNodeMention) {
-        return buildComposerGenerationContext(inputs, prompt);
+        const videoFrameNodeIds = [sourceNode?.metadata?.videoStartFrameNodeId, sourceNode?.metadata?.videoEndFrameNodeId].filter((id): id is string => Boolean(id));
+        return appendRequiredTextInputs(buildComposerGenerationContext(inputs, prompt, videoFrameNodeIds), storyboardInputs);
     }
 
     const isStoryboardMedia = sourceNode?.type === CanvasNodeType.Image || sourceNode?.type === CanvasNodeType.Video;
     const basePrompt = isStoryboardMedia && storyboardInputs.length ? removeTrailingInputBlocks(prompt, storyboardInputs) : prompt;
-    const textInputs = inputs.filter((input) => input.type === "text");
+    const textInputs = [...inputs.filter((input) => input.type === "text"), ...storyboardInputs];
     const characterReferences = inputs.map((input) => input.character).filter((item): item is CharacterGenerationReference => Boolean(item));
     const upstreamText = textInputs
         .map((input) => input.text)
@@ -109,7 +111,18 @@ function removeTrailingInputBlocks(prompt: string, inputs: NodeGenerationInput[]
     return next;
 }
 
-function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: string): NodeGenerationContext {
+function appendRequiredTextInputs(context: NodeGenerationContext, inputs: NodeGenerationInput[]): NodeGenerationContext {
+    const blocks = inputs.map((input) => input.text?.trim()).filter((value): value is string => Boolean(value));
+    if (!blocks.length) return context;
+    const prompt = removeTrailingInputBlocks(context.prompt, inputs);
+    return {
+        ...context,
+        prompt: [prompt.trim(), ...blocks].filter(Boolean).join("\n\n"),
+        textCount: context.textCount + blocks.length,
+    };
+}
+
+function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: string, videoFrameNodeIds: string[] = []): NodeGenerationContext {
     const normalizedPrompt = normalizeLegacyNodeMentions(prompt, inputs);
     const inputByNodeId = new Map(inputs.map((input) => [input.nodeId, input]));
     const selectedInputs: NodeGenerationInput[] = [];
@@ -141,12 +154,20 @@ function buildComposerGenerationContext(inputs: NodeGenerationInput[], prompt: s
 
     nextPrompt += normalizedPrompt.slice(lastIndex);
     if (textBlocks.length) nextPrompt = `${nextPrompt.trim()}\n\n${textBlocks.join("\n\n")}`;
+    // 首尾帧是结构化生成参数，不受提示词中的 @ 引用筛选影响。
+    const selectedNodeIds = new Set(selectedInputs.map((input) => input.nodeId));
+    videoFrameNodeIds.forEach((nodeId) => {
+        const input = inputByNodeId.get(nodeId);
+        if (!input?.image || selectedNodeIds.has(nodeId)) return;
+        selectedInputs.push(input);
+        selectedNodeIds.add(nodeId);
+    });
     const referenceImages = selectedInputs.map((input) => input.image).filter((image): image is ReferenceImage => Boolean(image));
     const referenceVideos = selectedInputs.map((input) => input.video).filter((video): video is ReferenceVideo => Boolean(video));
     const referenceAudios = selectedInputs.map((input) => input.audio).filter((audio): audio is ReferenceAudio => Boolean(audio));
     const characterReferences = selectedInputs.map((input) => input.character).filter((item): item is CharacterGenerationReference => Boolean(item));
 
-    if (!hasToken && !textBlocks.length) {
+    if (!hasToken && !textBlocks.length && !selectedInputs.length) {
         return {
             prompt,
             referenceImages: [],
@@ -228,6 +249,12 @@ export function buildNodeGenerationInputs(nodeId: string, nodes: CanvasNodeData[
 }
 
 function getConnectedStoryboardRows(nodeId: string, nodes: CanvasNodeData[], connections: CanvasConnection[]): NodeGenerationInput[] {
+    const sourceNode = nodes.find((node) => node.id === nodeId);
+    const generationMode = sourceNode?.type === CanvasNodeType.Image || sourceNode?.metadata?.generationMode === "image"
+        ? "image"
+        : sourceNode?.type === CanvasNodeType.Video || sourceNode?.metadata?.generationMode === "video"
+            ? "video"
+            : "all";
     const targetNodeIds = new Set([nodeId]);
     connections.forEach((connection) => {
         if (connection.fromNodeId === nodeId && nodes.find((node) => node.id === connection.toNodeId)?.type === CanvasNodeType.Config) {
@@ -240,26 +267,32 @@ function getConnectedStoryboardRows(nodeId: string, nodes: CanvasNodeData[], con
         const scriptNode = nodes.find((node) => node.id === connection.fromNodeId && node.type === CanvasNodeType.Script);
         const row = scriptNode?.metadata?.storyboard?.rows.find((item) => `row:${item.id}` === connection.fromHandleId);
         if (!scriptNode || !row) return [];
+        const blockReason = projectShotGenerationBlockReason(row);
+        // 数据库镜头契约损坏时只能降级展示，禁止旧子节点绕过分镜入口继续创建计费任务。
+        if (blockReason) throw new Error(`项目镜头 ${row.shotCode || row.shotNumber} 的结构化定义无效：${blockReason}。请先回到项目补齐定义并重新导入画布`);
         const inputId = `${scriptNode.id}:${connection.fromHandleId}`;
         if (seen.has(inputId)) return [];
         seen.add(inputId);
         const characters = (row.characters || []).map((character) => [character.characterName, character.characterDescription].filter(Boolean).join("：")).filter(Boolean).join("、");
+        const contract = storyboardRowGenerationContract(row, generationMode);
+        const structuredProjectShot = Boolean(row.domainShotId && row.startBoundary && row.endBoundary && !row.contractWarning);
         const text = [
             `【分镜 ${row.shotNumber}】`,
             `时长：${row.durationSeconds} 秒`,
-            row.plotDescription && `画面描述：${row.plotDescription}`,
-            row.dialogue && `台词/旁白：${row.dialogue}`,
+            (generationMode !== "image" || !structuredProjectShot) && row.plotDescription && `画面描述：${row.plotDescription}`,
+            generationMode !== "image" && row.dialogue && `台词/旁白：${row.dialogue}`,
             characters && `角色：${characters}`,
             row.shotSize && `景别：${row.shotSize}`,
             row.emotion && `情绪：${row.emotion}`,
             row.lightingAndAtmosphere && `光影氛围：${row.lightingAndAtmosphere}`,
-            row.audioEffects && `音效：${row.audioEffects}`,
-            row.camera && `镜头设计：${row.camera}`,
-            row.motion && `运镜：${row.motion}`,
-            row.timeBeats && `时间节拍：${row.timeBeats}`,
-            row.imageGenerationPrompt && `图片提示词：${row.imageGenerationPrompt}`,
-            row.videoMotionPrompt && `视频提示词：${row.videoMotionPrompt}`,
+            generationMode !== "image" && row.audioEffects && `音效：${row.audioEffects}`,
+            generationMode !== "image" && row.camera && `镜头设计：${row.camera}`,
+            generationMode !== "image" && row.motion && `运动：${row.motion}`,
+            generationMode !== "image" && row.timeBeats && `时间节拍：${row.timeBeats}`,
+            generationMode !== "video" && row.imageGenerationPrompt && `图片提示词：${row.imageGenerationPrompt}`,
+            generationMode !== "image" && row.videoMotionPrompt && `视频提示词：${row.videoMotionPrompt}`,
             row.negativePrompt && `负面要求：${row.negativePrompt}`,
+            contract,
         ].filter(Boolean).join("\n");
         return [{ nodeId: inputId, type: "text", title: `${scriptNode.title} · 镜头 ${row.shotNumber}`, text, alwaysIncludeText: true }];
     });
@@ -459,6 +492,7 @@ function readReferenceAudio(node: CanvasNodeData): ReferenceAudio | null {
         type: node.metadata.mimeType || "audio/mpeg",
         url: node.metadata.content,
         storageKey: node.metadata.storageKey,
+        bytes: node.metadata.bytes,
         durationMs: node.metadata.durationMs,
     };
 }

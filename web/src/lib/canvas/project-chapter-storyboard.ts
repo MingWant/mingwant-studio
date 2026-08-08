@@ -1,4 +1,5 @@
 import { createCanvasNode, createStoryboardRow } from "@/lib/canvas/canvas-project-domain";
+import { parseProjectShotDefinition, projectShotDefinitionRowPatch } from "@/lib/canvas/project-shot-contract";
 import type { ProjectShot, ProjectUnit } from "@/services/api/projects";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type StoryboardData, type StoryboardRow } from "@/types/canvas";
 
@@ -54,13 +55,34 @@ export function upsertProjectChapterStoryboard(
 function projectShotRow(shot: ProjectShot, index: number, currentRows: Map<string, StoryboardRow>) {
     const id = `project-shot:${shot.id}`;
     const current = currentRows.get(id);
+    const parsed = parseProjectShotDefinition(shot.definitionJson);
+    // 项目数据库拥有镜头事实；重新导入时刷新结构化契约，画布只保留媒体节点等执行状态。
+    const definitionPatch = parsed.definition ? projectShotDefinitionRowPatch(parsed.definition) : {
+        shotCode: undefined,
+        purpose: undefined,
+        informationChange: undefined,
+        sourceRefs: undefined,
+        assetBindings: undefined,
+        startBoundary: undefined,
+        endBoundary: undefined,
+        motionSpec: undefined,
+        camera: "",
+        motion: "",
+        timeBeats: "",
+        imageGenerationPrompt: "",
+        videoMotionPrompt: "",
+        negativePrompt: "",
+    };
     return createStoryboardRow(index + 1, {
         ...current,
+        ...definitionPatch,
         id,
+        domainShotId: shot.id,
         shotNumber: index + 1,
         durationSeconds: Math.max(1, Math.round(shot.durationMs / 1000) || 1),
         plotDescription: shot.description.trim() || shot.title.trim(),
         status: current?.status || "idle",
+        contractWarning: parsed.warning,
     });
 }
 

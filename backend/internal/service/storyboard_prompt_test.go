@@ -15,11 +15,16 @@ func TestStoryboardCinematicQualityContractIncludesRequestedCountAndDuration(t *
 	}
 }
 
-func TestStoryboardCinematicQualityContractIncludesCameraLanguageGuide(t *testing.T) {
+func TestStoryboardContractUsesMediaNeutralCameraGuide(t *testing.T) {
 	contract := storyboardCinematicQualityContract(0, 0)
-	for _, term := range []string{"S01 大远景 ELS", "A05 倾斜角 Dutch Angle", "M15 希区柯克变焦", "C06 前景叠层", "N02 反应镜头", "禁止每 3-5 秒更换一次运镜"} {
+	for _, term := range []string{"真人、二维、三维、定格、绘本或混合媒介", "固定视点与运动视点都有效", "动画或其他媒介", "没有通用配额", "endBoundary", "单个完整 JSON 对象"} {
 		if !strings.Contains(contract, term) {
 			t.Fatalf("camera language guide is missing %q: %s", term, contract)
+		}
+	}
+	for _, forbidden := range []string{"优先使用真实电影机语言", "3D动漫、动画、二次元", "ECU 每场景最多", "通常保持 5-8 秒以上", "全片各不超过 1-2 次"} {
+		if strings.Contains(contract+defaultStoryboardPromptTemplate(), forbidden) {
+			t.Fatalf("storyboard prompt still contains universal medium rule %q", forbidden)
 		}
 	}
 }
@@ -48,5 +53,26 @@ func TestValidateStoryboardShotCount(t *testing.T) {
 	}
 	if err := validateStoryboardShotCount(plan, 0); err != nil {
 		t.Fatalf("expected automatic shot count to pass: %v", err)
+	}
+}
+
+func TestStoryboardImageAndVideoPromptsKeepBoundaryResponsibilitiesSeparate(t *testing.T) {
+	shot := agentStoryboardShot{
+		VisualPrompt:  "冻结画面内容",
+		VideoPrompt:   "执行有序变化",
+		ShotSize:      "中景",
+		Camera:        "固定视点",
+		Motion:        "主体画内移动",
+		TimeBeats:     "0-4秒：完成变化",
+		StartBoundary: &projectShotBoundary{Positions: []string{"开始位置"}},
+		EndBoundary:   &projectShotBoundary{Positions: []string{"结束位置"}},
+	}
+	imagePrompt := buildStoryboardImagePrompt("二维手绘", shot)
+	if !strings.Contains(imagePrompt, "开始位置") || strings.Contains(imagePrompt, "结束位置") || strings.Contains(imagePrompt, "执行有序变化") {
+		t.Fatalf("image prompt crossed boundary responsibilities: %s", imagePrompt)
+	}
+	videoPrompt := buildStoryboardVideoPrompt("二维手绘", shot)
+	if !strings.Contains(videoPrompt, "开始位置") || !strings.Contains(videoPrompt, "结束位置") || strings.Contains(videoPrompt, "冻结画面内容") {
+		t.Fatalf("video prompt crossed boundary responsibilities: %s", videoPrompt)
 	}
 }

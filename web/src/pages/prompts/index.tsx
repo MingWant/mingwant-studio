@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { App, Button, Drawer, Input, Select, Skeleton } from "antd";
 import { BookOpenCheck, Copy, Search, Sparkles, Workflow } from "lucide-react";
 import { useNavigate } from "react-router";
@@ -6,7 +6,11 @@ import { useNavigate } from "react-router";
 import { CollectionGrid, ListToolbar, PageHeader, WorkspacePage } from "@/components/layout/workspace-page";
 import { WorkspaceState } from "@/components/layout/workspace-state";
 import { useCopyText } from "@/hooks/use-copy-text";
+import { createCanvasNode } from "@/lib/canvas/canvas-project-domain";
 import { extractMingWantPromptVariables, loadMingWantPrompt, MINGWANT_PROMPT_CATEGORIES, mingwantPromptTemplates, type MingWantPromptCategory, type MingWantPromptTemplate } from "@/lib/mingwant-prompt-library";
+import { createCanvasProjectWithRemoteSync } from "@/services/user-data-sync";
+import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
+import { CanvasNodeType } from "@/types/canvas";
 
 type CategoryFilter = "all" | MingWantPromptCategory;
 
@@ -20,6 +24,9 @@ export default function PromptsPage() {
     const [activeContent, setActiveContent] = useState("");
     const [contentLoading, setContentLoading] = useState(false);
     const [copyingId, setCopyingId] = useState<string | null>(null);
+    const [handoffId, setHandoffId] = useState<string | null>(null);
+    const handoffPendingRef = useRef(false);
+    const canvasHydrated = useCanvasStore((state) => state.hydrated);
 
     const templates = useMemo(() => {
         const normalized = query.trim().toLowerCase();
@@ -67,6 +74,33 @@ export default function PromptsPage() {
 
     const variables = useMemo(() => extractMingWantPromptVariables(activeContent), [activeContent]);
 
+    const useTemplateInCanvas = async (template: MingWantPromptTemplate, loadedContent?: string) => {
+        if (handoffPendingRef.current) return;
+        handoffPendingRef.current = true;
+        setHandoffId(template.id);
+        try {
+            const content = loadedContent ?? await loadMingWantPrompt(template);
+            if (!content.trim()) throw new Error("提示词内容为空，无法创建画布");
+            const templateVariables = extractMingWantPromptVariables(content);
+            const baseNode = createCanvasNode(CanvasNodeType.Text, { x: 500, y: 360 }, { content, prompt: content, status: "success", fontSize: 14 });
+            const node = {
+                ...baseNode,
+                title: `提示词 · ${template.name}${templateVariables.length ? ` · ${templateVariables.length} 个变量` : ""}`,
+                position: { x: 180, y: 100 },
+                width: 640,
+                height: 520,
+            };
+            const { id, syncError } = await createCanvasProjectWithRemoteSync(`提示词 · ${template.name}`, undefined, { nodes: [node], viewport: { x: 0, y: 0, k: 1 } });
+            if (syncError) message.warning("画布已在本地创建，但云端同步暂时失败；模板内容不会丢失");
+            navigate(`/canvas/${id}`);
+        } catch (error) {
+            message.error(error instanceof Error ? error.message : "提示词无法交接到画布");
+        } finally {
+            handoffPendingRef.current = false;
+            setHandoffId(null);
+        }
+    };
+
     return (
         <>
             <WorkspacePage grid>
@@ -75,7 +109,7 @@ export default function PromptsPage() {
                     title="明想提示词库"
                     description="保留你的原始模板；先让文本模型生成最终图片或视频提示词，再连接对应生成节点。"
                     meta={<span className="text-xs text-foreground/45">{mingwantPromptTemplates.length} 份模板</span>}
-                    actions={<Button type="primary" icon={<Workflow className="size-4" />} onClick={() => navigate("/canvas")}>去画布使用</Button>}
+                    actions={<Button icon={<Workflow className="size-4" />} onClick={() => navigate("/canvas")}>管理画布</Button>}
                 />
 
                 <ListToolbar
@@ -114,8 +148,11 @@ export default function PromptsPage() {
                                 key={template.id}
                                 template={template}
                                 copying={copyingId === template.id}
+                                handingOff={handoffId === template.id}
+                                handoffDisabled={!canvasHydrated || Boolean(handoffId)}
                                 onOpen={() => setActiveTemplate(template)}
                                 onCopy={() => void copyTemplate(template)}
+                                onUse={() => void useTemplateInCanvas(template)}
                             />
                         ))}
                     </CollectionGrid>
@@ -129,7 +166,7 @@ export default function PromptsPage() {
                 size="large"
                 destroyOnHidden
                 title={activeTemplate ? `提示词 · ${activeTemplate.name}` : "提示词详情"}
-                extra={<Button disabled={!activeContent} icon={<Copy className="size-4" />} onClick={() => activeTemplate && void copyTemplate(activeTemplate)}>复制全文</Button>}
+                extra={activeTemplate ? <div className="flex flex-wrap items-center justify-end gap-2"><Button disabled={!activeContent} icon={<Copy className="size-4" />} onClick={() => void copyTemplate(activeTemplate)}>复制全文</Button><Button type="primary" disabled={!activeContent || !canvasHydrated || Boolean(handoffId)} loading={handoffId === activeTemplate.id} icon={<Workflow className="size-4" />} onClick={() => void useTemplateInCanvas(activeTemplate, activeContent)}>在新画布使用</Button></div> : null}
                 onClose={() => setActiveTemplate(null)}
             >
                 {activeTemplate ? (
@@ -168,7 +205,7 @@ export default function PromptsPage() {
     );
 }
 
-function PromptCard({ template, copying, onOpen, onCopy }: { template: MingWantPromptTemplate; copying: boolean; onOpen: () => void; onCopy: () => void }) {
+function PromptCard({ template, copying, handingOff, handoffDisabled, onOpen, onCopy, onUse }: { template: MingWantPromptTemplate; copying: boolean; handingOff: boolean; handoffDisabled: boolean; onOpen: () => void; onCopy: () => void; onUse: () => void }) {
     return (
         <article className="app-collection-card flex h-full flex-col p-4">
             <button type="button" className="min-w-0 flex-1 text-left" onClick={onOpen}>
@@ -180,8 +217,9 @@ function PromptCard({ template, copying, onOpen, onCopy }: { template: MingWantP
                 <p className="mt-2 line-clamp-3 min-h-[60px] text-xs leading-5 text-foreground/52">{template.description}</p>
             </button>
             <div className="mt-4 flex items-center gap-2 border-t border-border/70 pt-3">
-                <Button className="flex-1" onClick={onOpen}>查看原文</Button>
+                <Button onClick={onOpen}>查看</Button>
                 <Button loading={copying} icon={<Copy className="size-3.5" />} onClick={onCopy}>复制</Button>
+                <Button className="min-w-0 flex-1" type="primary" disabled={handoffDisabled} loading={handingOff} icon={<Workflow className="size-3.5" />} onClick={onUse}>用于画布</Button>
             </div>
         </article>
     );

@@ -4,7 +4,7 @@ import { App } from "antd";
 import { saveAs } from "file-saver";
 
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
-import { FRAME_COLLAPSED_HEIGHT, FRAME_COLLAPSED_WIDTH, getFrameChildIds, isFrameNode } from "@/lib/canvas/canvas-frame";
+import { expandCanvasFramesToFit, FRAME_COLLAPSED_HEIGHT, FRAME_COLLAPSED_WIDTH, getFrameChildIds, isFrameNode } from "@/lib/canvas/canvas-frame";
 import { applyBatchPrimaryImage, applyNodeConfigPatch } from "@/lib/canvas/canvas-project-domain";
 import { audioExtension, imageExtension, resetGenerationTaskMetadata } from "@/lib/canvas/canvas-project-generation";
 import { CONTENT_MODERATION_ERROR_CODE, isContentModerationError } from "@/lib/generation-error";
@@ -60,15 +60,16 @@ export function useCanvasNodeEditor({
         if (!frame) return;
         const collapsed = Boolean(frame.metadata?.frame?.collapsed);
         const childIds = getFrameChildIds(nodeId, nodesRef.current);
-        setNodes((current) =>
-            current.map((node) => {
+        setNodes((current) => {
+            const toggled = current.map((node) => {
                 if (node.id !== nodeId) return node;
                 const frameState = node.metadata?.frame;
                 return collapsed
                     ? { ...node, width: frameState?.expandedWidth || NODE_DEFAULT_SIZE[CanvasNodeType.Frame].width, height: frameState?.expandedHeight || NODE_DEFAULT_SIZE[CanvasNodeType.Frame].height, metadata: { ...node.metadata, frame: { collapsed: false, expandedWidth: frameState?.expandedWidth || NODE_DEFAULT_SIZE[CanvasNodeType.Frame].width, expandedHeight: frameState?.expandedHeight || NODE_DEFAULT_SIZE[CanvasNodeType.Frame].height } } }
                     : { ...node, width: FRAME_COLLAPSED_WIDTH, height: FRAME_COLLAPSED_HEIGHT, metadata: { ...node.metadata, frame: { collapsed: true, expandedWidth: node.width, expandedHeight: node.height } } };
-            }),
-        );
+            });
+            return collapsed ? expandCanvasFramesToFit(toggled, new Set([nodeId])) : toggled;
+        });
         setSelectedNodeIds(new Set([nodeId]));
         setSelectedConnectionId(null);
         setDialogNodeId((current) => (current && childIds.has(current) ? null : current));

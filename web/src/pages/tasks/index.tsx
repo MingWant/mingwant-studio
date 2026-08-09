@@ -1,11 +1,11 @@
-import { App, Button, Drawer, Form, Input, Modal, Progress, Segmented, Select, Space, Table, Typography } from "antd";
+import { Alert, App, Button, Drawer, Form, Input, Modal, Progress, Segmented, Select, Space, Table, Typography } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { Eye, FileText, FolderKanban, Image as ImageIcon, Play, Plus, RefreshCw, RotateCcw, Search, Video, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { useSearchParams } from "react-router";
 
 import { ListToolbar, PageHeader, TableSurface, WorkspacePage } from "@/components/layout/workspace-page";
-import { WorkspaceState } from "@/components/layout/workspace-state";
+import { WorkspaceErrorState, WorkspaceState } from "@/components/layout/workspace-state";
 import { CONTENT_MODERATION_ERROR_CODE, generationErrorMessage, isContentModerationError } from "@/lib/generation-error";
 import { formatTaskKind, operationOptions, statusLabel } from "@/lib/generation-task-display";
 import { prefersShortCinematicDelivery, resolveChannelProbeReadiness } from "@/lib/channel-probe-readiness";
@@ -35,6 +35,8 @@ export default function TasksPage() {
     const [tasks, setTasks] = useState<GenerationTask[]>([]);
     const [domainProjects, setDomainProjects] = useState<ProjectSummary[]>([]);
     const [loading, setLoading] = useState(false);
+    const [loadedOnce, setLoadedOnce] = useState(false);
+    const [loadError, setLoadError] = useState("");
     const [actingId, setActingId] = useState("");
     const [createOpen, setCreateOpen] = useState(false);
     const [creating, setCreating] = useState(false);
@@ -114,18 +116,20 @@ export default function TasksPage() {
 
     const loadTasks = useCallback(async (showLoading = false) => {
         if (showLoading) setLoading(true);
+        setLoadError("");
         try {
             const next = await listGenerationTasks();
             setTasks((current) => reconcileTaskSummaries(current, next));
+            setLoadedOnce(true);
             void syncCompletedCanvasTasks(next);
             return next;
         } catch (error) {
-            if (showLoading) message.error(error instanceof Error ? error.message : "任务加载失败");
+            setLoadError(error instanceof Error ? error.message : "任务加载失败");
             return undefined;
         } finally {
             if (showLoading) setLoading(false);
         }
-    }, [message, syncCompletedCanvasTasks]);
+    }, [syncCompletedCanvasTasks]);
 
     const openTaskDetail = useCallback(
         async (task: GenerationTask) => {
@@ -547,7 +551,7 @@ export default function TasksPage() {
                     icon="tasks"
                     title="任务中心"
                     description="先处理失败任务，再跟踪运行进度和检查生成结果。"
-                    meta={<span className="text-xs text-foreground/45">{filteredTasks.length} 个任务{loading ? " · 正在同步" : ""}</span>}
+                    meta={<span className="text-xs text-foreground/45">{loadedOnce ? `${filteredTasks.length} 个任务` : "等待首次同步"}{loading ? " · 正在同步" : ""}</span>}
                     actions={(
                         <>
                             <Button icon={<RefreshCw className={`size-3.5 ${loading ? "animate-spin" : ""}`} />} onClick={() => void loadTasks(true)}>刷新</Button>
@@ -571,6 +575,11 @@ export default function TasksPage() {
                     />
                 </ListToolbar>
 
+                {!loadedOnce && !loading && loadError ? (
+                    <WorkspaceErrorState title="任务列表加载失败" description={loadError} onRetry={() => void loadTasks(true)} />
+                ) : (
+                    <>
+                {loadedOnce && loadError ? <Alert type="warning" showIcon message="任务刷新失败，仍显示上次成功同步的结果" description={loadError} action={<Button size="small" onClick={() => void loadTasks(true)}>重试</Button>} /> : null}
                 <TableSurface className="task-table-surface">
                     <Table
                         rowKey="id"
@@ -578,7 +587,7 @@ export default function TasksPage() {
                         className={taskTableClassName}
                         columns={columns}
                         dataSource={filteredTasks}
-                        loading={loading}
+                        loading={loading || !loadedOnce}
                         rowClassName={() => "task-table-row align-middle"}
                         tableLayout="fixed"
                         pagination={{ current: page, pageSize, total: filteredTasks.length, showSizeChanger: true, pageSizeOptions: [20, 50, 100], showTotal: (total, range) => `${range[0]}-${range[1]} / 共 ${total} 个任务`, onChange: (nextPage, nextPageSize) => { setPage(nextPageSize !== pageSize ? 1 : nextPage); setPageSize(nextPageSize); } }}
@@ -586,6 +595,8 @@ export default function TasksPage() {
                         locale={{ emptyText: <WorkspaceState compact title={taskEmptyState(statusFilter).title} description={taskEmptyState(statusFilter).description} /> }}
                     />
                 </TableSurface>
+                    </>
+                )}
             </WorkspacePage>
             <Modal title="新建异步生成任务" open={createOpen} onCancel={() => setCreateOpen(false)} onOk={submitTask} confirmLoading={creating} okText="创建任务">
                 <Form form={form} layout="vertical" initialValues={{ operation: "agent_session" }}>

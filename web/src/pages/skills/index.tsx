@@ -1,9 +1,9 @@
 import { useEffect, useMemo, useState, type ReactNode } from "react";
-import { App, Button, Collapse, Drawer, Input, Select, Skeleton } from "antd";
+import { Alert, App, Button, Collapse, Drawer, Input, Select, Skeleton } from "antd";
 import { Check, Flame, Heart, RefreshCw, Search, ShieldCheck, Sparkles, Star, UserRound, Zap } from "lucide-react";
 
 import { CollectionGrid, ListToolbar, PageHeader, PaginationBar, WorkspacePage } from "@/components/layout/workspace-page";
-import { WorkspaceState } from "@/components/layout/workspace-state";
+import { WorkspaceErrorState, WorkspaceState } from "@/components/layout/workspace-state";
 import { renderSkillPrompt } from "@/lib/canvas/canvas-skill-mentions";
 import { activateSkill, deactivateSkill, favoriteSkill, getCommunitySkill, listActivatedSkills, listCommunitySkills, listFavoriteSkills, skillImageUrl, unfavoriteSkill, type UpdreamSkill, type UpdreamSkillSort } from "@/services/api/skills";
 
@@ -35,11 +35,16 @@ export default function SkillsPage() {
     const [skills, setSkills] = useState<UpdreamSkill[]>([]);
     const [total, setTotal] = useState(0);
     const [loading, setLoading] = useState(false);
+    const [loadError, setLoadError] = useState("");
+    const [loadedRequestKey, setLoadedRequestKey] = useState("");
     const [detailLoading, setDetailLoading] = useState(false);
     const [activeSkill, setActiveSkill] = useState<UpdreamSkill | null>(null);
     const [mutatingDir, setMutatingDir] = useState<string | null>(null);
     const [reloadKey, setReloadKey] = useState(0);
     const isPagedTab = tab === "featured" || tab === "all";
+    const requestKey = isPagedTab
+        ? [tab, page, pageSize, tab === "featured" ? "hot" : sort, debouncedSearch, category].join(":")
+        : tab;
 
     useEffect(() => {
         const timer = window.setTimeout(() => setDebouncedSearch(search.trim()), 260);
@@ -49,6 +54,7 @@ export default function SkillsPage() {
     useEffect(() => {
         let cancelled = false;
         setLoading(true);
+        setLoadError("");
         const request =
             tab === "activated"
                 ? listActivatedSkills().then(({ skills }) => ({ skills, total: skills.length, page: 1, page_size: skills.length || pageSize, categories: [] as string[] }))
@@ -67,13 +73,12 @@ export default function SkillsPage() {
                 if (cancelled) return;
                 setSkills(result.skills);
                 setTotal(result.total);
+                setLoadedRequestKey(requestKey);
                 if (result.categories.length) setCategories((current) => Array.from(new Set([...current, ...result.categories])).sort((a, b) => a.localeCompare(b, "zh-CN")));
             })
             .catch((error) => {
                 if (cancelled) return;
-                setSkills([]);
-                setTotal(0);
-                message.error(error instanceof Error ? error.message : "技能加载失败");
+                setLoadError(error instanceof Error ? error.message : "技能加载失败");
             })
             .finally(() => {
                 if (!cancelled) setLoading(false);
@@ -81,7 +86,7 @@ export default function SkillsPage() {
         return () => {
             cancelled = true;
         };
-    }, [category, debouncedSearch, message, page, pageSize, reloadKey, sort, tab]);
+    }, [reloadKey, requestKey]);
 
     const visibleSkills = useMemo(() => {
         if (isPagedTab || !debouncedSearch) return skills;
@@ -90,6 +95,7 @@ export default function SkillsPage() {
     }, [debouncedSearch, isPagedTab, skills]);
     const displayedSkills = isPagedTab ? visibleSkills : visibleSkills.slice((page - 1) * pageSize, page * pageSize);
     const displayedTotal = isPagedTab ? total : visibleSkills.length;
+    const hasCurrentSnapshot = loadedRequestKey === requestKey;
 
     const openSkill = async (skill: UpdreamSkill) => {
         setActiveSkill(skill);
@@ -157,7 +163,7 @@ export default function SkillsPage() {
                     icon="skills"
                     title="技能库"
                     description="浏览 Updream 技能，管理激活与收藏。"
-                    meta={<span className="text-xs text-foreground/45">{displayedTotal} 个技能</span>}
+                    meta={<span className="text-xs text-foreground/45">{hasCurrentSnapshot ? `${displayedTotal} 个技能` : loadError ? "加载失败" : "读取中"}</span>}
                     actions={
                         <Button icon={<RefreshCw className="size-4" />} loading={loading} onClick={refresh}>
                             刷新
@@ -212,16 +218,19 @@ export default function SkillsPage() {
                 {isPagedTab && categories.length ? (
                     <div className="thin-scrollbar flex gap-1 overflow-x-auto border-b border-border/70 py-2" aria-label="技能分类">
                         {["all", ...categories].map((value) => (
-                            <button key={value} type="button" className={`h-7 shrink-0 rounded px-2.5 text-xs transition-colors ${category === value ? "bg-foreground text-background" : "text-foreground/55 hover:bg-foreground/[.05] hover:text-foreground"}`} onClick={() => { setCategory(value); setPage(1); }}>
+                            <button key={value} type="button" className={`h-11 shrink-0 rounded px-3 text-xs transition-colors ${category === value ? "bg-foreground text-background" : "text-foreground/55 hover:bg-foreground/[.05] hover:text-foreground"}`} onClick={() => { setCategory(value); setPage(1); }}>
                                 {value === "all" ? "全部分类" : value}
                             </button>
                         ))}
                     </div>
                 ) : null}
 
-                {loading ? (
-                    <SkillSkeleton />
-                ) : displayedSkills.length ? (
+                {!hasCurrentSnapshot ? (
+                    loadError ? <WorkspaceErrorState title="技能列表加载失败" description={loadError} onRetry={refresh} /> : <SkillSkeleton />
+                ) : (
+                    <>
+                    {loadError ? <Alert type="warning" showIcon message="技能刷新失败，仍显示上次成功读取的结果" description={loadError} action={<Button size="small" onClick={refresh}>重试</Button>} /> : null}
+                {displayedSkills.length ? (
                     <CollectionGrid className="sm:grid-cols-[repeat(auto-fill,minmax(280px,1fr))] xl:grid-cols-[repeat(auto-fill,minmax(300px,1fr))]">
                         {displayedSkills.map((skill) => (
                             <SkillCard key={skill.dir} skill={skill} loading={mutatingDir === skill.dir} onOpen={() => openSkill(skill)} onActivate={() => toggleActivation(skill)} onFavorite={() => toggleFavorite(skill)} />
@@ -230,8 +239,10 @@ export default function SkillsPage() {
                 ) : (
                     <WorkspaceState icon="skills" title="暂无匹配技能" description="换一个关键词、分类或技能范围继续查找。" />
                 )}
+                    </>
+                )}
 
-                <PaginationBar
+                {hasCurrentSnapshot ? <PaginationBar
                     current={page}
                     pageSize={pageSize}
                     total={displayedTotal}
@@ -240,7 +251,7 @@ export default function SkillsPage() {
                         setPage(nextPageSize !== pageSize ? 1 : nextPage);
                         setPageSize(nextPageSize);
                     }}
-                />
+                /> : null}
             </WorkspacePage>
 
             <SkillDetailModal skill={activeSkill} loading={detailLoading} mutating={Boolean(activeSkill && mutatingDir === activeSkill.dir)} onClose={() => setActiveSkill(null)} onActivate={toggleActivation} onFavorite={toggleFavorite} />

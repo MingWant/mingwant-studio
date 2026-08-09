@@ -77,6 +77,8 @@ import { CanvasProjectWorldLayers } from "./canvas-project-world-layers";
 import type { CanvasImageEmotionPayload } from "@/components/canvas/canvas-node-emotion-panel";
 import { CanvasEmotionWorkspace } from "@/components/canvas/canvas-emotion-workspace";
 import { removeCanvasDrawing } from "@/lib/canvas/canvas-drawing-storage";
+import { appendCanvasNodesWithFrameExpansion } from "@/lib/canvas/canvas-frame";
+import { placeCanvasNodeInContext } from "@/lib/canvas/canvas-layout";
 import { useCanvasConnectionController } from "./use-canvas-connection-controller";
 import { useCanvasAgentOperations } from "./use-canvas-agent-operations";
 import { useCanvasAssistantVisibility } from "./use-canvas-assistant-visibility";
@@ -514,9 +516,10 @@ function InfiniteCanvasPage() {
         handleViewportChange,
         handleViewportPreviewChange,
         previewViewport,
-        resetViewport,
+        revealCanvasNodes,
         screenToCanvas,
         setZoomScale,
+        zoomBy,
         zoomToActualSize,
     } = useCanvasViewportController({
         containerRef,
@@ -537,8 +540,11 @@ function InfiniteCanvasPage() {
         selectedNodeIdsRef.current = selection;
         setSelectedNodeIds(selection);
         setSelectedConnectionId(null);
-        if (selection.size) fitCanvasSelection();
-    }, [fitCanvasSelection]);
+        if (selection.size) revealCanvasNodes(selection);
+    }, [revealCanvasNodes]);
+    const revealGeneratedNodes = useCallback((nodeIds: string[]) => {
+        if (nodeIds.length) revealCanvasNodes(nodeIds);
+    }, [revealCanvasNodes]);
 
     useEffect(() => {
         if (!projectLoaded || !nodes.length) return;
@@ -571,11 +577,13 @@ function InfiniteCanvasPage() {
             setNodes((nodes) => nodes.map((node) => node.id === current.id ? { ...node, title: `项目画风 · ${preset.title}`, metadata: { ...node.metadata, ...nextMetadata } } : node));
             return;
         }
-        const node = createCanvasNode(CanvasNodeType.Text, getCanvasCenter(), nextMetadata);
+        const center = getCanvasCenter();
+        const node = createCanvasNode(CanvasNodeType.Text, center, nextMetadata);
         node.title = `项目画风 · ${preset.title}`;
         node.width = 420;
         node.height = 240;
-        setNodes((nodes) => [...nodes, node]);
+        const placedNode = placeCanvasNodeInContext(nodesRef.current, node, { x: center.x - node.width / 2, y: center.y - node.height / 2 });
+        setNodes((nodes) => appendCanvasNodesWithFrameExpansion(nodes, [placedNode]));
     }, [getCanvasCenter, linkedProjectQuery.data?.project.stylePresetId, projectLoaded, setNodes]);
 
     const {
@@ -741,6 +749,8 @@ function InfiniteCanvasPage() {
     const {
         cancelPendingConnectionCreate,
         closeConnectionCreateMenu,
+        connectionBlockedNodeId,
+        connectionTargetHandleId,
         connectionTargetNodeId,
         connectingParams,
         createConnectedNode,
@@ -803,7 +813,8 @@ function InfiniteCanvasPage() {
         dragPreview,
         frameDropTargetId,
         handleCanvasMouseDown,
-        handleNodeMouseDown,
+        handleNodeKeyboardSelect,
+        handleNodePointerDown,
         isNodeDragging,
         nodeDraggingRef,
         selectionBoundsElementRef,
@@ -813,6 +824,7 @@ function InfiniteCanvasPage() {
         nodesRef,
         viewportRef,
         selectedNodeIdsRef,
+        selectedConnectionId,
         historyPausedRef,
         screenToCanvas,
         setNodes,
@@ -1068,6 +1080,7 @@ function InfiniteCanvasPage() {
         nodesRef,
         selectedNodeIdsRef,
         selectedConnectionId,
+        setNodes,
         setSelectedNodeIds,
         setSelectedConnectionId,
         setContextMenu,
@@ -1223,6 +1236,7 @@ function InfiniteCanvasPage() {
         setSelectedNodeIds,
         setSelectedConnectionId,
         setDialogNodeId,
+        revealGeneratedNodes,
         setRunningNode: startRunningNode,
         clearRunningNode: finishRunningNode,
         startGenerationRequest,
@@ -1309,16 +1323,17 @@ function InfiniteCanvasPage() {
                     count: getGenerationCount(effectiveConfig.canvasImageCount || effectiveConfig.count),
                 },
             );
-            const connection = { id: nanoid(), fromNodeId: sourceNode.id, toNodeId: configNode.id };
-            const nextNodes = nodesRef.current.map((item) => (item.id === sourceNode.id ? { ...item, metadata: { ...item.metadata, content: prompt, richText: undefined, prompt, status: NODE_STATUS_SUCCESS } } : item)).concat(configNode);
+            const placedConfigNode = placeCanvasNodeInContext(nodesRef.current, configNode, configNode.position, sourceNode);
+            const connection = { id: nanoid(), fromNodeId: sourceNode.id, toNodeId: placedConfigNode.id };
+            const nextNodes = appendCanvasNodesWithFrameExpansion(nodesRef.current.map((item) => (item.id === sourceNode.id ? { ...item, metadata: { ...item.metadata, content: prompt, richText: undefined, prompt, status: NODE_STATUS_SUCCESS } } : item)), [placedConfigNode]);
             const nextConnections = [...connectionsRef.current, connection];
             nodesRef.current = nextNodes;
             connectionsRef.current = nextConnections;
             setNodes(nextNodes);
             setConnections(nextConnections);
-            setSelectedNodeIds(new Set([configNode.id]));
+            setSelectedNodeIds(new Set([placedConfigNode.id]));
             setSelectedConnectionId(null);
-            setDialogNodeId(configNode.id);
+            setDialogNodeId(placedConfigNode.id);
         },
         [effectiveConfig, message],
     );
@@ -1410,6 +1425,9 @@ function InfiniteCanvasPage() {
                     pipeline={pipeline}
                     scale={viewport.k}
                     mentionReferences={mentionReferencesByNodeId.get(contentNode.id) || EMPTY_RESOURCE_REFERENCES}
+                    activeConnectionHandleId={connectionTargetNodeId === contentNode.id ? connectionTargetHandleId : undefined}
+                    activeConnectionHandleSide={connectionTargetNodeId === contentNode.id ? connectingParams?.handleType === "source" ? "left" : "right" : undefined}
+                    connectingHandleType={connectingParams?.handleType}
                     onOpen={() => setScriptEditorNodeId(contentNode.id)}
                     onCreateImageNodes={() => createScriptImageNodes(contentNode.id)}
                     onCreateVideoNodes={() => createScriptVideoNodes(contentNode.id)}
@@ -1469,7 +1487,7 @@ function InfiniteCanvasPage() {
                 workspaceMode={workspaceMode}
             />
         );
-    }, [addScriptRow, cancelSubmittedBatchItem, configInputsById, confirmStopGeneration, copyStoryboardVideoPrompts, createAndGenerateScriptVideos, createScriptActionBoards, createScriptImageNodes, createScriptVideoNodes, currentProject?.directorScenes, generateScriptImages, generateScriptRows, generateScriptVideos, handleConfigNodeChange, handleConnectStart, handleGenerateNode, handleNodeResize, mentionReferencesByNodeId, mergeVideosByIds, openDirectorWorkbench, openStoryInput, removeScriptRow, retryFailedBatchItems, runStoryboardNextStage, runningNodeIds, stopRemainingBatchItems, updateScriptRow, viewport.k, workspaceMode]);
+    }, [addScriptRow, cancelSubmittedBatchItem, configInputsById, confirmStopGeneration, connectionTargetHandleId, connectionTargetNodeId, connectingParams?.handleType, copyStoryboardVideoPrompts, createAndGenerateScriptVideos, createScriptActionBoards, createScriptImageNodes, createScriptVideoNodes, currentProject?.directorScenes, generateScriptImages, generateScriptRows, generateScriptVideos, handleConfigNodeChange, handleConnectStart, handleGenerateNode, handleNodeResize, mentionReferencesByNodeId, mergeVideosByIds, openDirectorWorkbench, openStoryInput, removeScriptRow, retryFailedBatchItems, runStoryboardNextStage, runningNodeIds, stopRemainingBatchItems, updateScriptRow, viewport.k, workspaceMode]);
 
     const handleCanvasNodeHoverStart = useCallback((nodeId: string) => {
         if (nodeDraggingRef.current) return;
@@ -1594,8 +1612,10 @@ function InfiniteCanvasPage() {
                         relatedConnectionIds={relatedHighlight.connectionIds}
                         scriptScrollTopById={scriptScrollTopById}
                         connectingParams={connectingParams}
+                        connectionBlockedNodeId={connectionBlockedNodeId}
                         mouseWorld={mouseWorld}
                         connectionTargetNodeId={connectionTargetNodeId}
+                        connectionTargetHandleId={connectionTargetHandleId}
                         nodeById={nodeById}
                         visibleNodes={visibleNodes}
                         frameChildrenById={frameChildrenById}
@@ -1621,7 +1641,8 @@ function InfiniteCanvasPage() {
                         renderCanvasNodeContent={renderCanvasNodeContent}
                         onConnectionSelect={(connectionId) => { setSelectedConnectionId(connectionId); setSelectedNodeIds(new Set()); setContextMenu(null); }}
                         onConnectionContextMenu={(event, connectionId) => { setSelectedConnectionId(connectionId); setSelectedNodeIds(new Set()); closeConnectionCreateMenu(); setContextMenu({ type: "connection", x: event.clientX, y: event.clientY, connectionId }); }}
-                        onNodeMouseDown={handleNodeMouseDown}
+                        onNodePointerDown={handleNodePointerDown}
+                        onNodeKeyboardSelect={handleNodeKeyboardSelect}
                         onNodeHoverStart={handleCanvasNodeHoverStart}
                         onNodeHoverEnd={handleCanvasNodeHoverEnd}
                         onConnectStart={handleConnectStart}
@@ -1653,8 +1674,8 @@ function InfiniteCanvasPage() {
                         onToggleDock={() => setFocusDockRevealed((value) => !value)}
                         onToggleAgent={requestToggleAgent}
                         onExit={exitFocusMode}
-                        onZoomIn={() => setZoomScale(Math.min(4, viewport.k * 1.1))}
-                        onZoomOut={() => setZoomScale(Math.max(0.1, viewport.k / 1.1))}
+                        onZoomIn={() => zoomBy(1.1)}
+                        onZoomOut={() => zoomBy(1 / 1.1)}
                         onFit={fitCanvasContent}
                     />
                 ) : null}
@@ -1763,7 +1784,7 @@ function InfiniteCanvasPage() {
                 {isMiniMapOpen && !focusMode ? <Minimap nodes={nodes} viewport={viewport} viewportSize={size} canvasContainerRef={containerRef} onViewportPreviewChange={previewViewport} onViewportChange={handleViewportChange} /> : null}
 
                 {!focusMode ? <div data-canvas-no-zoom className="absolute bottom-4 left-4 z-50 flex items-end gap-2" onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} onWheel={(event) => event.stopPropagation()}>
-                    <CanvasZoomControls scale={viewport.k} containerRef={containerRef} onScaleChange={setZoomScale} onReset={resetViewport} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} onOpenShortcuts={() => setShortcutRequestNonce((value) => value + 1)} />
+                    <CanvasZoomControls scale={viewport.k} containerRef={containerRef} onScaleChange={setZoomScale} onFit={fitCanvasContent} isMiniMapOpen={isMiniMapOpen} onToggleMiniMap={() => setIsMiniMapOpen((value) => !value)} onOpenShortcuts={() => setShortcutRequestNonce((value) => value + 1)} />
                     <CanvasAssetTray assetImages={imageAssets} canvasImages={canvasImageNodes} showLibrary={!currentProject?.projectId} activeNodeId={selectedNodeIds.size === 1 ? Array.from(selectedNodeIds)[0] : null} onInsertAssetImage={(asset) => void createImageAssetNode(asset)} onFocusCanvasImage={focusCanvasImageNode} />
                 </div> : null}
 

@@ -29,6 +29,7 @@ type UseCanvasGenerationExecutorOptions = {
     setSelectedNodeIds: Dispatch<SetStateAction<Set<string>>>;
     setSelectedConnectionId: Dispatch<SetStateAction<string | null>>;
     setDialogNodeId: Dispatch<SetStateAction<string | null>>;
+    revealGeneratedNodes?: (nodeIds: string[]) => void;
     setRunningNode: (nodeId: string) => void;
     clearRunningNode: (nodeId: string) => void;
     startGenerationRequest: (targetNodeId: string, originNodeId: string, runningId?: string, controller?: AbortController) => AbortController;
@@ -60,6 +61,7 @@ export function useCanvasGenerationExecutor({
     setSelectedNodeIds,
     setSelectedConnectionId,
     setDialogNodeId,
+    revealGeneratedNodes,
     setRunningNode,
     clearRunningNode,
     startGenerationRequest,
@@ -184,6 +186,7 @@ export function useCanvasGenerationExecutor({
             let pendingNodeIds: string[] = [];
             const execution = {
                 projectId,
+                nodesRef,
                 nodeId,
                 sourceNode,
                 prompt,
@@ -199,6 +202,7 @@ export function useCanvasGenerationExecutor({
                 setSelectedNodeIds,
                 setSelectedConnectionId,
                 setDialogNodeId,
+                revealGeneratedNodes: options?.waitForTaskCapacity ? undefined : revealGeneratedNodes,
                 startGenerationRequest,
                 finishGenerationRequest,
                 bindGenerationTask,
@@ -238,6 +242,6 @@ export function useCanvasGenerationExecutor({
                 clearRunningNode(nodeId);
             }
         },
-        [activatedSkills, bindGenerationTask, clearRunningNode, domainProjectId, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, nodesRef, connectionsRef, projectId, setConnections, setDialogNodeId, setNodes, setRunningNode, setSelectedConnectionId, setSelectedNodeIds, startGenerationRequest],
+        [activatedSkills, bindGenerationTask, clearRunningNode, domainProjectId, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, nodesRef, connectionsRef, projectId, revealGeneratedNodes, setConnections, setDialogNodeId, setNodes, setRunningNode, setSelectedConnectionId, setSelectedNodeIds, startGenerationRequest],
     );
 }

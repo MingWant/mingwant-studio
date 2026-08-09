@@ -3,7 +3,6 @@ import type { ReactNode } from "react";
 import { BookOpenCheck, ChevronRight, Clock3, FileText, Image as ImageIcon, LoaderCircle, Lock, Maximize2, Music2, Pencil, Play, RefreshCw, Replace, Square, Star, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
-import { CometCard } from "@/components/ui/aceternity/comet-card";
 import { resourceStorageLabel, resourceStorageLocation, resourceStorageTitle } from "@/lib/canvas/resource-storage-status";
 import { canvasRichTextHTML } from "@/lib/canvas/canvas-rich-text";
 import { formatBytes } from "@/lib/image-utils";
@@ -28,7 +27,8 @@ type CanvasNodeProps = {
     isRelated: boolean;
     isFocusRelated: boolean;
     isConnectionTarget: boolean;
-    isConnecting: boolean;
+    isConnectionBlockedTarget?: boolean;
+    connectingHandleType?: "source" | "target";
     showImageInfo: boolean;
     reduceMediaEffects?: boolean;
     readOnly?: boolean;
@@ -43,11 +43,13 @@ type CanvasNodeProps = {
     batchRecovering?: boolean;
     batchPrimary?: boolean;
     batchMotion?: { x: number; y: number; index: number };
-    onMouseDown: (event: React.MouseEvent, nodeId: string) => void;
+    onPointerDown: (event: React.PointerEvent, nodeId: string) => void;
+    onKeyboardSelect?: (nodeId: string) => void;
     onHoverStart: (nodeId: string) => void;
     onHoverEnd: (nodeId: string) => void;
     onConnectStart: (event: React.PointerEvent, nodeId: string, handleType: "source" | "target", handleId?: string) => void;
     onResize: (nodeId: string, width: number, height: number, position?: Position) => void;
+    onTitleChange?: (nodeId: string, title: string) => void;
     onContentChange: (nodeId: string, content: string) => void;
     onToggleBatch?: (nodeId: string) => void;
     onSetBatchPrimary?: (node: CanvasNodeData) => void;
@@ -94,7 +96,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     isRelated,
     isFocusRelated,
     isConnectionTarget,
-    isConnecting,
+    isConnectionBlockedTarget = false,
+    connectingHandleType,
     showImageInfo,
     reduceMediaEffects = false,
     readOnly = false,
@@ -109,11 +112,13 @@ export const CanvasNode = React.memo(function CanvasNode({
     batchRecovering = false,
     batchPrimary = false,
     batchMotion,
-    onMouseDown,
+    onPointerDown,
+    onKeyboardSelect,
     onHoverStart,
     onHoverEnd,
     onConnectStart,
     onResize,
+    onTitleChange,
     onContentChange,
     onToggleBatch,
     onSetBatchPrimary,
@@ -131,6 +136,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const [hovered, setHovered] = useState(false);
     const [isEditingContent, setIsEditingContent] = useState(false);
+    const [isEditingTitle, setIsEditingTitle] = useState(false);
+    const [titleDraft, setTitleDraft] = useState(data.title);
     const hasImageContent = data.type === CanvasNodeType.Image && Boolean(data.metadata?.content);
     const hasVideoContent = data.type === CanvasNodeType.Video && Boolean(data.metadata?.content);
     const hasAudioContent = data.type === CanvasNodeType.Audio && Boolean(data.metadata?.content);
@@ -141,15 +148,14 @@ export const CanvasNode = React.memo(function CanvasNode({
     const showStatusTrack = Boolean(resourceLabel || data.metadata?.locked || isBatchRoot || (isBatchChild && !readOnly) || (hasMediaContent && !readOnly));
     const isActive = isConnectionTarget || isSelected || isFocusRelated;
     const flushMediaContent = hasImageContent || hasVideoContent;
-    const mediaBorderColor = isActive ? theme.accent.primary : isRelated && !isBatchChild ? theme.accent.primary : "transparent";
+    const mediaBorderColor = isConnectionBlockedTarget ? theme.accent.danger : isActive ? theme.accent.primary : isRelated && !isBatchChild ? theme.accent.primary : "transparent";
     const assetTags = data.metadata?.assetTags?.filter((tag) => tag.trim()) || [];
     const scriptMinHeight = data.type === CanvasNodeType.Script ? storyboardMinNodeHeight(data.metadata?.storyboardComposerHeight) : null;
-    const cometDepth = hasMediaContent ? 6.8 : data.type === CanvasNodeType.Script ? 2.8 : 4.6;
-    const cometTranslate = hasMediaContent ? 6 : data.type === CanvasNodeType.Script ? 2.5 : 4;
-    const cometDisabled = reduceMediaEffects || Boolean(dragOffset) || isEditingContent || isGeneratingNode || scale < 0.32 || batchClosing || batchOpening;
     const textareaRef = useRef<HTMLTextAreaElement>(null);
+    const cancelTitleCommitRef = useRef(false);
     const resizeRef = useRef({
         isResizing: false,
+        pointerId: -1,
         corner: "bottom-right" as ResizeCorner,
         startX: 0,
         startY: 0,
@@ -162,6 +168,10 @@ export const CanvasNode = React.memo(function CanvasNode({
     });
 
     useEffect(() => {
+        if (!isEditingTitle) setTitleDraft(data.title);
+    }, [data.title, isEditingTitle]);
+
+    useEffect(() => {
         const textarea = textareaRef.current;
         if (!textarea) return;
 
@@ -169,6 +179,13 @@ export const CanvasNode = React.memo(function CanvasNode({
         textarea.addEventListener("wheel", handleWheel, { passive: false });
         return () => textarea.removeEventListener("wheel", handleWheel);
     }, [data.type, isEditingContent]);
+
+    const commitTitle = () => {
+        const next = titleDraft.trim() || "未命名节点";
+        setTitleDraft(next);
+        setIsEditingTitle(false);
+        if (next !== data.title) onTitleChange?.(data.id, next);
+    };
 
     useEffect(() => {
         if (!isEditingContent) return;
@@ -193,8 +210,8 @@ export const CanvasNode = React.memo(function CanvasNode({
     }, [isEditingContent]);
 
     const handleResizeMove = useCallback(
-        (event: MouseEvent) => {
-            if (!resizeRef.current.isResizing) return;
+        (event: PointerEvent) => {
+            if (!resizeRef.current.isResizing || resizeRef.current.pointerId !== event.pointerId) return;
 
             const dx = (event.clientX - resizeRef.current.startX) / scale;
             const dy = (event.clientY - resizeRef.current.startY) / scale;
@@ -233,17 +250,26 @@ export const CanvasNode = React.memo(function CanvasNode({
         [data.id, data.type, onResize, scale, scriptMinHeight],
     );
 
-    const handleResizeUp = useCallback(() => {
+    const handleResizeUp = useCallback((event?: PointerEvent) => {
+        if (event && resizeRef.current.pointerId !== event.pointerId) return;
+        const state = resizeRef.current;
+        if (event?.type === "pointercancel" && state.isResizing) {
+            onResize(data.id, state.startWidth, state.startHeight, { x: state.startLeft, y: state.startTop });
+        }
         resizeRef.current.isResizing = false;
-        window.removeEventListener("mousemove", handleResizeMove);
-        window.removeEventListener("mouseup", handleResizeUp);
-    }, [handleResizeMove]);
+        resizeRef.current.pointerId = -1;
+        window.removeEventListener("pointermove", handleResizeMove);
+        window.removeEventListener("pointerup", handleResizeUp);
+        window.removeEventListener("pointercancel", handleResizeUp);
+    }, [data.id, handleResizeMove, onResize]);
 
-    const handleResizeMouseDown = (event: React.MouseEvent, corner: ResizeCorner) => {
+    const handleResizePointerDown = (event: React.PointerEvent, corner: ResizeCorner) => {
         event.stopPropagation();
         event.preventDefault();
+        event.currentTarget.setPointerCapture(event.pointerId);
         resizeRef.current = {
             isResizing: true,
+            pointerId: event.pointerId,
             corner,
             startX: event.clientX,
             startY: event.clientY,
@@ -254,26 +280,58 @@ export const CanvasNode = React.memo(function CanvasNode({
             keepRatio: (data.type === CanvasNodeType.Image && !data.metadata?.freeResize) || data.type === CanvasNodeType.Video,
             ratio: (data.metadata?.naturalWidth || data.width) / (data.metadata?.naturalHeight || data.height || 1),
         };
-        window.addEventListener("mousemove", handleResizeMove);
-        window.addEventListener("mouseup", handleResizeUp);
+        window.addEventListener("pointermove", handleResizeMove);
+        window.addEventListener("pointerup", handleResizeUp);
+        window.addEventListener("pointercancel", handleResizeUp);
+    };
+
+    const handleResizeKeyDown = (event: React.KeyboardEvent) => {
+        if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const distance = event.shiftKey ? 10 : 1;
+        const minWidth = data.type === CanvasNodeType.Script ? 800 : 220;
+        const minHeight = scriptMinHeight || 160;
+        const horizontal = event.key === "ArrowLeft" || event.key === "ArrowRight";
+        const delta = event.key === "ArrowRight" || event.key === "ArrowDown" ? distance : -distance;
+        const keepRatio = (data.type === CanvasNodeType.Image && !data.metadata?.freeResize) || data.type === CanvasNodeType.Video;
+        const ratio = (data.metadata?.naturalWidth || data.width) / (data.metadata?.naturalHeight || data.height || 1);
+        let width = horizontal ? Math.max(minWidth, data.width + delta) : data.width;
+        let height = horizontal ? data.height : Math.max(minHeight, data.height + delta);
+        if (keepRatio) {
+            if (horizontal) height = Math.max(minHeight, width / ratio);
+            else width = Math.max(minWidth, height * ratio);
+        }
+        onResize(data.id, width, height);
     };
 
     useEffect(() => {
         return () => {
-            window.removeEventListener("mousemove", handleResizeMove);
-            window.removeEventListener("mouseup", handleResizeUp);
+            window.removeEventListener("pointermove", handleResizeMove);
+            window.removeEventListener("pointerup", handleResizeUp);
+            window.removeEventListener("pointercancel", handleResizeUp);
         };
     }, [handleResizeMove, handleResizeUp]);
 
     return (
         <div
             data-node-id={data.id}
-            className={`node-element absolute flex select-none flex-col ${dragOffset ? "cursor-grabbing" : data.type === CanvasNodeType.Drawing ? "cursor-pointer" : "cursor-default"} ${isSelected ? "z-50" : "z-10"}`}
+            role="group"
+            tabIndex={0}
+            aria-label={`${data.title || "未命名节点"}，画布节点${isSelected ? "，已选择" : ""}。按 Enter 选择`}
+            className={`node-element absolute flex select-none flex-col focus-visible:outline focus-visible:outline-2 focus-visible:outline-offset-4 ${dragOffset ? "cursor-grabbing" : data.metadata?.locked ? "cursor-default" : data.type === CanvasNodeType.Drawing ? "cursor-pointer" : "cursor-grab"} ${isSelected ? "z-50" : "z-10"}`}
             style={{
                 transform: `translate(${data.position.x + (dragOffset?.x || 0)}px, ${data.position.y + (dragOffset?.y || 0)}px)`,
                 width: data.width,
                 height: data.height,
                 contain: "layout style",
+                outlineColor: theme.accent.primary,
+            }}
+            onKeyDown={(event) => {
+                if (event.target !== event.currentTarget || (event.key !== "Enter" && event.key !== " ")) return;
+                event.preventDefault();
+                event.stopPropagation();
+                onKeyboardSelect?.(data.id);
             }}
             onMouseEnter={() => {
                 setHovered(true);
@@ -285,20 +343,59 @@ export const CanvasNode = React.memo(function CanvasNode({
             }}
             onContextMenu={(event) => onContextMenu(event, data.id)}
         >
-            <CometCard
-                containerClassName="overflow-visible"
+            <div
+                className="absolute -top-8 left-0 z-[70] flex h-7 max-w-full items-center gap-1 rounded-md border px-1.5"
+                style={{ background: theme.toolbar.panel, borderColor: theme.toolbar.border, color: theme.node.text }}
+                onPointerDown={(event) => {
+                    const target = event.target instanceof Element ? event.target : null;
+                    if (target?.closest("button,input")) return;
+                    onPointerDown(event, data.id);
+                }}
+            >
+                {isEditingTitle ? (
+                    <input
+                        autoFocus
+                        className="h-5 min-w-20 max-w-48 flex-1 bg-transparent px-1 text-[11px] font-medium outline-none"
+                        value={titleDraft}
+                        aria-label="节点名称"
+                        onChange={(event) => setTitleDraft(event.target.value)}
+                        onBlur={() => {
+                            if (cancelTitleCommitRef.current) {
+                                cancelTitleCommitRef.current = false;
+                                return;
+                            }
+                            commitTitle();
+                        }}
+                        onKeyDown={(event) => {
+                            if (event.key === "Enter") commitTitle();
+                            if (event.key === "Escape") {
+                                event.preventDefault();
+                                cancelTitleCommitRef.current = true;
+                                setTitleDraft(data.title);
+                                setIsEditingTitle(false);
+                            }
+                        }}
+                    />
+                ) : <span className="min-w-0 max-w-40 truncate text-[11px] font-medium" title={data.title}>{data.title || "未命名节点"}</span>}
+                {!readOnly ? (
+                    <button data-canvas-no-zoom type="button" className="canvas-touch-target grid size-5 shrink-0 place-items-center rounded text-current opacity-55 hover:bg-black/5 hover:opacity-100 focus-visible:outline focus-visible:outline-2 dark:hover:bg-white/10" style={{ outlineColor: theme.accent.primary }} aria-label="重命名节点" onClick={() => { cancelTitleCommitRef.current = false; setIsEditingTitle(true); }}>
+                        <Pencil className="size-3" />
+                    </button>
+                ) : null}
+            </div>
+            <div
                 className={`canvas-node-shell relative h-full w-full overflow-visible rounded-[18px] ${flushMediaContent ? "border-0" : "border"} ${isGeneratingNode ? "canvas-node-shell-generating" : ""}`}
-                rotateDepth={cometDepth}
-                translateDepth={cometTranslate}
-                disabled={cometDisabled}
-                glare={!isGeneratingNode}
                 data-state={data.metadata?.status || (isActive ? "active" : isRelated ? "related" : "idle")}
                 style={{
                     background: hasImageContent || hasVideoContent ? "transparent" : theme.node.fill,
-                    borderColor: flushMediaContent ? undefined : isActive ? theme.accent.primary : isRelated ? theme.accent.primary : theme.node.stroke,
-                    boxShadow: isActive ? `0 0 0 1px ${theme.accent.primary}66, 0 28px 80px ${theme.spatial.shadow}` : isRelated && !isBatchChild ? `0 0 0 1px ${theme.accent.primary}35, 0 22px 60px ${theme.spatial.shadow}` : undefined,
+                    borderColor: flushMediaContent ? undefined : isConnectionBlockedTarget ? theme.accent.danger : isActive ? theme.accent.primary : isRelated ? theme.accent.primary : theme.node.stroke,
+                    boxShadow: isConnectionBlockedTarget ? `0 0 0 2px ${theme.accent.danger}52` : isActive ? `0 0 0 2px ${theme.accent.primary}52, 0 16px 38px ${theme.spatial.shadow}` : isRelated && !isBatchChild ? `0 0 0 1px ${theme.accent.primary}35, 0 12px 28px ${theme.spatial.shadow}` : undefined,
                 }}
-                onMouseDown={(event) => onMouseDown(event, data.id)}
+                onPointerDown={(event) => {
+                    const target = event.target instanceof Element ? event.target : null;
+                    if (target?.closest("button,input,textarea,select,[contenteditable='true'],[data-canvas-no-zoom],[data-canvas-wheel-scroll]")) return;
+                    onPointerDown(event, data.id);
+                }}
                 onDoubleClick={(event) => {
                     if (isBatchRoot) {
                         event.stopPropagation();
@@ -337,8 +434,7 @@ export const CanvasNode = React.memo(function CanvasNode({
                             background: hasImageContent || hasVideoContent ? "transparent" : theme.node.fill,
                             "--batch-from-x": `${batchMotion?.x || 0}px`,
                             "--batch-from-y": `${batchMotion?.y || 0}px`,
-                            "--batch-from-rotate": `${6 + (batchMotion?.index || 0) * 4}deg`,
-                            animation: data.metadata?.batchRootId ? (batchClosing ? "canvas-batch-child-out 260ms cubic-bezier(.4,0,.2,1) both" : "canvas-batch-child-in 340ms cubic-bezier(.2,.85,.18,1) both") : undefined,
+                            animation: data.metadata?.batchRootId ? (batchClosing ? "canvas-batch-child-out 180ms ease-out both" : "canvas-batch-child-in 220ms ease-out both") : undefined,
                             animationDelay: data.metadata?.batchRootId ? `${batchClosing ? 0 : 45 + (batchMotion?.index || 0) * 24}ms` : undefined,
                         } as React.CSSProperties
                     }
@@ -443,16 +539,11 @@ export const CanvasNode = React.memo(function CanvasNode({
 
                 {!hasImageContent && !hasVideoContent && !hasAudioContent && data.type !== CanvasNodeType.Drawing ? <div className="pointer-events-none absolute inset-x-0 bottom-0 h-12" style={{ background: `linear-gradient(to top, ${theme.canvas.background}66, transparent)` }} /> : null}
 
-                {!readOnly && !data.metadata?.locked ? <>
-                    <ResizeHandle corner="top-left" onMouseDown={handleResizeMouseDown} />
-                    <ResizeHandle corner="top-right" onMouseDown={handleResizeMouseDown} />
-                    <ResizeHandle corner="bottom-left" onMouseDown={handleResizeMouseDown} />
-                    <ResizeHandle corner="bottom-right" onMouseDown={handleResizeMouseDown} />
-                </> : null}
-            </CometCard>
+                {!readOnly && !data.metadata?.locked && isSelected ? <ResizeHandle scale={scale} theme={theme} onPointerDown={handleResizePointerDown} onKeyDown={handleResizeKeyDown} /> : null}
+            </div>
 
-            {!readOnly && data.type !== CanvasNodeType.Script ? <ConnectionHandleDot side="left" scale={scale} visible={hovered || isSelected || isConnecting} theme={theme} onPointerDown={(event) => onConnectStart(event, data.id, "target")} /> : null}
-            {!readOnly && data.type !== CanvasNodeType.Script ? <ConnectionHandleDot side="right" scale={scale} visible={data.type !== CanvasNodeType.Config && (hovered || isSelected || isConnecting)} theme={theme} onPointerDown={(event) => onConnectStart(event, data.id, "source")} /> : null}
+            {!readOnly && data.type !== CanvasNodeType.Script ? <ConnectionHandleDot side="left" scale={scale} visible={hovered || isSelected || connectingHandleType === "source"} theme={theme} onPointerDown={(event) => onConnectStart(event, data.id, "target")} /> : null}
+            {!readOnly && data.type !== CanvasNodeType.Script ? <ConnectionHandleDot side="right" scale={scale} visible={data.type !== CanvasNodeType.Config && (hovered || isSelected || connectingHandleType === "target")} theme={theme} onPointerDown={(event) => onConnectStart(event, data.id, "source")} /> : null}
 
         </div>
     );
@@ -1079,15 +1170,33 @@ function BatchFrame({ batchCount, batchExpanded, batchOpening, batchRecovering, 
         </div>
     );
 }
-function ResizeHandle({ corner, onMouseDown }: { corner: ResizeCorner; onMouseDown: (event: React.MouseEvent, corner: ResizeCorner) => void }) {
-    const positionClass = {
-        "top-left": "-left-[14px] -top-[14px] cursor-nwse-resize",
-        "top-right": "-right-[14px] -top-[14px] cursor-nesw-resize",
-        "bottom-left": "-bottom-[14px] -left-[14px] cursor-nesw-resize",
-        "bottom-right": "-bottom-[14px] -right-[14px] cursor-nwse-resize",
-    }[corner];
-
-    return <div className={`absolute z-50 size-7 ${positionClass}`} onMouseDown={(event) => onMouseDown(event, corner)} />;
+function ResizeHandle({ scale, theme, onPointerDown, onKeyDown }: { scale: number; theme: CanvasTheme; onPointerDown: (event: React.PointerEvent, corner: ResizeCorner) => void; onKeyDown: (event: React.KeyboardEvent) => void }) {
+    const inverseScale = 1 / Math.max(scale, 0.05);
+    const hitSize = 44 * inverseScale;
+    const visualSize = 10 * inverseScale;
+    return (
+        <button
+            data-canvas-no-zoom
+            type="button"
+            aria-label="调整节点尺寸。使用方向键微调"
+            className="absolute bottom-0 right-0 z-50 grid cursor-nwse-resize place-items-center rounded-full border shadow-sm outline-none focus-visible:ring-2"
+            style={{
+                right: -hitSize / 2,
+                bottom: -hitSize / 2,
+                width: hitSize,
+                height: hitSize,
+                background: theme.toolbar.panel,
+                borderColor: theme.accent.primary,
+                borderWidth: inverseScale,
+                color: theme.accent.primary,
+            }}
+            onPointerDown={(event) => onPointerDown(event, "bottom-right")}
+            onKeyDown={onKeyDown}
+            title="拖动调整节点尺寸"
+        >
+            <span className="block" style={{ width: visualSize, height: visualSize, borderBottom: `${2 * inverseScale}px solid currentColor`, borderRight: `${2 * inverseScale}px solid currentColor` }} />
+        </button>
+    );
 }
 
 function ConnectionHandleDot({ side, scale, visible, theme, onPointerDown }: { side: "left" | "right"; scale: number; visible: boolean; theme: CanvasTheme; onPointerDown: (event: React.PointerEvent) => void }) {
@@ -1097,9 +1206,11 @@ function ConnectionHandleDot({ side, scale, visible, theme, onPointerDown }: { s
         <div
             className={`canvas-connection-handle absolute top-1/2 z-30 flex -translate-y-1/2 cursor-pointer items-center justify-center transition-opacity duration-150 ${
                 side === "left" ? "left-0 -translate-x-1/2" : "right-0 translate-x-1/2"
-            } ${visible ? "opacity-100" : "opacity-35"}`}
-            style={{ width: 40 * inverseScale, height: 40 * inverseScale }}
+            } ${visible ? "opacity-100" : "pointer-events-none opacity-0"}`}
+            style={{ width: 44 * inverseScale, height: 44 * inverseScale }}
             onPointerDown={onPointerDown}
+            aria-hidden={!visible}
+            title={side === "left" ? "拖动以连接输入" : "拖动以连接输出"}
         >
             <div className="canvas-node-tool-button grid place-items-center rounded-full border" style={{ width: 16 * inverseScale, height: 16 * inverseScale, borderWidth: inverseScale, background: theme.node.panel, borderColor: theme.accent.primary }}>
                 <span className="block rounded-full" style={{ width: 6 * inverseScale, height: 6 * inverseScale, background: theme.accent.primary }} />

@@ -1,6 +1,6 @@
 import type { MouseEvent as ReactMouseEvent, PointerEvent as ReactPointerEvent, ReactNode, RefObject } from "react";
 
-import { ActiveConnectionPath, ConnectionPath } from "@/components/canvas/canvas-connections";
+import { ActiveConnectionPath, CanvasConnectionMarkers, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasFrameNode } from "@/components/canvas/canvas-frame-node";
 import { CanvasNode } from "@/components/canvas/canvas-node";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
@@ -26,7 +26,9 @@ type CanvasProjectWorldLayersProps = {
     relatedConnectionIds: Set<string>;
     scriptScrollTopById: Record<string, number>;
     connectingParams: ConnectionHandle | null;
+    connectionBlockedNodeId: string | null;
     mouseWorld: Position;
+    connectionTargetHandleId?: string;
     connectionTargetNodeId: string | null;
     nodeById: Map<string, CanvasNodeData>;
     visibleNodes: CanvasNodeData[];
@@ -53,7 +55,8 @@ type CanvasProjectWorldLayersProps = {
     renderCanvasNodeContent: (node: CanvasNodeData) => ReactNode;
     onConnectionSelect: (connectionId: string) => void;
     onConnectionContextMenu: (event: ReactMouseEvent<SVGPathElement>, connectionId: string) => void;
-    onNodeMouseDown: (event: ReactMouseEvent, nodeId: string) => void;
+    onNodePointerDown: (event: ReactPointerEvent, nodeId: string) => void;
+    onNodeKeyboardSelect: (nodeId: string) => void;
     onNodeHoverStart: (nodeId: string) => void;
     onNodeHoverEnd: (nodeId: string) => void;
     onConnectStart: (event: ReactPointerEvent, nodeId: string, handleType: "source" | "target", handleId?: string) => void;
@@ -82,17 +85,26 @@ export function CanvasProjectWorldLayers(props: CanvasProjectWorldLayersProps) {
     const { theme, viewportScale } = props;
     return (
         <>
+            <div className="sr-only" aria-live="polite">
+                {props.connectionBlockedNodeId
+                    ? `无法连接到${props.nodeById.get(props.connectionBlockedNodeId)?.title || "该节点"}`
+                    : props.connectionTargetNodeId
+                        ? `可连接到${props.nodeById.get(props.connectionTargetNodeId)?.title || "该节点"}`
+                        : ""}
+            </div>
             <svg
                 className="absolute overflow-visible"
                 viewBox={`${props.connectionLayerBounds.left} ${props.connectionLayerBounds.top} ${props.connectionLayerBounds.width} ${props.connectionLayerBounds.height}`}
                 style={{ left: props.connectionLayerBounds.left, top: props.connectionLayerBounds.top, width: props.connectionLayerBounds.width, height: props.connectionLayerBounds.height, pointerEvents: "none", zIndex: 0 }}
             >
+                <CanvasConnectionMarkers />
                 {props.displayConnections.map(({ connection, from, to }) => (
                     <ConnectionPath
                         key={connection.id}
                         connection={connection}
                         from={from}
                         to={to}
+                        obstacles={props.visibleNodes}
                         fromScrollTop={props.scriptScrollTopById[from.id] || 0}
                         toScrollTop={props.scriptScrollTopById[to.id] || 0}
                         active={props.selectedConnectionId === connection.id || props.relatedConnectionIds.has(connection.id)}
@@ -100,7 +112,7 @@ export function CanvasProjectWorldLayers(props: CanvasProjectWorldLayersProps) {
                         onContextMenu={(event) => props.onConnectionContextMenu(event, connection.id)}
                     />
                 ))}
-                {props.connectingParams ? <ActiveConnectionPath node={props.nodeById.get(props.connectingParams.nodeId)} handle={props.connectingParams} mouseWorld={props.mouseWorld} target={props.connectionTargetNodeId ? props.nodeById.get(props.connectionTargetNodeId) : undefined} nodeScrollTop={props.scriptScrollTopById[props.connectingParams.nodeId] || 0} /> : null}
+                {props.connectingParams ? <ActiveConnectionPath node={props.nodeById.get(props.connectingParams.nodeId)} handle={props.connectingParams} mouseWorld={props.mouseWorld} target={props.connectionTargetNodeId ? props.nodeById.get(props.connectionTargetNodeId) : undefined} targetHandleId={props.connectionTargetHandleId} nodeScrollTop={props.scriptScrollTopById[props.connectingParams.nodeId] || 0} targetScrollTop={props.connectionTargetNodeId ? props.scriptScrollTopById[props.connectionTargetNodeId] || 0 : 0} obstacles={props.visibleNodes} invalid={Boolean(props.connectionBlockedNodeId)} /> : null}
             </svg>
 
             {props.visibleNodes.map((node) =>
@@ -113,7 +125,8 @@ export function CanvasProjectWorldLayers(props: CanvasProjectWorldLayersProps) {
                         scale={viewportScale}
                         isSelected={props.selectedNodeIds.has(node.id)}
                         isDropTarget={props.frameDropTargetId === node.id}
-                        onMouseDown={props.onNodeMouseDown}
+                        onPointerDown={props.onNodePointerDown}
+                        onKeyboardSelect={props.onNodeKeyboardSelect}
                         onResize={props.onNodeResize}
                         onToggleCollapsed={props.onToggleFrame}
                         onTitleChange={props.onNodeTitleChange}
@@ -129,7 +142,8 @@ export function CanvasProjectWorldLayers(props: CanvasProjectWorldLayersProps) {
                         isRelated={props.relatedNodeIds.has(node.id)}
                         isFocusRelated={props.activeNodeId === node.id}
                         isConnectionTarget={props.connectionTargetNodeId === node.id}
-                        isConnecting={Boolean(props.connectingParams)}
+                        isConnectionBlockedTarget={props.connectionBlockedNodeId === node.id}
+                        connectingHandleType={props.connectingParams?.handleType}
                         batchCount={props.batchChildCountById.get(node.id) || 0}
                         batchExpanded={Boolean(node.metadata?.imageBatchExpanded)}
                         batchClosing={Boolean(node.metadata?.batchRootId && props.collapsingBatchIds.has(node.metadata.batchRootId))}
@@ -143,12 +157,14 @@ export function CanvasProjectWorldLayers(props: CanvasProjectWorldLayersProps) {
                         mentionReferences={props.mentionReferencesByNodeId.get(node.id) || EMPTY_RESOURCE_REFERENCES}
                         renderNodeContent={props.renderCanvasNodeContent}
                         drawingProjectId={props.projectId}
-                        onMouseDown={props.onNodeMouseDown}
+                        onPointerDown={props.onNodePointerDown}
+                        onKeyboardSelect={props.onNodeKeyboardSelect}
                         onHoverStart={props.onNodeHoverStart}
                         onHoverEnd={props.onNodeHoverEnd}
                         onConnectStart={props.onConnectStart}
                         onResize={props.onNodeResize}
                         onContentChange={props.onNodeContentChange}
+                        onTitleChange={props.onNodeTitleChange}
                         onToggleBatch={props.onToggleBatch}
                         onSetBatchPrimary={props.onSetBatchPrimary}
                         onRetry={props.onRetry}

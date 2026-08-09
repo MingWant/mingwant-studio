@@ -14,6 +14,8 @@ export type FloatingDockCommand = {
     active?: boolean;
     disabled?: boolean;
     danger?: boolean;
+    ariaControls?: string;
+    ariaExpanded?: boolean;
 };
 
 export type FloatingDockEntry = FloatingDockCommand | { kind: "separator"; id: string };
@@ -42,8 +44,8 @@ const DOCK_METRICS: Record<NonNullable<FloatingDockProps["size"]>, DockMetrics> 
 };
 
 const TOUCH_DOCK_METRICS: Record<NonNullable<FloatingDockProps["size"]>, DockMetrics> = {
-    default: { base: 40, magnified: 40, icon: 18, iconMagnified: 18, distance: 0 },
-    compact: { base: 36, magnified: 36, icon: 16, iconMagnified: 16, distance: 0 },
+    default: { base: 44, magnified: 44, icon: 20, iconMagnified: 20, distance: 0 },
+    compact: { base: 44, magnified: 44, icon: 18, iconMagnified: 18, distance: 0 },
 };
 
 export const FloatingDock = forwardRef<HTMLDivElement, FloatingDockProps>(function FloatingDock({ items, size = "default", embedded = false, className, style, ariaLabel = "画布工具", showLabels = false }, forwardedRef) {
@@ -68,7 +70,8 @@ export const FloatingDock = forwardRef<HTMLDivElement, FloatingDockProps>(functi
             role="toolbar"
             aria-label={ariaLabel}
             className={cn(
-                "aceternity-floating-dock flex overflow-visible",
+                "aceternity-floating-dock flex",
+                coarsePointer ? "thin-scrollbar max-w-full touch-pan-x overflow-x-auto overflow-y-hidden" : "overflow-visible",
                 showLabels ? "items-center" : "items-end",
                 embedded ? "shadow-none" : "border backdrop-blur-2xl",
                 showLabels
@@ -117,6 +120,8 @@ function DockCommandButton({ command, mouseX, metrics, motionEnabled, compact, s
                     type="button"
                     aria-label={command.label}
                     aria-pressed={command.active || undefined}
+                    aria-controls={command.ariaControls}
+                    aria-expanded={command.ariaExpanded}
                     disabled={command.disabled}
                     className={cn("aceternity-dock-command is-labeled group inline-flex h-8 items-center justify-center gap-1.5 whitespace-nowrap rounded-[9px] border-0 px-2.5 outline-none", command.active && "is-active", command.danger && "is-danger")}
                     whileTap={!command.disabled ? { scale: 0.96 } : undefined}
@@ -141,6 +146,8 @@ function DockCommandButton({ command, mouseX, metrics, motionEnabled, compact, s
                 type="button"
                 aria-label={command.label}
                 aria-pressed={command.active || undefined}
+                aria-controls={command.ariaControls}
+                aria-expanded={command.ariaExpanded}
                 disabled={command.disabled}
                 className={cn("aceternity-dock-command group relative grid size-full place-items-center rounded-full border outline-none", command.active && "is-active", command.danger && "is-danger")}
                 whileTap={motionEnabled && !command.disabled ? { scale: 0.92 } : undefined}

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, type Dispatch, type MouseEvent, type Se
 import { isNodeHiddenByCollapsedFrame } from "@/lib/canvas/canvas-frame";
 import { isHiddenBatchChild } from "@/lib/canvas/canvas-project-domain";
 import { applyCanvasLiveViewport } from "@/lib/canvas/canvas-live-viewport";
-import { getCanvasNodesBounds, viewportAtScale, viewportForBounds, type CanvasViewportSize } from "@/lib/canvas/canvas-viewport";
+import { getCanvasNodesBounds, viewportAtScale, viewportForBounds, viewportToRevealBounds, type CanvasViewportSize } from "@/lib/canvas/canvas-viewport";
 import { CanvasNodeType, type CanvasNodeData, type ContextMenuState, type Position, type ViewportTransform } from "@/types/canvas";
 import { useCanvasViewportTransition } from "./use-canvas-viewport-transition";
 
@@ -90,6 +90,16 @@ export function useCanvasViewportController({
         return focusNodesInView(nodes.filter((node) => selectedNodeIdsRef.current.has(node.id) && !isHiddenBatchChild(node, nodes) && !isNodeHiddenByCollapsedFrame(node, nodes)), 1.25);
     }, [focusNodesInView, nodesRef, selectedNodeIdsRef]);
 
+    const revealCanvasNodes = useCallback((nodeIds: Iterable<string>) => {
+        const targetIds = new Set(nodeIds);
+        const bounds = getCanvasNodesBounds(nodesRef.current.filter((node) => targetIds.has(node.id)));
+        if (!bounds) return false;
+        const next = viewportToRevealBounds(bounds, size, viewportRef.current);
+        if (next) transitionViewportTo(next);
+        setContextMenu(null);
+        return true;
+    }, [nodesRef, setContextMenu, size, transitionViewportTo, viewportRef]);
+
     const handleCanvasDoubleClick = useCallback((event: MouseEvent<HTMLDivElement>) => {
         event.preventDefault();
         if (!fitCanvasSelection()) fitCanvasContent();
@@ -122,11 +132,6 @@ export function useCanvasViewportController({
         setDialogNodeId(node.type === CanvasNodeType.Drawing ? null : node.id);
     }, [nodesRef, selectFocusedNode, setDialogNodeId, size.height, size.width, transitionViewportTo, viewportRef]);
 
-    const resetViewport = useCallback(() => {
-        transitionViewportTo({ x: size.width / 2, y: size.height / 2, k: 1 });
-        setContextMenu(null);
-    }, [setContextMenu, size.height, size.width, transitionViewportTo]);
-
     const setZoomScale = useCallback((scale: number) => {
         cancelViewportTransition();
         const next = viewportAtScale(viewportRef.current, size, scale);
@@ -135,6 +140,10 @@ export function useCanvasViewportController({
         commitTimerRef.current = setTimeout(() => commitViewport(viewportRef.current), 120);
         setContextMenu(null);
     }, [cancelViewportTransition, commitViewport, previewViewport, setContextMenu, size, viewportRef]);
+
+    const zoomBy = useCallback((factor: number) => {
+        setZoomScale(viewportRef.current.k * factor);
+    }, [setZoomScale, viewportRef]);
 
     const zoomToActualSize = useCallback(() => {
         transitionViewportTo(viewportAtScale(viewportRef.current, size, 1));
@@ -161,9 +170,10 @@ export function useCanvasViewportController({
         handleViewportChange,
         handleViewportPreviewChange,
         previewViewport,
-        resetViewport,
+        revealCanvasNodes,
         screenToCanvas,
         setZoomScale,
+        zoomBy,
         zoomToActualSize,
     };
 }

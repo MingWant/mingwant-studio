@@ -2,14 +2,37 @@ import React, { useState } from "react";
 import type { MouseEvent as ReactMouseEvent } from "react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
+import { isFrameNode } from "@/lib/canvas/canvas-frame";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { STORYBOARD_HEADER_HEIGHT, STORYBOARD_ROW_HEIGHT, storyboardTableHeight } from "@/components/canvas/canvas-script-node";
 import type { CanvasConnection, CanvasNodeData, ConnectionHandle, Position } from "@/types/canvas";
+
+const CONNECTION_MARKER_ID = "canvas-arrow-default";
+const CONNECTION_ACTIVE_MARKER_ID = "canvas-arrow-active";
+const CONNECTION_DRAFT_MARKER_ID = "canvas-arrow-draft";
+const CONNECTION_INVALID_MARKER_ID = "canvas-arrow-invalid";
+
+export function CanvasConnectionMarkers() {
+    const theme = canvasThemes[useThemeStore((state) => state.theme)];
+    return (
+        <defs>
+            <ConnectionMarker id={CONNECTION_MARKER_ID} color={theme.node.muted} opacity={0.58} />
+            <ConnectionMarker id={CONNECTION_ACTIVE_MARKER_ID} color={theme.accent.primary} opacity={0.92} />
+            <ConnectionMarker id={CONNECTION_DRAFT_MARKER_ID} color={theme.accent.primary} opacity={0.88} />
+            <ConnectionMarker id={CONNECTION_INVALID_MARKER_ID} color={theme.accent.danger} opacity={0.9} />
+        </defs>
+    );
+}
+
+function ConnectionMarker({ id, color, opacity }: { id: string; color: string; opacity: number }) {
+    return <marker id={id} viewBox="0 0 10 10" refX="8.5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse"><path d="M 0 1 L 9 5 L 0 9 z" fill={color} opacity={opacity} /></marker>;
+}
 
 export const ConnectionPath = React.memo(function ConnectionPath({
     connection,
     from,
     to,
+    obstacles = [],
     fromScrollTop = 0,
     toScrollTop = 0,
     active,
@@ -19,6 +42,7 @@ export const ConnectionPath = React.memo(function ConnectionPath({
     connection: CanvasConnection;
     from: CanvasNodeData;
     to: CanvasNodeData;
+    obstacles?: CanvasNodeData[];
     fromScrollTop?: number;
     toScrollTop?: number;
     active: boolean;
@@ -31,31 +55,32 @@ export const ConnectionPath = React.memo(function ConnectionPath({
     const startY = connectionHandleY(from, connection.fromHandleId, fromScrollTop);
     const endX = to.position.x;
     const endY = connectionHandleY(to, connection.toHandleId, toScrollTop);
-    const dx = Math.abs(endX - startX);
-    const curvature = Math.max(dx * 0.5, 50);
-    const pathD = `M ${startX} ${startY} C ${startX + curvature} ${startY}, ${endX - curvature} ${endY}, ${endX} ${endY}`;
+    const pathD = connectionPath(startX, startY, endX, endY, from, to, obstacles);
     const emphasized = active || hovered;
-    const gradientId = `canvas-flow-${connection.id.replace(/[^a-zA-Z0-9_-]/g, "")}`;
 
     return (
         <g>
-            {emphasized ? <defs>
-                <linearGradient id={gradientId} gradientUnits="userSpaceOnUse" x1={startX} y1={startY} x2={endX} y2={endY}>
-                    <stop offset="0%" stopColor={theme.node.muted} stopOpacity={0.18} />
-                    <stop offset="48%" stopColor={theme.accent.primary} stopOpacity={0.58} />
-                    <stop offset="100%" stopColor={theme.accent.primary} stopOpacity={0.34} />
-                </linearGradient>
-            </defs> : null}
             <path
                 data-connection-id={connection.id}
+                role="button"
+                tabIndex={0}
+                aria-label={`连接：${from.title || "起点"} 到 ${to.title || "终点"}`}
                 d={pathD}
                 stroke="transparent"
-                strokeWidth="16"
+                strokeWidth="20"
                 vectorEffect="non-scaling-stroke"
                 fill="none"
                 style={{ cursor: "pointer", pointerEvents: "stroke" }}
                 onMouseEnter={() => setHovered(true)}
                 onMouseLeave={() => setHovered(false)}
+                onFocus={() => setHovered(true)}
+                onBlur={() => setHovered(false)}
+                onKeyDown={(event) => {
+                    if (event.key !== "Enter" && event.key !== " ") return;
+                    event.preventDefault();
+                    event.stopPropagation();
+                    onSelect();
+                }}
                 onClick={(event) => {
                     event.stopPropagation();
                     onSelect();
@@ -69,30 +94,19 @@ export const ConnectionPath = React.memo(function ConnectionPath({
             <path
                 d={pathD}
                 stroke={emphasized ? theme.accent.primary : theme.node.muted}
-                strokeWidth={emphasized ? 1.6 : 1.2}
+                strokeWidth={emphasized ? 2.2 : 1.5}
                 vectorEffect="non-scaling-stroke"
-                strokeOpacity={emphasized ? 0.58 : 0.34}
+                strokeOpacity={emphasized ? 0.9 : 0.48}
                 fill="none"
                 strokeLinecap="round"
+                markerEnd={`url(#${emphasized ? CONNECTION_ACTIVE_MARKER_ID : CONNECTION_MARKER_ID})`}
                 style={{ pointerEvents: "none" }}
             />
-            {emphasized ? <path
-                className="canvas-connection-flow"
-                d={pathD}
-                stroke={`url(#${gradientId})`}
-                strokeWidth="1.8"
-                vectorEffect="non-scaling-stroke"
-                strokeOpacity="1"
-                strokeDasharray="18 26"
-                fill="none"
-                strokeLinecap="round"
-                style={{ filter: `drop-shadow(0 0 3px ${theme.accent.primary}35)`, pointerEvents: "none" }}
-            /> : null}
         </g>
     );
-}, (previous, next) => previous.connection === next.connection && previous.from === next.from && previous.to === next.to && previous.active === next.active && previous.fromScrollTop === next.fromScrollTop && previous.toScrollTop === next.toScrollTop);
+}, (previous, next) => previous.connection === next.connection && previous.from === next.from && previous.to === next.to && previous.obstacles === next.obstacles && previous.active === next.active && previous.fromScrollTop === next.fromScrollTop && previous.toScrollTop === next.toScrollTop);
 
-export function ActiveConnectionPath({ node, handle, mouseWorld, target, nodeScrollTop = 0 }: { node?: CanvasNodeData; handle: ConnectionHandle; mouseWorld: Position; target?: CanvasNodeData; nodeScrollTop?: number }) {
+export function ActiveConnectionPath({ node, handle, mouseWorld, target, targetHandleId, nodeScrollTop = 0, targetScrollTop = 0, obstacles = [], invalid = false }: { node?: CanvasNodeData; handle: ConnectionHandle; mouseWorld: Position; target?: CanvasNodeData; targetHandleId?: string; nodeScrollTop?: number; targetScrollTop?: number; obstacles?: CanvasNodeData[]; invalid?: boolean }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     if (!node) return null;
 
@@ -101,13 +115,49 @@ export function ActiveConnectionPath({ node, handle, mouseWorld, target, nodeScr
     const endX = handle.handleType === "source" ? mouseWorld.x : node.position.x;
     const endY = handle.handleType === "source" ? mouseWorld.y : connectionHandleY(node, handle.handleId, nodeScrollTop);
     const snappedStartX = handle.handleType === "target" && target ? target.position.x + target.width : startX;
-    const snappedStartY = handle.handleType === "target" && target ? target.position.y + target.height / 2 : startY;
+    const snappedStartY = handle.handleType === "target" && target ? connectionHandleY(target, targetHandleId, targetScrollTop) : startY;
     const snappedEndX = handle.handleType === "source" && target ? target.position.x : endX;
-    const snappedEndY = handle.handleType === "source" && target ? target.position.y + target.height / 2 : endY;
-    const distance = Math.abs(snappedEndX - snappedStartX);
-    const pathD = `M ${snappedStartX} ${snappedStartY} C ${snappedStartX + distance * 0.5} ${snappedStartY}, ${snappedEndX - distance * 0.5} ${snappedEndY}, ${snappedEndX} ${snappedEndY}`;
+    const snappedEndY = handle.handleType === "source" && target ? connectionHandleY(target, targetHandleId, targetScrollTop) : endY;
+    const sourceNode = handle.handleType === "source" ? node : target;
+    const targetNode = handle.handleType === "source" ? target : node;
+    const pathD = connectionPath(snappedStartX, snappedStartY, snappedEndX, snappedEndY, sourceNode, targetNode, obstacles);
+    const color = invalid ? theme.accent.danger : theme.accent.primary;
 
-    return <path className="canvas-connection-draft" d={pathD} stroke={theme.accent.primary} strokeWidth="1.4" strokeOpacity="0.72" vectorEffect="non-scaling-stroke" fill="none" strokeDasharray="8,8" strokeLinecap="round" />;
+    return <path className="canvas-connection-draft" d={pathD} stroke={color} strokeWidth="1.8" strokeOpacity="0.86" vectorEffect="non-scaling-stroke" fill="none" strokeDasharray={invalid ? "4,5" : "7,7"} strokeLinecap="round" markerEnd={`url(#${invalid ? CONNECTION_INVALID_MARKER_ID : CONNECTION_DRAFT_MARKER_ID})`} />;
+}
+
+function connectionPath(startX: number, startY: number, endX: number, endY: number, from?: CanvasNodeData, to?: CanvasNodeData, obstacles: CanvasNodeData[] = []) {
+    const forwardGap = endX - startX;
+    const routeLeft = Math.min(startX, endX);
+    const routeRight = Math.max(startX, endX);
+    const corridorTop = Math.min(startY, endY) - 28;
+    const corridorBottom = Math.max(startY, endY) + 28;
+    const blockers = obstacles.filter((node) => !isFrameNode(node) && node.id !== from?.id && node.id !== to?.id && node.position.x < routeRight && node.position.x + node.width > routeLeft && node.position.y < corridorBottom && node.position.y + node.height > corridorTop);
+    if (forwardGap >= 72 && !blockers.length) {
+        const curvature = Math.min(240, Math.max(56, forwardGap * 0.45));
+        return `M ${startX} ${startY} C ${startX + curvature} ${startY}, ${endX - curvature} ${endY}, ${endX} ${endY}`;
+    }
+
+    // 有中间障碍或发生回连时改走节点群外侧通道，保持流程方向清楚且不穿卡片。
+    const laneNodes = [from, to, ...blockers].filter((node): node is CanvasNodeData => Boolean(node));
+    const upperLane = Math.min(startY, endY, ...laneNodes.map((node) => node.position.y)) - 56;
+    const lowerLane = Math.max(startY, endY, ...laneNodes.map((node) => node.position.y + node.height)) + 56;
+    const upperCost = Math.abs(startY - upperLane) + Math.abs(endY - upperLane);
+    const lowerCost = Math.abs(startY - lowerLane) + Math.abs(endY - lowerLane);
+    const detourY = upperCost < lowerCost ? upperLane : lowerLane;
+    const lead = Math.min(120, Math.max(48, Math.abs(forwardGap) * 0.2 + 48));
+    const closeCorridorInset = Math.max(0, forwardGap / 3);
+    const exitX = forwardGap >= 0
+        ? blockers.length
+            ? Math.max(startX + 2, Math.min(startX + lead, Math.min(...blockers.map((node) => node.position.x)) - 24))
+            : startX + closeCorridorInset
+        : startX + lead;
+    const entryX = forwardGap >= 0
+        ? blockers.length
+            ? Math.min(endX - 2, Math.max(endX - lead, Math.max(...blockers.map((node) => node.position.x + node.width)) + 24))
+            : endX - closeCorridorInset
+        : endX - lead;
+    return `M ${startX} ${startY} L ${exitX} ${startY} L ${exitX} ${detourY} L ${entryX} ${detourY} L ${entryX} ${endY} L ${endX} ${endY}`;
 }
 
 function connectionHandleY(node: CanvasNodeData, handleId?: string, scrollTop = 0) {

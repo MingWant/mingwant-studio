@@ -7,12 +7,13 @@ import { aceternityMotion } from "@/lib/aceternity-motion";
 import { canvasDockStyle } from "@/lib/canvas/canvas-aceternity-style";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { subscribeCanvasViewportPreview } from "@/lib/canvas/canvas-live-viewport";
+import { CANVAS_MAX_SCALE, CANVAS_MIN_SCALE, clampCanvasScale } from "@/lib/canvas/canvas-viewport";
 import { useThemeStore } from "@/stores/use-theme-store";
 
 type CanvasZoomControlsProps = {
     scale: number;
     onScaleChange: (scale: number) => void;
-    onReset: () => void;
+    onFit: () => void;
     isMiniMapOpen: boolean;
     onToggleMiniMap: () => void;
     onOpenShortcuts: () => void;
@@ -21,7 +22,7 @@ type CanvasZoomControlsProps = {
 
 const QUICK_ZOOM_LEVELS = [0.25, 0.5, 1, 2] as const;
 
-export function CanvasZoomControls({ scale, onScaleChange, onReset, isMiniMapOpen, onToggleMiniMap, onOpenShortcuts, containerRef }: CanvasZoomControlsProps) {
+export function CanvasZoomControls({ scale, onScaleChange, onFit, isMiniMapOpen, onToggleMiniMap, onOpenShortcuts, containerRef }: CanvasZoomControlsProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const rootRef = useRef<HTMLDivElement>(null);
     const liveScaleRef = useRef(scale);
@@ -63,14 +64,14 @@ export function CanvasZoomControls({ scale, onScaleChange, onReset, isMiniMapOpe
     }
 
     function commitScale(nextScale: number) {
-        const clampedScale = Math.min(2, Math.max(0.05, nextScale));
+        const clampedScale = clampCanvasScale(nextScale);
         updateScaleDisplay(clampedScale);
         onScaleChange(clampedScale);
     }
 
     const items: FloatingDockEntry[] = [
         { id: "zoom-minimap", label: isMiniMapOpen ? "关闭小地图" : "打开小地图", icon: <Compass />, active: isMiniMapOpen, onClick: onToggleMiniMap },
-        { id: "zoom-fit", label: "适应全部内容", icon: <Focus />, onClick: onReset },
+        { id: "zoom-fit", label: "适应全部内容", icon: <Focus />, onClick: onFit },
         { kind: "separator", id: "zoom-separator" },
         { id: "zoom-out", label: "缩小画布", icon: <Minus />, onClick: () => commitScale(liveScaleRef.current - 0.1) },
         {
@@ -110,8 +111,8 @@ export function CanvasZoomControls({ scale, onScaleChange, onReset, isMiniMapOpe
                         <input
                             ref={rangeRef}
                             type="range"
-                            min="5"
-                            max="200"
+                            min={String(CANVAS_MIN_SCALE * 100)}
+                            max={String(CANVAS_MAX_SCALE * 100)}
                             step="1"
                             defaultValue={Math.round(scale * 100)}
                             className="aceternity-zoom-range mt-3 h-4 w-full"

@@ -109,20 +109,23 @@ export function useCanvasRenderModel({
         });
         return { left, top, width: Math.max(2, right - left), height: Math.max(2, bottom - top) };
     }, [nodes]);
-    const visibleNodes = useMemo(() => {
+    const viewportWorldBounds = useMemo(() => {
         const padding = (reduceMediaEffects ? Math.max(240, Math.max(viewportSize.width, viewportSize.height) * 0.4) : Math.max(800, Math.max(viewportSize.width, viewportSize.height) * 1.5)) / viewport.k;
         const viewLeft = -viewport.x / viewport.k - padding;
         const viewTop = -viewport.y / viewport.k - padding;
         const viewRight = viewLeft + viewportSize.width / viewport.k + padding * 2;
         const viewBottom = viewTop + viewportSize.height / viewport.k + padding * 2;
+        return { left: viewLeft, top: viewTop, right: viewRight, bottom: viewBottom };
+    }, [reduceMediaEffects, viewport.k, viewport.x, viewport.y, viewportSize.height, viewportSize.width]);
+    const visibleNodes = useMemo(() => {
         const frames: CanvasNodeData[] = [];
         const regular: CanvasNodeData[] = [];
         nodes.forEach((node) => {
-            if (renderHiddenNodeIds.has(node.id) || node.position.x + node.width <= viewLeft || node.position.x >= viewRight || node.position.y + node.height <= viewTop || node.position.y >= viewBottom) return;
+            if (renderHiddenNodeIds.has(node.id) || node.position.x + node.width <= viewportWorldBounds.left || node.position.x >= viewportWorldBounds.right || node.position.y + node.height <= viewportWorldBounds.top || node.position.y >= viewportWorldBounds.bottom) return;
             (isFrameNode(node) ? frames : regular).push(node);
         });
         return [...frames, ...regular];
-    }, [nodes, reduceMediaEffects, renderHiddenNodeIds, viewport.k, viewport.x, viewport.y, viewportSize.height, viewportSize.width]);
+    }, [nodes, renderHiddenNodeIds, viewportWorldBounds]);
 
     const imageAssets = useMemo(() => assets.filter((asset): asset is ImageAsset => asset.kind === "image"), [assets]);
     const canvasImageNodes = useMemo(() => nodes.filter((node) => node.type === CanvasNodeType.Image && Boolean(node.metadata?.content) && !collapsedBatchChildIds.has(node.id) && !(node.parentId && nodeById.get(node.parentId)?.metadata?.frame?.collapsed)), [collapsedBatchChildIds, nodeById, nodes]);
@@ -224,8 +227,13 @@ export function useCanvasRenderModel({
         if (displayFrom.id === displayTo.id) return [];
         const from = dragPreview?.nodeIds.has(displayFrom.id) ? { ...displayFrom, position: { x: displayFrom.position.x + dragPreview.x, y: displayFrom.position.y + dragPreview.y } } : displayFrom;
         const to = dragPreview?.nodeIds.has(displayTo.id) ? { ...displayTo, position: { x: displayTo.position.x + dragPreview.x, y: displayTo.position.y + dragPreview.y } } : displayTo;
+        const left = Math.min(from.position.x, to.position.x) - 160;
+        const top = Math.min(from.position.y, to.position.y) - 160;
+        const right = Math.max(from.position.x + from.width, to.position.x + to.width) + 160;
+        const bottom = Math.max(from.position.y + from.height, to.position.y + to.height) + 160;
+        if (right < viewportWorldBounds.left || left > viewportWorldBounds.right || bottom < viewportWorldBounds.top || top > viewportWorldBounds.bottom) return [];
         return [{ connection, from, to }];
-    }), [collapsedBatchChildIds, connections, dragPreview, nodeById]);
+    }), [collapsedBatchChildIds, connections, dragPreview, nodeById, viewportWorldBounds]);
 
     const configInputsById = useMemo(() => {
         const map = new Map<string, NodeGenerationInput[]>();

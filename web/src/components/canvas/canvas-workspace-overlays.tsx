@@ -1,5 +1,5 @@
 import { motion, useReducedMotion } from "motion/react";
-import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { ChevronRight, Clapperboard, Image as ImageIcon, List, Music2, Pencil, Settings2, Video, WandSparkles, X } from "lucide-react";
 
 import { SpotlightSurface } from "@/components/ui/aceternity/spotlight-surface";
@@ -128,7 +128,9 @@ export function CanvasConnectionCreateMenu({ pending, viewport, viewportSize, co
     const reducedMotion = useReducedMotion();
     const menuRef = useRef<HTMLDivElement>(null);
     const menuWidth = 248;
-    const menuHeight = canCreateDrawing ? 420 : 376;
+    const creatingSource = pending.connection.handleType === "target";
+    const showDrawingOption = canCreateDrawing && !creatingSource;
+    const menuHeight = (showDrawingOption ? 420 : 376) - (creatingSource ? 88 : 0);
     const gap = 12;
     const initialPosition = getConnectionMenuPosition(pending.position, viewport, viewportSize, menuWidth, menuHeight, gap);
 
@@ -146,6 +148,20 @@ export function CanvasConnectionCreateMenu({ pending, viewport, viewportSize, co
         return subscribeCanvasViewportPreview(container, update);
     }, [containerRef, pending.position, viewport, viewportSize.height, viewportSize.width]);
 
+    useEffect(() => {
+        const focusFrame = requestAnimationFrame(() => menuRef.current?.querySelector<HTMLElement>("[data-connection-create-option]")?.focus());
+        return () => cancelAnimationFrame(focusFrame);
+    }, [pending]);
+
+    const closeAndRestoreFocus = () => {
+        onClose();
+        requestAnimationFrame(() => {
+            const origin = Array.from(document.querySelectorAll<HTMLElement>("[data-node-id]"))
+                .find((element) => element.dataset.nodeId === pending.connection.nodeId);
+            origin?.focus();
+        });
+    };
+
     return (
         <SpotlightSurface
             spotlightColor={theme.toolbar.itemHover}
@@ -156,26 +172,34 @@ export function CanvasConnectionCreateMenu({ pending, viewport, viewportSize, co
             className="aceternity-floating-panel absolute z-[120] w-[248px] origin-top-left overflow-hidden rounded-[16px] border p-2 backdrop-blur-2xl"
             data-canvas-no-zoom
             data-connection-create-menu
+            role="dialog"
+            aria-label={creatingSource ? "创建连线的上一步" : "创建连线的下一步"}
             style={{ left: initialPosition.left, top: initialPosition.top, background: theme.spatial.elevated, borderColor: theme.toolbar.border, color: theme.node.text, boxShadow: `0 30px 90px ${theme.spatial.shadow}` }}
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
+            onKeyDown={(event) => {
+                if (event.key !== "Escape") return;
+                event.preventDefault();
+                event.stopPropagation();
+                closeAndRestoreFocus();
+            }}
         >
             <div className="absolute inset-x-8 top-0 h-px" style={{ background: `linear-gradient(90deg, transparent, ${theme.toolbar.border}, transparent)` }} />
             <div className="mb-1.5 flex items-center justify-between gap-2 px-1 py-0.5">
                 <span className="flex min-w-0 items-center gap-2">
                     <span className="grid size-8 shrink-0 place-items-center rounded-[10px] border opacity-75" style={{ background: theme.spatial.surface, borderColor: theme.toolbar.border }}><WandSparkles className="size-3.5" /></span>
-                    <span className="min-w-0"><span className="block truncate text-[11px] font-semibold">创建下一步</span><span className="mt-0.5 block truncate text-[8px]" style={{ color: theme.node.muted }}>引用当前节点</span></span>
+                    <span className="min-w-0"><span className="block truncate text-[11px] font-semibold">{creatingSource ? "创建上一步" : "创建下一步"}</span><span className="mt-0.5 block truncate text-[8px]" style={{ color: theme.node.muted }}>{creatingSource ? "连接到当前节点" : "引用当前节点"}</span></span>
                 </span>
-                <button type="button" className="grid size-6 shrink-0 place-items-center rounded-full border opacity-55 transition-opacity hover:opacity-100" style={{ background: theme.spatial.surface, borderColor: theme.toolbar.border }} onClick={onClose} aria-label="关闭连线创建菜单"><X className="size-3" /></button>
+                <button type="button" className="grid size-6 shrink-0 place-items-center rounded-full border opacity-55 transition-opacity hover:opacity-100" style={{ background: theme.spatial.surface, borderColor: theme.toolbar.border }} onClick={closeAndRestoreFocus} aria-label="关闭连线创建菜单"><X className="size-3" /></button>
             </div>
             <div className="grid gap-1">
                 <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<List className="size-4" />} title="文本生成" onClick={() => onCreate(CanvasNodeType.Text)} />
-                <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<Clapperboard className="size-4" />} title="分镜脚本" onClick={() => onCreate(CanvasNodeType.Script)} />
+                {!creatingSource ? <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<Clapperboard className="size-4" />} title="分镜脚本" onClick={() => onCreate(CanvasNodeType.Script)} /> : null}
                 <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<ImageIcon className="size-4" />} title="图片生成" onClick={() => onCreate(CanvasNodeType.Image)} />
-                {canCreateDrawing ? <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<Pencil className="size-4" />} title="绘图" onClick={() => onCreate(CanvasNodeType.Drawing)} /> : null}
+                {showDrawingOption ? <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<Pencil className="size-4" />} title="绘图" onClick={() => onCreate(CanvasNodeType.Drawing)} /> : null}
                 <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<Video className="size-4" />} title="视频生成" onClick={() => onCreate(CanvasNodeType.Video)} />
                 <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<Music2 className="size-4" />} title="音频参考" onClick={() => onCreate(CanvasNodeType.Audio)} />
-                <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<Settings2 className="size-4" />} title="配置节点" onClick={() => onCreate(CanvasNodeType.Config)} />
+                {!creatingSource ? <ConnectionCreateOption motionEnabled={!reducedMotion} icon={<Settings2 className="size-4" />} title="配置节点" onClick={() => onCreate(CanvasNodeType.Config)} /> : null}
             </div>
         </SpotlightSurface>
     );
@@ -207,7 +231,7 @@ export function CanvasAlignmentGuides({ guides, viewport, containerRef, color }:
 function ConnectionCreateOption({ motionEnabled, icon, title, description, onClick }: { motionEnabled: boolean; icon: ReactNode; title: string; description?: string; onClick: () => void }) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     return (
-        <motion.button type="button" whileHover={motionEnabled ? { x: 2 } : undefined} whileTap={motionEnabled ? { scale: 0.98 } : undefined} transition={aceternityMotion.spring.dock} className="group flex min-h-10 w-full cursor-pointer items-center gap-2 rounded-[9px] border border-transparent px-2 py-1.5 text-left outline-none hover:border-black/10 hover:bg-black/5 focus-visible:ring-2 dark:hover:border-white/10 dark:hover:bg-white/8" style={{ color: theme.node.text, "--tw-ring-color": theme.node.muted } as CSSProperties} onClick={onClick}>
+        <motion.button data-connection-create-option type="button" whileHover={motionEnabled ? { x: 2 } : undefined} whileTap={motionEnabled ? { scale: 0.98 } : undefined} transition={aceternityMotion.spring.dock} className="group flex min-h-11 w-full cursor-pointer items-center gap-2 rounded-[9px] border border-transparent px-2 py-1.5 text-left outline-none hover:border-black/10 hover:bg-black/5 focus-visible:ring-2 dark:hover:border-white/10 dark:hover:bg-white/8" style={{ color: theme.node.text, "--tw-ring-color": theme.node.muted } as CSSProperties} onClick={onClick}>
             <span className="grid size-7 shrink-0 place-items-center rounded-[8px] opacity-65 transition-opacity group-hover:opacity-100 [&_svg]:size-3.5" style={{ background: theme.toolbar.itemHover }}>{icon}</span>
             <span className="min-w-0 flex-1">
                 <span className="flex items-center gap-2 text-[10px] font-semibold leading-4">{title}</span>

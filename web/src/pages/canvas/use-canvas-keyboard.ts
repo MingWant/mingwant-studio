@@ -1,11 +1,13 @@
 import { useEffect, type Dispatch, type SetStateAction } from "react";
 
+import { expandCanvasFramesToFit, getFrameChildIds, isFrameNode } from "@/lib/canvas/canvas-frame";
 import type { CanvasNodeData, ContextMenuState } from "@/types/canvas";
 
 type UseCanvasKeyboardOptions = {
     nodesRef: { current: CanvasNodeData[] };
     selectedNodeIdsRef: { current: Set<string> };
     selectedConnectionId: string | null;
+    setNodes: Dispatch<SetStateAction<CanvasNodeData[]>>;
     setSelectedNodeIds: Dispatch<SetStateAction<Set<string>>>;
     setSelectedConnectionId: Dispatch<SetStateAction<string | null>>;
     setContextMenu: Dispatch<SetStateAction<ContextMenuState | null>>;
@@ -34,6 +36,7 @@ export function useCanvasKeyboard({
     nodesRef,
     selectedNodeIdsRef,
     selectedConnectionId,
+    setNodes,
     setSelectedNodeIds,
     setSelectedConnectionId,
     setContextMenu,
@@ -69,7 +72,7 @@ export function useCanvasKeyboard({
                 if (!event.repeat) void saveCanvasProject();
                 return;
             }
-            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom]")) return;
+            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLButtonElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom]")) return;
             if (event.key === "?" && !isModifierShortcut && !event.altKey) {
                 event.preventDefault();
                 setShortcutRequestNonce((value) => value + 1);
@@ -111,6 +114,42 @@ export function useCanvasKeyboard({
                 // 这里只做标记，真正逻辑在 paste 监听器里。
                 return;
             }
+            if (!isModifierShortcut && !event.altKey && ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key) && selectedNodeIdsRef.current.size) {
+                event.preventDefault();
+                const distance = event.shiftKey ? 10 : 1;
+                const dx = event.key === "ArrowLeft" ? -distance : event.key === "ArrowRight" ? distance : 0;
+                const dy = event.key === "ArrowUp" ? -distance : event.key === "ArrowDown" ? distance : 0;
+                setNodes((currentNodes) => {
+                    const moveIds = new Set(selectedNodeIdsRef.current);
+                    const inheritedMoveIds = new Set<string>();
+                    currentNodes.forEach((node) => {
+                        if (!moveIds.has(node.id) || node.metadata?.locked) return;
+                        node.metadata?.batchChildIds?.forEach((childId) => {
+                            moveIds.add(childId);
+                            inheritedMoveIds.add(childId);
+                        });
+                        if (isFrameNode(node)) getFrameChildIds(node.id, currentNodes).forEach((childId) => {
+                            moveIds.add(childId);
+                            inheritedMoveIds.add(childId);
+                        });
+                    });
+                    currentNodes.forEach((node) => {
+                        if (!moveIds.has(node.id) || (node.metadata?.locked && !inheritedMoveIds.has(node.id))) return;
+                        node.metadata?.batchChildIds?.forEach((childId) => {
+                            moveIds.add(childId);
+                            inheritedMoveIds.add(childId);
+                        });
+                    });
+                    const next = currentNodes.map((node) => moveIds.has(node.id) && (!node.metadata?.locked || inheritedMoveIds.has(node.id))
+                        ? { ...node, position: { x: node.position.x + dx, y: node.position.y + dy } }
+                        : node);
+                    const parentFrameIds = new Set(next.filter((node) => moveIds.has(node.id) && node.parentId).map((node) => node.parentId as string));
+                    const expanded = expandCanvasFramesToFit(next, parentFrameIds);
+                    nodesRef.current = expanded;
+                    return expanded;
+                });
+                return;
+            }
             if (event.key === "Delete" || event.key === "Backspace") {
                 if (selectedNodeIdsRef.current.size) deleteNodes(new Set(selectedNodeIdsRef.current));
                 else if (selectedConnectionId) deleteConnection(selectedConnectionId);
@@ -126,7 +165,7 @@ export function useCanvasKeyboard({
 
         const handlePaste = (event: ClipboardEvent) => {
             const target = event.target instanceof Element ? event.target : null;
-            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom]")) return;
+            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLButtonElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom]")) return;
             // 节点标记写入失败或仍在写入时避开旧系统图片，其余情况保持系统内容优先。
             event.preventDefault();
             if (shouldPreferCopiedNodes() && pasteCopiedNodes()) return;
@@ -142,5 +181,5 @@ export function useCanvasKeyboard({
             window.removeEventListener("keydown", handleKeyDown, true);
             window.removeEventListener("paste", handlePaste, true);
         };
-    }, [cancelSelectionBox, copySelectedNodes, deleteConnection, deleteNodes, deselectCanvas, fitCanvasContent, fitCanvasSelection, nodesRef, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, saveCanvasProject, selectedConnectionId, selectedNodeIdsRef, setAnnotationNodeId, setContextMenu, setCropNodeId, setInfoNodeId, setMaskEditNodeId, setSelectedConnectionId, setSelectedNodeIds, setShortcutRequestNonce, shouldPreferCopiedNodes, undoCanvas, zoomToActualSize]);
+    }, [cancelSelectionBox, copySelectedNodes, deleteConnection, deleteNodes, deselectCanvas, fitCanvasContent, fitCanvasSelection, nodesRef, pasteCopiedNodes, pasteSystemClipboard, redoCanvas, saveCanvasProject, selectedConnectionId, selectedNodeIdsRef, setAnnotationNodeId, setContextMenu, setCropNodeId, setInfoNodeId, setMaskEditNodeId, setNodes, setSelectedConnectionId, setSelectedNodeIds, setShortcutRequestNonce, shouldPreferCopiedNodes, undoCanvas, zoomToActualSize]);
 }

@@ -2,8 +2,9 @@ import { nanoid } from "nanoid";
 
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { audioMetadata, videoMetadata } from "@/lib/canvas/canvas-generation-task-sync";
+import { appendCanvasNodesWithFrameExpansion, expandCanvasFramesToFit } from "@/lib/canvas/canvas-frame";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
-import { nextCanvasVersionLabel } from "@/lib/canvas/canvas-layout";
+import { nextCanvasVersionLabel, placeCanvasNodeInContext } from "@/lib/canvas/canvas-layout";
 import { buildAudioGenerationMetadata, buildVideoGenerationMetadata, generationReferenceUrls, runBackendCanvasGenerationTask } from "@/lib/canvas/canvas-project-generation";
 import { storeGeneratedAudio } from "@/services/api/audio";
 import { storeGeneratedVideo } from "@/services/api/video";
@@ -26,8 +27,10 @@ export async function executeVideoGeneration({
     sourceTaskId,
     confirmNewProviderRequest,
     projectId,
+    nodesRef,
     setNodes,
     setConnections,
+    revealGeneratedNodes,
     startGenerationRequest,
     finishGenerationRequest,
     bindGenerationTask,
@@ -39,7 +42,7 @@ export async function executeVideoGeneration({
     const videoId = isEmptyVideoNode ? nodeId : nanoid();
     const parent = sourceNode?.position || { x: 0, y: 0 };
     const videoGenerationMetadata = buildVideoGenerationMetadata(sourceNode, generationContext, generationConfig);
-    const videoNode: CanvasNodeData = {
+    let videoNode: CanvasNodeData = {
         id: videoId,
         type: CanvasNodeType.Video,
         title: effectivePrompt.slice(0, 32) || "Generated Video",
@@ -70,21 +73,21 @@ export async function executeVideoGeneration({
             ...videoGenerationMetadata,
         },
     };
+    if (!isEmptyVideoNode) videoNode = placeCanvasNodeInContext(nodesRef.current, videoNode, videoNode.position, sourceNode);
     registerPendingNodeIds([videoId]);
     setNodes((current) => {
         if (isEmptyVideoNode) return current.map((node) => (node.id === nodeId ? { ...node, ...videoNode } : node));
-        if (!isExistingVideoNode || !sourceNode) return [...current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS } } : node)), videoNode];
+        if (!isExistingVideoNode || !sourceNode) return appendCanvasNodesWithFrameExpansion(current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS } } : node)), [videoNode]);
         const rootId = sourceNode.metadata?.versionOfNodeId || sourceNode.id;
         const nextLabel = nextCanvasVersionLabel(rootId, current);
-        return [
-            ...current.map((node) => {
+        const updated = current.map((node) => {
                 if ((node.metadata?.versionOfNodeId || node.id) !== rootId) return node;
                 return { ...node, metadata: { ...node.metadata, versionOfNodeId: rootId, versionLabel: node.metadata?.versionLabel || "A", versionPrimary: false, status: node.id === nodeId ? NODE_STATUS_SUCCESS : node.metadata?.status } };
-            }),
-            { ...videoNode, metadata: { ...videoNode.metadata, versionOfNodeId: rootId, versionLabel: nextLabel, versionPrimary: true } },
-        ];
+            });
+        return appendCanvasNodesWithFrameExpansion(updated, [{ ...videoNode, metadata: { ...videoNode.metadata, versionOfNodeId: rootId, versionLabel: nextLabel, versionPrimary: true } }]);
     });
     if (!isEmptyVideoNode) setConnections((current) => [...current, { id: nanoid(), fromNodeId: nodeId, toNodeId: videoId }]);
+    if (!isEmptyVideoNode) requestAnimationFrame(() => revealGeneratedNodes?.([videoId]));
 
     startGenerationRequest(videoId, nodeId, nodeId, controller);
     try {
@@ -92,11 +95,15 @@ export async function executeVideoGeneration({
         if (!result.video?.dataUrl) throw new Error("后端任务没有返回视频");
         const video = await storeGeneratedVideo({ url: result.video.dataUrl, mimeType: result.video.mimeType || "video/mp4" });
         const videoSize = fitNodeSize(video.width || spec.width, video.height || spec.height, VIDEO_NODE_MAX_WIDTH, VIDEO_NODE_MAX_HEIGHT);
-        setNodes((current) => current.map((node) => {
-            if (node.id !== videoId) return node;
-            const geometry = node.metadata?.locked ? {} : { width: videoSize.width, height: videoSize.height, position: { x: node.position.x + node.width / 2 - videoSize.width / 2, y: node.position.y + node.height / 2 - videoSize.height / 2 } };
-            return { ...node, ...geometry, metadata: { ...node.metadata, ...videoMetadata(video), prompt: effectivePrompt, model: generationConfig.model, size: generationConfig.size, seconds: generationConfig.videoSeconds, vquality: generationConfig.vquality, generateAudio: generationConfig.videoGenerateAudio, watermark: generationConfig.videoWatermark, references: generationReferenceUrls(generationContext), ...videoGenerationMetadata } };
-        }));
+        setNodes((current) => {
+            const resized = current.map((node) => {
+                if (node.id !== videoId) return node;
+                const geometry = node.metadata?.locked ? {} : { width: videoSize.width, height: videoSize.height, position: { x: node.position.x + node.width / 2 - videoSize.width / 2, y: node.position.y + node.height / 2 - videoSize.height / 2 } };
+                return { ...node, ...geometry, metadata: { ...node.metadata, ...videoMetadata(video), prompt: effectivePrompt, model: generationConfig.model, size: generationConfig.size, seconds: generationConfig.videoSeconds, vquality: generationConfig.vquality, generateAudio: generationConfig.videoGenerateAudio, watermark: generationConfig.videoWatermark, references: generationReferenceUrls(generationContext), ...videoGenerationMetadata } };
+            });
+            const parentId = resized.find((node) => node.id === videoId)?.parentId;
+            return parentId ? expandCanvasFramesToFit(resized, new Set([parentId])) : resized;
+        });
     } finally {
         finishGenerationRequest(videoId, controller);
     }
@@ -112,8 +119,10 @@ export async function executeAudioGeneration({
     sourceTaskId,
     confirmNewProviderRequest,
     projectId,
+    nodesRef,
     setNodes,
     setConnections,
+    revealGeneratedNodes,
     startGenerationRequest,
     finishGenerationRequest,
     bindGenerationTask,
@@ -123,7 +132,7 @@ export async function executeAudioGeneration({
     const isEmptyAudioNode = sourceNode?.type === CanvasNodeType.Audio && !sourceNode.metadata?.content;
     const audioId = isEmptyAudioNode ? nodeId : nanoid();
     const parent = sourceNode?.position || { x: 0, y: 0 };
-    const audioNode: CanvasNodeData = {
+    let audioNode: CanvasNodeData = {
         id: audioId,
         type: CanvasNodeType.Audio,
         title: effectivePrompt.slice(0, 32) || "Generated Audio",
@@ -132,9 +141,11 @@ export async function executeAudioGeneration({
         height: isEmptyAudioNode ? sourceNode.height : spec.height,
         metadata: { prompt: effectivePrompt, status: NODE_STATUS_LOADING, ...buildAudioGenerationMetadata(generationConfig) },
     };
+    if (!isEmptyAudioNode) audioNode = placeCanvasNodeInContext(nodesRef.current, audioNode, audioNode.position, sourceNode);
     registerPendingNodeIds([audioId]);
-    setNodes((current) => (isEmptyAudioNode ? current.map((node) => (node.id === nodeId ? { ...node, ...audioNode } : node)) : [...current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS } } : node)), audioNode]));
+    setNodes((current) => (isEmptyAudioNode ? current.map((node) => (node.id === nodeId ? { ...node, ...audioNode } : node)) : appendCanvasNodesWithFrameExpansion(current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS } } : node)), [audioNode])));
     if (!isEmptyAudioNode) setConnections((current) => [...current, { id: nanoid(), fromNodeId: nodeId, toNodeId: audioId }]);
+    if (!isEmptyAudioNode) requestAnimationFrame(() => revealGeneratedNodes?.([audioId]));
 
     startGenerationRequest(audioId, nodeId, nodeId, controller);
     try {

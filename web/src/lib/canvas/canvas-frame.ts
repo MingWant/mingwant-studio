@@ -10,7 +10,8 @@ export function isFrameNode(node?: CanvasNodeData | null): node is CanvasNodeDat
 }
 
 export function canFrameContain(node: CanvasNodeData) {
-    return node.type === CanvasNodeType.Image || node.type === CanvasNodeType.Text || node.type === CanvasNodeType.Drawing || node.type === CanvasNodeType.Script || node.type === CanvasNodeType.Video;
+    // 背板承担工作流分组，不应因节点媒介类型不同而把配置、音频或技能节点留在组外。
+    return node.type !== CanvasNodeType.Frame;
 }
 
 export function getFrameChildren(frameId: string, nodes: CanvasNodeData[]) {
@@ -57,17 +58,36 @@ export function applyFrameDrop(nodes: CanvasNodeData[], draggedNodeIds: Set<stri
     const next = nodes.map((node) => (draggedNodeIds.has(node.id) && canFrameContain(node) ? { ...node, parentId: frameId || undefined } : node));
     if (!frameId) return next;
 
-    const children = getFrameChildren(frameId, next);
-    if (!children.length) return next;
-    const frame = next.find((node) => node.id === frameId);
-    if (!frame || !isFrameNode(frame)) return next;
+    return expandCanvasFramesToFit(next, new Set([frameId]));
+}
+
+export function appendCanvasNodesWithFrameExpansion(nodes: CanvasNodeData[], addedNodes: CanvasNodeData[]) {
+    if (!addedNodes.length) return nodes;
+    const parentIds = new Set(addedNodes.map((node) => node.parentId).filter((id): id is string => Boolean(id)));
+    return expandCanvasFramesToFit([...nodes, ...addedNodes], parentIds);
+}
+
+export function expandCanvasFramesToFit(nodes: CanvasNodeData[], frameIds: ReadonlySet<string>) {
+    if (!frameIds.size) return nodes;
+    let next = nodes;
+    frameIds.forEach((frameId) => {
+        next = expandCanvasFrameToFit(next, frameId);
+    });
+    return next;
+}
+
+function expandCanvasFrameToFit(nodes: CanvasNodeData[], frameId: string) {
+    const children = getFrameChildren(frameId, nodes);
+    if (!children.length) return nodes;
+    const frame = nodes.find((node) => node.id === frameId);
+    if (!frame || !isFrameNode(frame) || frame.metadata?.frame?.collapsed) return nodes;
 
     const left = Math.min(frame.position.x, ...children.map((node) => node.position.x - FRAME_PADDING));
     const top = Math.min(frame.position.y, ...children.map((node) => node.position.y - FRAME_HEADER_HEIGHT - FRAME_PADDING));
     const right = Math.max(frame.position.x + frame.width, ...children.map((node) => node.position.x + node.width + FRAME_PADDING));
     const bottom = Math.max(frame.position.y + frame.height, ...children.map((node) => node.position.y + node.height + FRAME_PADDING));
 
-    return next.map((node) =>
+    return nodes.map((node) =>
         node.id === frameId
             ? {
                   ...node,

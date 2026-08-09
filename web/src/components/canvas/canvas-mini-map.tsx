@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type RefObject } from "react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { isFrameNode, isNodeHiddenByCollapsedFrame } from "@/lib/canvas/canvas-frame";
@@ -124,11 +124,33 @@ export function Minimap({ nodes, viewport, viewportSize, canvasContainerRef, onV
         onViewportPreviewChange?.(next);
     };
 
+    const panViewportFromKeyboard = (event: React.KeyboardEvent<HTMLDivElement>) => {
+        if (!["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown"].includes(event.key)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        const distance = event.shiftKey ? 160 : 48;
+        const current = liveViewportRef.current;
+        const next = {
+            ...current,
+            x: current.x + (event.key === "ArrowLeft" ? distance : event.key === "ArrowRight" ? -distance : 0),
+            y: current.y + (event.key === "ArrowUp" ? distance : event.key === "ArrowDown" ? -distance : 0),
+        };
+        updateViewportRect(next);
+        onViewportPreviewChange?.(next);
+        onViewportChange(next);
+    };
+
     return (
         <div className="absolute bottom-24 left-6 z-50 overflow-hidden rounded-lg border shadow-2xl backdrop-blur-sm" style={{ width, height, background: theme.toolbar.panel, borderColor: theme.toolbar.border }}>
             <div
+                data-canvas-no-zoom
                 ref={containerRef}
-                className="relative h-full w-full cursor-crosshair"
+                role="region"
+                tabIndex={0}
+                aria-label="画布小地图。使用方向键移动视图，按住 Shift 可加速"
+                className="relative h-full w-full cursor-crosshair outline-none focus-visible:ring-2 focus-visible:ring-inset"
+                style={{ "--tw-ring-color": theme.node.activeStroke } as CSSProperties}
+                onKeyDown={panViewportFromKeyboard}
                 onPointerDown={(event) => {
                     event.preventDefault();
                     event.currentTarget.setPointerCapture(event.pointerId);

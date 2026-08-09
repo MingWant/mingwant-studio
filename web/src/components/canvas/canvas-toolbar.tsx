@@ -97,15 +97,33 @@ export function CanvasToolbar({
         return () => document.removeEventListener("pointerdown", closeFloatingPanels, true);
     }, [addOpen, appearanceOpen]);
 
+    useEffect(() => {
+        if (!addOpen && !appearanceOpen) return;
+        const panelId = addOpen ? "canvas-add-node-panel" : "canvas-appearance-panel";
+        const focusFrame = requestAnimationFrame(() => document.getElementById(panelId)?.querySelector<HTMLElement>("button,[role='radio'],input,select")?.focus());
+        const closeWithKeyboard = (event: KeyboardEvent) => {
+            if (event.key !== "Escape") return;
+            event.preventDefault();
+            setAddOpen(false);
+            setAppearanceOpen(false);
+            requestAnimationFrame(() => dockRef.current?.querySelector<HTMLElement>(`[aria-controls='${panelId}']`)?.focus());
+        };
+        document.addEventListener("keydown", closeWithKeyboard);
+        return () => {
+            cancelAnimationFrame(focusFrame);
+            document.removeEventListener("keydown", closeWithKeyboard);
+        };
+    }, [addOpen, appearanceOpen]);
+
     const items: FloatingDockEntry[] = [
         { id: selectedCount ? "tool-close-selection" : "tool-hand", label: selectedCount ? `取消选择${selectedCount > 1 ? ` ${selectedCount} 个节点` : ""}` : "移动与选择", icon: selectedCount ? <X /> : <Hand />, active: !selectedCount, onClick: () => onDeselect() },
         { kind: "separator", id: "history-separator" },
         { id: "tool-undo", label: "撤销", icon: <Undo2 />, disabled: !canUndo, onClick: () => onUndo() },
         { id: "tool-redo", label: "重做", icon: <Redo2 />, disabled: !canRedo, onClick: () => onRedo() },
         { kind: "separator", id: "create-separator" },
-        { id: "tool-add", label: "添加节点", icon: <Plus />, active: addOpen, onClick: (event) => { placePanel(event); setAppearanceOpen(false); setAddOpen((value) => !value); } },
+        { id: "tool-add", label: "添加节点", icon: <Plus />, active: addOpen, ariaControls: "canvas-add-node-panel", ariaExpanded: addOpen, onClick: (event) => { placePanel(event); setAppearanceOpen(false); setAddOpen((value) => !value); } },
         ...(!isProjectLinked ? [{ id: "tool-assets", label: "素材库", icon: <FolderOpen />, onClick: () => onOpenMyAssets() }] : []),
-        { id: "tool-style", label: "画布外观", icon: <Palette />, active: appearanceOpen, onClick: (event) => { placePanel(event); setAddOpen(false); setAppearanceOpen((value) => !value); } },
+        { id: "tool-style", label: "画布外观", icon: <Palette />, active: appearanceOpen, ariaControls: "canvas-appearance-panel", ariaExpanded: appearanceOpen, onClick: (event) => { placePanel(event); setAddOpen(false); setAppearanceOpen((value) => !value); } },
         ...(selectedCount ? [{ kind: "separator" as const, id: "selection-separator" }, { id: "tool-delete", label: selectedCount > 1 ? `删除 ${selectedCount} 个节点` : "删除选中节点", icon: <Trash2 />, danger: true, onClick: () => onDelete() }] : []),
         { id: "tool-clear", label: "清空画布", icon: <Eraser />, danger: true, onClick: () => onClear() },
     ];
@@ -140,7 +158,7 @@ export function CanvasToolbar({
 
             <AnimatePresence>
                 {appearanceOpen ? (
-                    <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: aceternityMotion.duration.instant }} className="pointer-events-auto absolute bottom-[50px] z-30 w-[224px] -translate-x-1/2" style={{ left: panelX || "50%" }}>
+                    <motion.div id="canvas-appearance-panel" role="dialog" aria-label="画布外观设置" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: aceternityMotion.duration.instant }} className="pointer-events-auto absolute bottom-[50px] z-30 w-[224px] -translate-x-1/2" style={{ left: panelX || "50%" }}>
                         <SpotlightSurface spotlightColor={theme.toolbar.itemHover} initial={{ y: 6, scale: 0.97 }} animate={{ y: 0, scale: 1 }} exit={{ y: 4, scale: 0.98 }} transition={{ duration: aceternityMotion.duration.instant, ease: aceternityMotion.easing.enter }} className="aceternity-floating-panel overflow-hidden rounded-[17px] border p-2.5 backdrop-blur-2xl" style={{ background: theme.spatial.elevated, borderColor: theme.toolbar.border, color: theme.toolbar.item, boxShadow: `0 24px 64px ${theme.spatial.shadow}` }} onWheel={(event) => event.stopPropagation()}>
                             <PanelHeading icon={<Palette className="size-4" />} title="画布外观" subtitle="调整整个创作空间" theme={theme} />
                             <div className="mt-3 text-[9px] font-semibold uppercase opacity-45">主题模式</div>
@@ -161,7 +179,7 @@ export function CanvasToolbar({
                             />
                             <div className="mt-2.5 flex items-center justify-between gap-2 rounded-[11px] border px-2.5 py-2" style={{ background: theme.spatial.surface, borderColor: theme.toolbar.border }}>
                                 <span className="inline-flex min-w-0 items-center gap-1.5 text-[10px] font-semibold"><Info className="size-3" />图片信息</span>
-                                <Switch size="small" checked={showImageInfo} onChange={onShowImageInfoChange} />
+                                <Switch aria-label="显示图片尺寸与文件信息" size="small" checked={showImageInfo} onChange={onShowImageInfoChange} />
                             </div>
                         </SpotlightSurface>
                     </motion.div>
@@ -213,7 +231,7 @@ function AddNodeMenu({ x, theme, workspaceMode, isProjectLinked, onAddText, onCh
         ...(!isProjectLinked ? [{ id: "assets", label: "素材库", icon: <FolderOpen />, section: "resource" as const, onClick: onOpenAssets }] : []),
     ];
     return (
-        <motion.div initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: aceternityMotion.duration.instant }} className="pointer-events-auto absolute bottom-[50px] z-40 w-[260px] max-w-[calc(100vw-24px)] -translate-x-1/2" style={{ left: x || "50%" }}>
+        <motion.div id="canvas-add-node-panel" role="dialog" aria-label="添加画布节点" initial={{ opacity: 0 }} animate={{ opacity: 1 }} exit={{ opacity: 0 }} transition={{ duration: aceternityMotion.duration.instant }} className="pointer-events-auto absolute bottom-[50px] z-40 w-[260px] max-w-[calc(100vw-24px)] -translate-x-1/2" style={{ left: x || "50%" }}>
             <SpotlightSurface spotlightColor={theme.toolbar.itemHover} initial={{ y: 6, scale: 0.97 }} animate={{ y: 0, scale: 1 }} exit={{ y: 4, scale: 0.98 }} transition={{ duration: aceternityMotion.duration.instant, ease: aceternityMotion.easing.enter }} className="aceternity-floating-panel overflow-hidden rounded-[16px] border p-2 backdrop-blur-2xl" style={{ background: theme.spatial.elevated, borderColor: theme.toolbar.border, color: theme.node.text, boxShadow: `0 24px 64px ${theme.spatial.shadow}` }} onWheel={(event) => event.stopPropagation()}>
                 <PanelHeading icon={<Plus className="size-4" />} title="创建内容" subtitle="选择节点类型" theme={theme} />
                 <CanvasCreateMenu commands={[...nodeCommands, ...resourceCommands]} />

@@ -1,4 +1,4 @@
-import { useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type PointerEvent as ReactPointerEvent } from "react";
 import copyToClipboard from "copy-to-clipboard";
 import { Bot, BookOpenText, Copy, Cpu, Focus, History, PanelRightClose, Plus, RotateCcw, Settings2, Square, Trash2, X } from "lucide-react";
 import { App, Button, Modal, Segmented, Select, Switch, Tooltip } from "antd";
@@ -400,6 +400,7 @@ export function CanvasAssistantPanel({ nodes, selectedNodeIds, snapshot, project
     const [onlineLogs, setOnlineLogs] = useState<OnlineAgentLog[]>([]);
     const [resizing, setResizing] = useState(false);
     const [removedReferenceIds, setRemovedReferenceIds] = useState<Set<string>>(new Set());
+    const resizeCleanupRef = useRef<(() => void) | null>(null);
     const manualDeliveryRef = useRef(manualDelivery);
     manualDeliveryRef.current = manualDelivery;
     const [localSessions, setLocalSessions] = useState<CanvasAssistantSession[]>(() => (sessions.length ? sessions : [createSession()]));
@@ -1479,21 +1480,38 @@ export function CanvasAssistantPanel({ nodes, selectedNodeIds, snapshot, project
         if (file) onPasteImage(file);
     };
 
-    const startResize = () => {
-        const move = (event: MouseEvent) => setWidth(Math.min(760, Math.max(320, window.innerWidth - event.clientX)));
-        const stop = () => {
-            setResizing(false);
+    const startResize = (event: ReactPointerEvent<HTMLButtonElement>) => {
+        resizeCleanupRef.current?.();
+        const pointerId = event.pointerId;
+        event.preventDefault();
+        event.currentTarget.setPointerCapture(pointerId);
+        const move = (moveEvent: PointerEvent) => {
+            if (moveEvent.pointerId === pointerId) setWidth(Math.min(760, Math.max(320, window.innerWidth - moveEvent.clientX)));
+        };
+        let stop: (endEvent: PointerEvent) => void;
+        const cleanup = () => {
             document.body.style.cursor = "";
             document.body.style.userSelect = "";
-            document.removeEventListener("mousemove", move);
-            document.removeEventListener("mouseup", stop);
+            document.removeEventListener("pointermove", move);
+            document.removeEventListener("pointerup", stop);
+            document.removeEventListener("pointercancel", stop);
+            resizeCleanupRef.current = null;
         };
+        stop = (endEvent: PointerEvent) => {
+            if (endEvent.pointerId !== pointerId) return;
+            cleanup();
+            setResizing(false);
+        };
+        resizeCleanupRef.current = cleanup;
         setResizing(true);
         document.body.style.cursor = "col-resize";
         document.body.style.userSelect = "none";
-        document.addEventListener("mousemove", move);
-        document.addEventListener("mouseup", stop);
+        document.addEventListener("pointermove", move);
+        document.addEventListener("pointerup", stop);
+        document.addEventListener("pointercancel", stop);
     };
+
+    useEffect(() => () => resizeCleanupRef.current?.(), []);
 
     const collapse = () => {
         if (!allowOnlineAgentCollapse()) return;
@@ -1652,13 +1670,26 @@ export function CanvasAssistantPanel({ nodes, selectedNodeIds, snapshot, project
             style={{ overflow: "clip", pointerEvents: closing ? "none" : undefined }}
         >
             <motion.aside
+                data-canvas-no-zoom
                 className="relative my-2 mr-2 flex shrink-0 flex-col overflow-hidden rounded-lg border"
                 initial={{ x: 48 }}
                 animate={{ x: closing ? 28 : 0 }}
                 transition={{ duration: resizing ? 0 : PANEL_MOTION_SECONDS, ease: [0.22, 1, 0.36, 1] }}
                 style={{ width, background: theme.spatial.elevated, borderColor: theme.node.stroke, color: theme.node.text, boxShadow: `0 24px 72px ${theme.spatial.shadow}` }}
             >
-                <button type="button" className="absolute inset-y-0 left-0 z-40 w-4 -translate-x-1/2 cursor-col-resize" onMouseDown={startResize} aria-label="调整右侧面板宽度" />
+                <button
+                    type="button"
+                    className="absolute inset-y-0 left-0 z-40 w-4 -translate-x-1/2 cursor-col-resize outline-none focus-visible:ring-2"
+                    style={{ "--tw-ring-color": theme.accent.primary } as CSSProperties}
+                    onPointerDown={startResize}
+                    onKeyDown={(event) => {
+                        if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+                        event.preventDefault();
+                        const distance = event.shiftKey ? 40 : 10;
+                        setWidth((current) => Math.min(760, Math.max(320, current + (event.key === "ArrowLeft" ? distance : -distance))));
+                    }}
+                    aria-label="调整右侧面板宽度。使用左右方向键微调"
+                />
                 <header className="flex h-14 items-center justify-between border-b px-4" style={{ borderColor: theme.node.stroke }}>
                     <div className="flex min-w-0 items-center gap-2">
                         <span className="grid size-8 place-items-center rounded-md" style={{ background: theme.accent.primarySoft, color: theme.accent.primary }}>

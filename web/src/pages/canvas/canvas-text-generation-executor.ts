@@ -1,6 +1,8 @@
 import { nanoid } from "nanoid";
 
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
+import { appendCanvasNodesWithFrameExpansion } from "@/lib/canvas/canvas-frame";
+import { placeCanvasNodeGroup } from "@/lib/canvas/canvas-layout";
 import { getGenerationCount, runBackendCanvasGenerationTask } from "@/lib/canvas/canvas-project-generation";
 import { CanvasNodeType, type CanvasNodeData } from "@/types/canvas";
 
@@ -21,8 +23,10 @@ export async function executeTextGeneration({
     confirmNewProviderRequest,
     editingTextNode,
     projectId,
+    nodesRef,
     setNodes,
     setConnections,
+    revealGeneratedNodes,
     startGenerationRequest,
     finishGenerationRequest,
     bindGenerationTask,
@@ -37,7 +41,7 @@ export async function executeTextGeneration({
     const childIds = isConfigNode || editingTextNode ? Array.from({ length: textCount }, () => nanoid()) : [];
     registerPendingNodeIds(childIds);
     if (isConfigNode || editingTextNode) {
-        const childNodes: CanvasNodeData[] = childIds.map((id, index) => ({
+        const childNodes: CanvasNodeData[] = placeCanvasNodeGroup(nodesRef.current, childIds.map((id, index) => ({
             id,
             type: CanvasNodeType.Text,
             title: effectivePrompt.slice(0, 32) || "Generated Text",
@@ -48,9 +52,10 @@ export async function executeTextGeneration({
             width: textConfig.width,
             height: textConfig.height,
             metadata: { prompt: effectivePrompt, status: NODE_STATUS_LOADING, fontSize: 14 },
-        }));
-        setNodes((current) => [...current.map((node) => (node.id === nodeId && isConfigNode ? { ...node, metadata: { ...node.metadata, prompt: effectivePrompt, status: NODE_STATUS_LOADING, errorDetails: undefined } } : node)), ...childNodes]);
+        })), 44, sourceNode);
+        setNodes((current) => appendCanvasNodesWithFrameExpansion(current.map((node) => (node.id === nodeId && isConfigNode ? { ...node, metadata: { ...node.metadata, prompt: effectivePrompt, status: NODE_STATUS_LOADING, errorDetails: undefined } } : node)), childNodes));
         setConnections((current) => [...current, ...childIds.map((childId) => ({ id: nanoid(), fromNodeId: nodeId, toNodeId: childId }))]);
+        requestAnimationFrame(() => revealGeneratedNodes?.(childIds));
     }
 
     const textTargetIds = childIds.length ? childIds : [nodeId];

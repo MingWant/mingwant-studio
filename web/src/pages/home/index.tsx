@@ -114,7 +114,7 @@ function ReturningWorkspace({ summary, detail, detailLoading, detailError, recen
                     </div>
                 </div>
                 <div className="flex flex-wrap items-center gap-2">
-                    <Button icon={<LayoutGrid className="size-3.5" />} onClick={onCreateIndependentCanvas}>打开画布</Button>
+                    <Button icon={<LayoutGrid className="size-3.5" />} onClick={onCreateIndependentCanvas}>新建自由画布</Button>
                     <Link className="inline-flex h-9 items-center gap-2 rounded-md bg-foreground px-3.5 text-sm font-medium text-background transition-opacity hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-foreground/25" to="/projects?create=1"><Plus className="size-3.5" />创建项目</Link>
                 </div>
             </header>
@@ -179,7 +179,7 @@ function ReturningWorkspace({ summary, detail, detailLoading, detailError, recen
                         </div>
                     ) : (
                         <button type="button" className="flex min-h-32 w-full items-center justify-center gap-3 rounded-lg border border-dashed border-border text-sm text-foreground/55 hover:border-foreground/30 hover:text-foreground" onClick={onCreateIndependentCanvas}>
-                            <LayoutGrid className="size-4" />打开第一张画布
+                            <LayoutGrid className="size-4" />新建第一张画布
                         </button>
                     )}
                 </div>
@@ -203,7 +203,7 @@ function FirstProjectWorkspace({ authenticated, canvasHydrated, recentIndependen
                 <p className="mt-5 max-w-[720px] text-sm leading-7 text-foreground/58 sm:text-base">从授权、身份锚点和商品事实开始，用创意矩阵组织 30 秒分镜、首尾帧、视频生成和逐条质检；原自由画布与短剧能力仍完整保留。</p>
                 <div className="mt-7 flex flex-wrap items-center gap-3">
                     <Link className="inline-flex h-10 items-center gap-2 rounded-md bg-foreground px-4 text-sm font-medium text-background transition-opacity hover:opacity-85 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-foreground/25" to={projectHref}><FolderKanban className="size-4" />创建项目</Link>
-                    <Button size="large" disabled={!canvasHydrated} icon={<LayoutGrid className="size-4" />} onClick={onCreateIndependentCanvas}>打开画布</Button>
+                    <Button size="large" disabled={!canvasHydrated} icon={<LayoutGrid className="size-4" />} onClick={onCreateIndependentCanvas}>新建自由画布</Button>
                 </div>
             </section>
 
@@ -225,7 +225,7 @@ function FirstProjectWorkspace({ authenticated, canvasHydrated, recentIndependen
                     <h2 className="text-base font-semibold">两种开始方式</h2>
                     <div className="mt-3 divide-y divide-border/75 border-y border-border/75">
                         <StartMode icon={<Clapperboard className="size-4" />} title="制作项目" description="适合 AI 电商带货、商业短视频与短剧。集中管理素材、画布、工作流与进度。" action="创建项目" href={projectHref} />
-                        <StartMode icon={<Sparkles className="size-4" />} title="自由画布" description="适合快速试图、提示词实验和不需要章节流程的自由创作。" action="打开画布" onClick={onCreateIndependentCanvas} />
+                        <StartMode icon={<Sparkles className="size-4" />} title="自由画布" description="适合快速试图、提示词实验和不需要章节流程的自由创作。" action="新建自由画布" onClick={onCreateIndependentCanvas} />
                     </div>
                 </div>
                 <div>

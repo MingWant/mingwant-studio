@@ -12,6 +12,7 @@ import type { CanvasImageEmotionPayload } from "@/components/canvas/canvas-node-
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { cropDataUrl, splitDataUrl, upscaleDataUrl } from "@/lib/canvas/canvas-image-data";
 import { imageMetadata, videoMetadata } from "@/lib/canvas/canvas-generation-task-sync";
+import { appendCanvasNodesWithFrameExpansion } from "@/lib/canvas/canvas-frame";
 import { buildAngleLabel, buildAnglePrompt, createCanvasNode } from "@/lib/canvas/canvas-project-domain";
 import {
     buildGenerationConfig,
@@ -21,6 +22,7 @@ import {
     runBackendCanvasGenerationTask,
 } from "@/lib/canvas/canvas-project-generation";
 import { fitNodeSize } from "@/lib/canvas/canvas-node-size";
+import { placeCanvasNodeGroup, placeCanvasNodeInContext } from "@/lib/canvas/canvas-layout";
 import { compositeEmotionImage, emotionGenerationSize } from "@/lib/canvas/canvas-emotion";
 import { captureVideoLastFrame } from "@/lib/canvas/canvas-video-frame";
 import { mergeVideos, type MergeVideoProgress } from "@/lib/canvas/canvas-video-merge";
@@ -109,48 +111,52 @@ export function useCanvasMediaTools({
         const gap = 96;
         const textSpec = NODE_DEFAULT_SIZE[CanvasNodeType.Text];
         const configSpec = NODE_DEFAULT_SIZE[CanvasNodeType.Config];
-        const centerY = node.position.y + node.height / 2;
-        const textNode = {
-            ...createCanvasNode(CanvasNodeType.Text, { x: node.position.x + node.width + gap + textSpec.width / 2, y: centerY }, { content: IMAGE_PROMPT_REVERSE_PRESET, prompt: IMAGE_PROMPT_REVERSE_PRESET, status: NODE_STATUS_SUCCESS, fontSize: 14 }),
+        const groupSize = { width: textSpec.width + gap + configSpec.width, height: Math.max(textSpec.height, configSpec.height) };
+        const groupPosition = { x: node.position.x + node.width + gap, y: node.position.y + node.height / 2 - groupSize.height / 2 };
+        const centerY = groupPosition.y + groupSize.height / 2;
+        const initialTextNode = {
+            ...createCanvasNode(CanvasNodeType.Text, { x: groupPosition.x + textSpec.width / 2, y: centerY }, { content: IMAGE_PROMPT_REVERSE_PRESET, prompt: IMAGE_PROMPT_REVERSE_PRESET, status: NODE_STATUS_SUCCESS, fontSize: 14 }),
             title: "反推提示词",
         };
-        const configNode = {
-            ...createCanvasNode(CanvasNodeType.Config, { x: textNode.position.x + textNode.width + gap + configSpec.width / 2, y: centerY }, {
+        const initialConfigNode = {
+            ...createCanvasNode(CanvasNodeType.Config, { x: initialTextNode.position.x + initialTextNode.width + gap + configSpec.width / 2, y: centerY }, {
                 generationMode: "text",
                 model: effectiveConfig.textModel || effectiveConfig.model || defaultConfig.textModel,
                 count: 1,
-                composerContent: `参考图片：@[node:${node.id}]\n任务说明：@[node:${textNode.id}]`,
+                composerContent: `参考图片：@[node:${node.id}]\n任务说明：@[node:${initialTextNode.id}]`,
             }),
             title: "反推提示词配置",
         };
-        setNodes((current) => [...current, textNode, configNode]);
+        const [textNode, configNode] = placeCanvasNodeGroup(nodesRef.current, [initialTextNode, initialConfigNode], 44, node);
+        setNodes((current) => appendCanvasNodesWithFrameExpansion(current, [textNode, configNode]));
         setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: configNode.id }, { id: nanoid(), fromNodeId: textNode.id, toNodeId: configNode.id }]);
         setSelectedNodeIds(new Set([configNode.id]));
         setSelectedConnectionId(null);
         setDialogNodeId(configNode.id);
         setContextMenu(null);
-    }, [effectiveConfig.model, effectiveConfig.textModel, message, setConnections, setContextMenu, setDialogNodeId, setNodes, setSelectedConnectionId, setSelectedNodeIds]);
+    }, [effectiveConfig.model, effectiveConfig.textModel, message, nodesRef, setConnections, setContextMenu, setDialogNodeId, setNodes, setSelectedConnectionId, setSelectedNodeIds]);
 
     const cropImageNode = useCallback(async (node: CanvasNodeData, crop: CanvasImageCropRect) => {
         if (!node.metadata?.content) return;
         const cropped = await cropDataUrl(node.metadata.content, crop);
         const image = await uploadImage(cropped);
         const width = Math.min(node.width, Math.max(220, image.width));
+        const height = width * (image.height / image.width);
         const childId = nanoid();
-        const child: CanvasNodeData = { id: childId, type: CanvasNodeType.Image, title: "Cropped Image", position: { x: node.position.x + node.width + 96, y: node.position.y }, width, height: width * (image.height / image.width), metadata: { ...imageMetadata(image), prompt: node.metadata?.prompt } };
-        setNodes((current) => [...current, child]);
+        const child = placeCanvasNodeInContext(nodesRef.current, { id: childId, type: CanvasNodeType.Image, title: "Cropped Image", position: { x: node.position.x + node.width + 96, y: node.position.y }, width, height, metadata: { ...imageMetadata(image), prompt: node.metadata?.prompt } }, undefined, node);
+        setNodes((current) => appendCanvasNodesWithFrameExpansion(current, [child]));
         setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
         setSelectedNodeIds(new Set([childId]));
         setDialogNodeId(childId);
         setCropNodeId(null);
-    }, [setConnections, setDialogNodeId, setNodes, setSelectedNodeIds]);
+    }, [nodesRef, setConnections, setDialogNodeId, setNodes, setSelectedNodeIds]);
 
     const saveAnnotatedImageNode = useCallback(async (node: CanvasNodeData, payload: CanvasImageAnnotationPayload) => {
         try {
             const [image, mask] = await Promise.all([uploadImage(payload.markedDataUrl), uploadImage(payload.maskDataUrl)]);
             const size = fitNodeSize(image.width, image.height, node.width, node.height);
             const childId = nanoid();
-            const child: CanvasNodeData = {
+            const child = placeCanvasNodeInContext(nodesRef.current, {
                 id: childId,
                 type: CanvasNodeType.Image,
                 title: `标注 · ${payload.instruction.slice(0, 24)}`,
@@ -166,8 +172,8 @@ export function useCanvasMediaTools({
                         mask: { url: mask.url, storageKey: mask.storageKey },
                     },
                 },
-            };
-            setNodes((current) => [...current, child]);
+            }, undefined, node);
+            setNodes((current) => appendCanvasNodesWithFrameExpansion(current, [child]));
             setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
             setSelectedNodeIds(new Set([childId]));
             setSelectedConnectionId(null);
@@ -177,7 +183,7 @@ export function useCanvasMediaTools({
         } catch (error) {
             message.error(error instanceof Error ? error.message : "标注保存失败");
         }
-    }, [message, setConnections, setDialogNodeId, setNodes, setSelectedConnectionId, setSelectedNodeIds]);
+    }, [message, nodesRef, setConnections, setDialogNodeId, setNodes, setSelectedConnectionId, setSelectedNodeIds]);
 
     const extractVideoLastFrame = useCallback(async (node: CanvasNodeData) => {
         const content = node.metadata?.content;
@@ -193,7 +199,7 @@ export function useCanvasMediaTools({
             const image = await uploadImage(frameBlob);
             const size = fitNodeSize(image.width, image.height, node.width, node.height);
             const childId = nanoid();
-            const child: CanvasNodeData = {
+            const child = placeCanvasNodeInContext(nodesRef.current, {
                 id: childId,
                 type: CanvasNodeType.Image,
                 title: `尾帧 · ${node.title || "视频"}`,
@@ -201,8 +207,8 @@ export function useCanvasMediaTools({
                 width: size.width,
                 height: size.height,
                 metadata: { ...imageMetadata(image), prompt: node.metadata?.prompt, workflowKind: node.metadata?.workflowKind, workflowTitle: node.metadata?.workflowTitle, shotIndex: node.metadata?.shotIndex },
-            };
-            setNodes((current) => [...current, child]);
+            }, undefined, node);
+            setNodes((current) => appendCanvasNodesWithFrameExpansion(current, [child]));
             setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
             setSelectedNodeIds(new Set([childId]));
             setSelectedConnectionId(null);
@@ -217,7 +223,7 @@ export function useCanvasMediaTools({
             extractingVideoFrameNodeIdRef.current = null;
             setExtractingVideoFrameNodeId(null);
         }
-    }, [message, setConnections, setHoveredNodeId, setNodes, setSelectedConnectionId, setSelectedNodeIds, setToolbarNodeId, startUploadStatus]);
+    }, [message, nodesRef, setConnections, setHoveredNodeId, setNodes, setSelectedConnectionId, setSelectedNodeIds, setToolbarNodeId, startUploadStatus]);
 
     const mergeVideosByIds = useCallback(async (videoNodeIds: string[]) => {
         if (mergeVideoRunningRef.current) return;
@@ -250,7 +256,7 @@ export function useCanvasMediaTools({
             const left = Math.max(...videos.map((node) => node.position.x + node.width)) + 120;
             const top = Math.min(...videos.map((node) => node.position.y));
             // 电商模板可预放空白 concat 槽位；用户把槽位与源视频一起选中时，结果原位回填以保留编排和 QA 连线。
-            const mergedNode = targetSlot
+            let mergedNode = targetSlot
                 ? {
                       ...targetSlot,
                       metadata: {
@@ -272,7 +278,8 @@ export function useCanvasMediaTools({
                 mergedNode.title = `合并成片 · ${videos.length} 段`;
                 mergedNode.width = size.width;
                 mergedNode.height = size.height;
-                mergedNode.position = { x: left, y: top };
+                const sharedParentSource = videos.every((video) => video.parentId === videos[0]?.parentId) ? videos[0] : undefined;
+                mergedNode = placeCanvasNodeInContext(nodesRef.current, mergedNode, { x: left, y: top }, sharedParentSource);
             }
             const existingConnectionKeys = new Set(connectionsRef.current.map((connection) => `${connection.fromNodeId}:${connection.toNodeId}`));
             const links = videos
@@ -280,7 +287,7 @@ export function useCanvasMediaTools({
                 .map((node) => ({ id: nanoid(), fromNodeId: node.id, toNodeId: mergedNode.id }));
             const nextNodes = targetSlot
                 ? nodesRef.current.map((node) => (node.id === targetSlot.id ? mergedNode : node))
-                : [...nodesRef.current, mergedNode];
+                : appendCanvasNodesWithFrameExpansion(nodesRef.current, [mergedNode]);
             const nextConnections = [...connectionsRef.current, ...links];
             nodesRef.current = nextNodes;
             connectionsRef.current = nextConnections;
@@ -310,26 +317,27 @@ export function useCanvasMediaTools({
         const gap = 16;
         const cellWidth = node.width / params.columns;
         const cellHeight = node.height / params.rows;
-        const startX = node.position.x + node.width + 96;
-        const childNodes = await Promise.all(pieces.map(async (piece) => {
+        const groupPosition = { x: node.position.x + node.width + 96, y: node.position.y };
+        const initialChildNodes = await Promise.all(pieces.map(async (piece) => {
             const image = await uploadImage(piece.dataUrl);
             return {
                 id: nanoid(),
                 type: CanvasNodeType.Image,
                 title: `${node.title || "图片"} ${piece.row + 1}-${piece.column + 1}`,
-                position: { x: startX + piece.column * (cellWidth + gap), y: node.position.y + piece.row * (cellHeight + gap) },
+                position: { x: groupPosition.x + piece.column * (cellWidth + gap), y: groupPosition.y + piece.row * (cellHeight + gap) },
                 width: cellWidth,
                 height: cellHeight,
                 metadata: { ...imageMetadata(image), prompt: node.metadata?.prompt },
             } satisfies CanvasNodeData;
         }));
-        setNodes((current) => [...current, ...childNodes]);
+        const childNodes = placeCanvasNodeGroup(nodesRef.current, initialChildNodes, 44, node);
+        setNodes((current) => appendCanvasNodesWithFrameExpansion(current, childNodes));
         setConnections((current) => [...current, ...childNodes.map((child) => ({ id: nanoid(), fromNodeId: node.id, toNodeId: child.id }))]);
         setSelectedNodeIds(new Set(childNodes.map((child) => child.id)));
         setSelectedConnectionId(null);
         setDialogNodeId(null);
         message.success(`已切分为 ${childNodes.length} 个子节点`);
-    }, [message, setConnections, setDialogNodeId, setNodes, setSelectedConnectionId, setSelectedNodeIds]);
+    }, [message, nodesRef, setConnections, setDialogNodeId, setNodes, setSelectedConnectionId, setSelectedNodeIds]);
 
     const maskEditImageNode = useCallback(async (node: CanvasNodeData, payload: CanvasImageMaskEditPayload) => {
         if (!node.metadata?.content) return;
@@ -346,9 +354,10 @@ export function useCanvasMediaTools({
         const annotationNode = payload.annotationNodeId ? nodesRef.current.find((item) => item.id === payload.annotationNodeId) : null;
         const resultOrigin = annotationNode || node;
         const generationMetadata = buildImageGenerationMetadata("edit", generationConfig, 1, [source]);
+        const childNode = placeCanvasNodeInContext(nodesRef.current, { id: childId, type: CanvasNodeType.Image, title: userPrompt.slice(0, 32) || "局部编辑结果", position: { x: resultOrigin.position.x + resultOrigin.width + 96, y: resultOrigin.position.y }, width: node.width, height: node.height, metadata: { prompt, status: NODE_STATUS_LOADING, ...generationMetadata, imageAnnotationResultOf: annotationNode?.id } }, undefined, resultOrigin);
         setMaskEditNodeId(null);
         setRunningNode(childId);
-        setNodes((current) => [...current, { id: childId, type: CanvasNodeType.Image, title: userPrompt.slice(0, 32) || "局部编辑结果", position: { x: resultOrigin.position.x + resultOrigin.width + 96, y: resultOrigin.position.y }, width: node.width, height: node.height, metadata: { prompt, status: NODE_STATUS_LOADING, ...generationMetadata, imageAnnotationResultOf: annotationNode?.id } }]);
+        setNodes((current) => appendCanvasNodesWithFrameExpansion(current, [childNode]));
         setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }, ...(annotationNode ? [{ id: nanoid(), fromNodeId: annotationNode.id, toNodeId: childId }] : [])]);
         setSelectedNodeIds(new Set([childId]));
         setSelectedConnectionId(null);
@@ -404,12 +413,12 @@ export function useCanvasMediaTools({
         const image = await uploadImage(upscaled);
         const size = fitNodeSize(image.width, image.height);
         const childId = nanoid();
-        const child: CanvasNodeData = { id: childId, type: CanvasNodeType.Image, title: "Upscaled Image", position: { x: node.position.x + node.width + 96, y: node.position.y }, width: size.width, height: size.height, metadata: { ...imageMetadata(image), prompt: node.metadata?.prompt } };
-        setNodes((current) => [...current, child]);
+        const child = placeCanvasNodeInContext(nodesRef.current, { id: childId, type: CanvasNodeType.Image, title: "Upscaled Image", position: { x: node.position.x + node.width + 96, y: node.position.y }, width: size.width, height: size.height, metadata: { ...imageMetadata(image), prompt: node.metadata?.prompt } }, undefined, node);
+        setNodes((current) => appendCanvasNodesWithFrameExpansion(current, [child]));
         setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
         setSelectedNodeIds(new Set([childId]));
         setDialogNodeId(childId);
-    }, [setConnections, setDialogNodeId, setNodes, setSelectedNodeIds]);
+    }, [nodesRef, setConnections, setDialogNodeId, setNodes, setSelectedNodeIds]);
 
     const generateAngleNode = useCallback(async (node: CanvasNodeData, params: CanvasImageAngleParams) => {
         if (!node.metadata?.content) return;
@@ -425,9 +434,10 @@ export function useCanvasMediaTools({
         const source = nodeReferenceImage(node);
         if (!source) return;
         const generationMetadata = buildImageGenerationMetadata("edit", generationConfig, 1, [source]);
+        const childNode = placeCanvasNodeInContext(nodesRef.current, { id: childId, type: CanvasNodeType.Image, title, position: { x: node.position.x + node.width + 96, y: node.position.y }, width: imageSpec.width, height: imageSpec.height, metadata: { prompt, status: NODE_STATUS_LOADING, ...generationMetadata } }, undefined, node);
         setAngleNodeId(null);
         setRunningNode(childId);
-        setNodes((current) => [...current, { id: childId, type: CanvasNodeType.Image, title, position: { x: node.position.x + node.width + 96, y: node.position.y }, width: imageSpec.width, height: imageSpec.height, metadata: { prompt, status: NODE_STATUS_LOADING, ...generationMetadata } }]);
+        setNodes((current) => appendCanvasNodesWithFrameExpansion(current, [childNode]));
         setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
         setSelectedNodeIds(new Set([childId]));
         setDialogNodeId(childId);
@@ -447,7 +457,7 @@ export function useCanvasMediaTools({
             finishGenerationRequest(childId, controller);
         clearRunningNode(childId);
         }
-    }, [bindGenerationTask, clearRunningNode, effectiveConfig, finishGenerationRequest, isAiConfigReady, projectId, setConnections, setDialogNodeId, setNodes, setRunningNode, setSelectedNodeIds, startGenerationRequest]);
+    }, [bindGenerationTask, clearRunningNode, effectiveConfig, finishGenerationRequest, isAiConfigReady, nodesRef, projectId, setConnections, setDialogNodeId, setNodes, setRunningNode, setSelectedNodeIds, startGenerationRequest]);
 
     const generateEmotionNode = useCallback(async (node: CanvasNodeData, payload: CanvasImageEmotionPayload) => {
         if (!node.metadata?.content) return;
@@ -476,9 +486,10 @@ export function useCanvasMediaTools({
         const childId = nanoid();
         const generationMetadata = { ...buildImageGenerationMetadata("edit", generationConfig, 1, [source]), size: `${payload.imageWidth}x${payload.imageHeight}` };
         const emotionEdit = { sourceNodeId: node.id, characterName: payload.characterName, presetId: payload.presetId, intimacy: payload.intimacy, arousal: payload.arousal, label: payload.label, faceBox: payload.faceBox, editRegion: payload.editRegion, sourceWidth: payload.imageWidth, sourceHeight: payload.imageHeight, providerSize };
+        const childNode = placeCanvasNodeInContext(nodesRef.current, { id: childId, type: CanvasNodeType.Image, title: `${payload.characterName} · ${payload.label}`, position: { x: node.position.x + node.width + 96, y: node.position.y }, width: node.width, height: node.height, metadata: { prompt: payload.prompt, status: NODE_STATUS_LOADING, ...generationMetadata, emotionEdit } }, undefined, node);
         setEmotionNodeId(null);
         setRunningNode(childId);
-        setNodes((current) => [...current, { id: childId, type: CanvasNodeType.Image, title: `${payload.characterName} · ${payload.label}`, position: { x: node.position.x + node.width + 96, y: node.position.y }, width: node.width, height: node.height, metadata: { prompt: payload.prompt, status: NODE_STATUS_LOADING, ...generationMetadata, emotionEdit } }]);
+        setNodes((current) => appendCanvasNodesWithFrameExpansion(current, [childNode]));
         setConnections((current) => [...current, { id: nanoid(), fromNodeId: node.id, toNodeId: childId }]);
         setSelectedNodeIds(new Set([childId]));
         setSelectedConnectionId(null);
@@ -498,7 +509,7 @@ export function useCanvasMediaTools({
             message.error(details);
             setNodes((current) => current.map((item) => item.id === childId ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_ERROR, errorDetails: details } } : item));
         } finally { finishGenerationRequest(childId, controller); clearRunningNode(childId); }
-    }, [bindGenerationTask, clearRunningNode, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, projectId, setConnections, setDialogNodeId, setNodes, setRunningNode, setSelectedConnectionId, setSelectedNodeIds, startGenerationRequest]);
+    }, [bindGenerationTask, clearRunningNode, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, nodesRef, projectId, setConnections, setDialogNodeId, setNodes, setRunningNode, setSelectedConnectionId, setSelectedNodeIds, startGenerationRequest]);
 
     return {
         angleNodeId,

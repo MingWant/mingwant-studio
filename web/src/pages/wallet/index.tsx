@@ -1,14 +1,13 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { App, Button, Grid, Input, Segmented, Table, Tag } from "antd";
+import { Alert, App, Button, Grid, Input, Segmented, Table, Tag } from "antd";
 import type { ColumnsType } from "antd/es/table";
 import { motion, useReducedMotion } from "motion/react";
 import { ArrowDownLeft, ArrowUpRight, CalendarCheck, Coins, RefreshCw, RotateCcw, ShieldCheck, SlidersHorizontal, Sparkles, TicketCheck } from "lucide-react";
 
 import { formatCredits } from "@/constant/credits";
 import { PaginationBar, TableSurface } from "@/components/layout/workspace-page";
-import { WorkspaceState } from "@/components/layout/workspace-state";
+import { WorkspaceErrorState, WorkspaceLoadingState, WorkspaceState } from "@/components/layout/workspace-state";
 import { WorkspaceSignalIcon } from "@/components/ui/aceternity/workspace-signal-icon";
-import { CometCard } from "@/components/ui/aceternity/comet-card";
 import { aceternityMotion } from "@/lib/aceternity-motion";
 import { checkinCredits, getWallet, redeemCredits, type CreditLedgerEntry, type WalletSummary } from "@/services/api/wallet";
 
@@ -29,6 +28,8 @@ export default function WalletPage() {
     const [code, setCode] = useState("");
     const [filter, setFilter] = useState<LedgerFilter>("all");
     const [loading, setLoading] = useState(false);
+    const [loadError, setLoadError] = useState("");
+    const [loadedQueryKey, setLoadedQueryKey] = useState("");
     const [redeeming, setRedeeming] = useState(false);
     const [checkingIn, setCheckingIn] = useState(false);
     const [page, setPage] = useState(1);
@@ -38,11 +39,15 @@ export default function WalletPage() {
     const reload = async (targetPage = page, targetPageSize = pageSize) => {
         const sequence = ++requestSequence.current;
         setLoading(true);
+        setLoadError("");
         try {
             const nextWallet = await getWallet(targetPage, targetPageSize, filter);
-            if (sequence === requestSequence.current) setWallet(nextWallet);
+            if (sequence === requestSequence.current) {
+                setWallet(nextWallet);
+                setLoadedQueryKey(`${filter}:${targetPage}:${targetPageSize}`);
+            }
         } catch (error) {
-            if (sequence === requestSequence.current) message.error(error instanceof Error ? error.message : "读取积分记录失败");
+            if (sequence === requestSequence.current) setLoadError(error instanceof Error ? error.message : "读取积分记录失败");
         } finally {
             if (sequence === requestSequence.current) setLoading(false);
         }
@@ -90,6 +95,8 @@ export default function WalletPage() {
     const entries = wallet?.entries || [];
     const account = wallet?.account;
     const totalMicrocredits = (account?.availableMicrocredits || 0) + (account?.reservedMicrocredits || 0);
+    const queryKey = `${filter}:${page}:${pageSize}`;
+    const hasCurrentSnapshot = loadedQueryKey === queryKey;
 
     const columns: ColumnsType<CreditLedgerEntry> = [
         { title: "发生时间", dataIndex: "createdAt", width: 180, render: formatTime },
@@ -127,8 +134,8 @@ export default function WalletPage() {
                         </div>
                     </div>
                     <div className="flex flex-wrap gap-2">
-                        <Button icon={<CalendarCheck className="size-4" />} type={wallet?.policy.checkedInToday ? "default" : "primary"} loading={checkingIn} disabled={wallet?.policy.checkedInToday} onClick={() => void checkin()}>
-                            {wallet?.policy.checkedInToday ? "今日已签到" : `签到 +${formatCredits(wallet?.policy.checkinBonusMicrocredits || 0)}`}
+                        <Button icon={<CalendarCheck className="size-4" />} type={wallet?.policy.checkedInToday ? "default" : "primary"} loading={checkingIn} disabled={!wallet || wallet.policy.checkedInToday} onClick={() => void checkin()}>
+                            {!wallet ? "每日签到" : wallet.policy.checkedInToday ? "今日已签到" : `签到 +${formatCredits(wallet.policy.checkinBonusMicrocredits)}`}
                         </Button>
                         <Button icon={<RefreshCw className="size-4" />} loading={loading} onClick={() => void reload()}>
                             刷新余额
@@ -136,8 +143,13 @@ export default function WalletPage() {
                     </div>
                 </motion.header>
 
+                {!hasCurrentSnapshot ? (
+                    loadError ? <div className="mt-6"><WorkspaceErrorState title="积分中心加载失败" description={loadError} onRetry={() => void reload(page, pageSize)} /></div> : <WorkspaceLoadingState className="mt-6" label="正在读取积分账户" detail="核对余额、冻结积分与流水记录" rows={5} />
+                ) : (
+                    <>
+                    {loadError ? <Alert className="mt-5" type="warning" showIcon message="本次刷新失败，仍显示上次成功读取的数据" description={loadError} action={<Button size="small" onClick={() => void reload(page, pageSize)}>重试</Button>} /> : null}
                 <section className="mt-6 grid gap-4 lg:grid-cols-[minmax(0,1.35fr)_minmax(340px,0.65fr)]">
-                    <CometCard rotateDepth={2.2} translateDepth={2} glare={!reducedMotion} className="credit-balance-card overflow-hidden rounded-lg border">
+                    <div className="credit-balance-card overflow-hidden rounded-lg border">
                         <div className="flex min-h-[210px] flex-col justify-between p-5 sm:p-6">
                             <div className="flex items-start justify-between gap-4">
                                 <div>
@@ -158,7 +170,7 @@ export default function WalletPage() {
                                 <BalanceMetric label="账户总额" description="可用与冻结合计" value={totalMicrocredits} icon={<Coins className="size-4" />} />
                             </div>
                         </div>
-                    </CometCard>
+                    </div>
 
                     <motion.div initial={reducedMotion ? false : { opacity: 0, x: 12 }} animate={{ opacity: 1, x: 0 }} transition={{ duration: aceternityMotion.duration.panel, ease: aceternityMotion.easing.enter }} className="app-workspace-surface flex flex-col rounded-lg border p-5 backdrop-blur-xl sm:p-6">
                         <div className="flex items-start gap-3">
@@ -219,6 +231,8 @@ export default function WalletPage() {
                         }}
                     />
                 </section>
+                    </>
+                )}
             </div>
         </main>
     );

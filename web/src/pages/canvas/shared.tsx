@@ -4,7 +4,7 @@ import { Clapperboard, Eye, FileText, Image as ImageIcon, LockKeyhole, LogIn, Se
 import { Link, useParams } from "react-router";
 import { nanoid } from "nanoid";
 
-import { ConnectionPath } from "@/components/canvas/canvas-connections";
+import { CanvasConnectionMarkers, ConnectionPath } from "@/components/canvas/canvas-connections";
 import { CanvasNodeHoverToolbar, CanvasNodeInfoModal } from "@/components/canvas/canvas-node-hover-toolbar";
 import { CanvasFrameNode } from "@/components/canvas/canvas-frame-node";
 import { CanvasNode } from "@/components/canvas/canvas-node";
@@ -20,7 +20,7 @@ import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasNodeType, type CanvasNodeData, type Position, type ViewportTransform } from "@/types/canvas";
 
 type ContextMenu = { x: number; y: number; world: Position; nodeId?: string };
-type DragState = { primaryId: string; nodeIds: string[]; startX: number; startY: number; origins: Map<string, Position>; moved: boolean };
+type DragState = { primaryId: string; nodeIds: string[]; pointerId: number; startX: number; startY: number; origins: Map<string, Position>; moved: boolean };
 
 export default function SharedCanvasPage() {
     const { token = "" } = useParams();
@@ -92,16 +92,16 @@ export default function SharedCanvasPage() {
     }, [token]);
 
     useEffect(() => {
-        const onMove = (event: MouseEvent) => {
+        const onMove = (event: PointerEvent) => {
             const drag = dragRef.current;
-            if (!drag) return;
+            if (!drag || drag.pointerId !== event.pointerId) return;
             const next = { x: (event.clientX - drag.startX) / viewportRef.current.k, y: (event.clientY - drag.startY) / viewportRef.current.k };
             if (Math.abs(event.clientX - drag.startX) > 3 || Math.abs(event.clientY - drag.startY) > 3) drag.moved = true;
             setDragOffset(next);
         };
-        const onUp = (event: MouseEvent) => {
+        const onUp = (event: PointerEvent) => {
             const drag = dragRef.current;
-            if (!drag) return;
+            if (!drag || drag.pointerId !== event.pointerId) return;
             const offset = { x: (event.clientX - drag.startX) / viewportRef.current.k, y: (event.clientY - drag.startY) / viewportRef.current.k };
             if (drag.moved) setNodes((current) => current.map((node) => {
                 const origin = drag.origins.get(node.id);
@@ -112,11 +112,20 @@ export default function SharedCanvasPage() {
             setDragOffset(null);
             document.body.style.cursor = "default";
         };
-        window.addEventListener("mousemove", onMove);
-        window.addEventListener("mouseup", onUp);
+        const onCancel = (event: PointerEvent) => {
+            const drag = dragRef.current;
+            if (!drag || drag.pointerId !== event.pointerId) return;
+            dragRef.current = null;
+            setDragOffset(null);
+            document.body.style.cursor = "default";
+        };
+        window.addEventListener("pointermove", onMove);
+        window.addEventListener("pointerup", onUp);
+        window.addEventListener("pointercancel", onCancel);
         return () => {
-            window.removeEventListener("mousemove", onMove);
-            window.removeEventListener("mouseup", onUp);
+            window.removeEventListener("pointermove", onMove);
+            window.removeEventListener("pointerup", onUp);
+            window.removeEventListener("pointercancel", onCancel);
             document.body.style.cursor = "default";
             if (toolbarTimerRef.current) clearTimeout(toolbarTimerRef.current);
         };
@@ -163,7 +172,7 @@ export default function SharedCanvasPage() {
             k: scale,
         });
     };
-    const resetViewport = () => {
+    const fitSharedCanvasContent = () => {
         const container = containerRef.current;
         if (!container || !nodes.length) return onViewportChange({ x: 0, y: 0, k: 1 });
         const rect = container.getBoundingClientRect();
@@ -233,31 +242,34 @@ export default function SharedCanvasPage() {
 
             <InfiniteCanvas containerRef={containerRef} viewport={viewport} backgroundMode={backgroundMode} onViewportChange={onViewportChange} onViewportPreviewChange={(next) => { viewportRef.current = next; }} onCanvasDeselect={() => { setSelectedNodeId(null); setContextMenu(null); }} onContextMenu={(event) => openContextMenu(event)} onDrop={(event) => { event.preventDefault(); unauthorized(); }}>
                 <svg className="absolute overflow-visible" viewBox={`${connectionBounds.left} ${connectionBounds.top} ${connectionBounds.width} ${connectionBounds.height}`} style={{ left: connectionBounds.left, top: connectionBounds.top, width: connectionBounds.width, height: connectionBounds.height, pointerEvents: "none", zIndex: 0 }}>
-                    {visibleConnections.map(({ connection, from, to }) => <ConnectionPath key={connection.id} connection={connection} from={from} to={to} active={false} onSelect={() => setInfoNodeId(to.id)} />)}
+                    <CanvasConnectionMarkers />
+                    {visibleConnections.map(({ connection, from, to }) => <ConnectionPath key={connection.id} connection={connection} from={from} to={to} obstacles={visibleNodes} active={false} onSelect={() => setInfoNodeId(to.id)} />)}
                 </svg>
-                {visibleNodes.map((node) => isFrameNode(node) ? <CanvasFrameNode key={node.id} data={node} dragOffset={dragRef.current?.nodeIds.includes(node.id) && dragOffset ? dragOffset : undefined} childNodes={frameChildrenById.get(node.id) || []} scale={viewport.k} isSelected={selectedNodeId === node.id} isDropTarget={false} readOnly onMouseDown={(event, nodeId) => {
+                {visibleNodes.map((node) => isFrameNode(node) ? <CanvasFrameNode key={node.id} data={node} dragOffset={dragRef.current?.nodeIds.includes(node.id) && dragOffset ? dragOffset : undefined} childNodes={frameChildrenById.get(node.id) || []} scale={viewport.k} isSelected={selectedNodeId === node.id} isDropTarget={false} readOnly onKeyboardSelect={(nodeId) => { setSelectedNodeId(nodeId); setInfoNodeId(nodeId); setContextMenu(null); }} onPointerDown={(event, nodeId) => {
                     event.stopPropagation();
                     if (event.button !== 0) return;
+                    event.currentTarget.setPointerCapture(event.pointerId);
                     setSelectedNodeId(nodeId);
                     setContextMenu(null);
                     const dragged = [node, ...(frameChildrenById.get(nodeId) || [])];
-                    dragRef.current = { primaryId: nodeId, nodeIds: dragged.map((item) => item.id), startX: event.clientX, startY: event.clientY, origins: new Map(dragged.map((item) => [item.id, item.position])), moved: false };
+                    dragRef.current = { primaryId: nodeId, nodeIds: dragged.map((item) => item.id), pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, origins: new Map(dragged.map((item) => [item.id, item.position])), moved: false };
                     document.body.style.cursor = "grabbing";
-                }} onResize={() => undefined} onToggleCollapsed={toggleFrame} onTitleChange={unauthorized} onHoverStart={keepToolbar} onHoverEnd={hideToolbar} onContextMenu={(event, nodeId) => openContextMenu(event, nodeId)} /> : <CanvasNode key={node.id} data={node} dragOffset={dragRef.current?.nodeIds.includes(node.id) && dragOffset ? dragOffset : undefined} scale={viewport.k} isSelected={selectedNodeId === node.id} isRelated={false} isFocusRelated={false} isConnectionTarget={false} isConnecting={false} showImageInfo={false} readOnly renderNodeContent={renderSharedNode} onMouseDown={(event, nodeId) => {
+                }} onResize={() => undefined} onToggleCollapsed={toggleFrame} onTitleChange={unauthorized} onHoverStart={keepToolbar} onHoverEnd={hideToolbar} onContextMenu={(event, nodeId) => openContextMenu(event, nodeId)} /> : <CanvasNode key={node.id} data={node} dragOffset={dragRef.current?.nodeIds.includes(node.id) && dragOffset ? dragOffset : undefined} scale={viewport.k} isSelected={selectedNodeId === node.id} isRelated={false} isFocusRelated={false} isConnectionTarget={false} showImageInfo={false} readOnly renderNodeContent={renderSharedNode} onKeyboardSelect={(nodeId) => { setSelectedNodeId(nodeId); setInfoNodeId(nodeId); setContextMenu(null); }} onPointerDown={(event, nodeId) => {
                     event.stopPropagation();
                     if (event.button !== 0) return;
+                    event.currentTarget.setPointerCapture(event.pointerId);
                     const target = nodes.find((item) => item.id === nodeId);
                     if (!target) return;
                     setSelectedNodeId(nodeId);
                     setContextMenu(null);
-                    dragRef.current = { primaryId: nodeId, nodeIds: [nodeId], startX: event.clientX, startY: event.clientY, origins: new Map([[nodeId, target.position]]), moved: false };
+                    dragRef.current = { primaryId: nodeId, nodeIds: [nodeId], pointerId: event.pointerId, startX: event.clientX, startY: event.clientY, origins: new Map([[nodeId, target.position]]), moved: false };
                     document.body.style.cursor = "grabbing";
                 }} onHoverStart={keepToolbar} onHoverEnd={hideToolbar} onConnectStart={unauthorized} onResize={() => undefined} onContentChange={unauthorized} onRetry={unauthorized} onCancelTask={unauthorized} onOpenTaskDetails={unauthorized} onViewImage={(target) => setInfoNodeId(target.id)} onContextMenu={(event, nodeId) => openContextMenu(event, nodeId)} />)}
             </InfiniteCanvas>
 
             <CanvasNodeHoverToolbar node={dragRef.current ? null : toolbarNode} viewport={viewport} containerRef={containerRef} onKeep={keepToolbar} onLeave={hideToolbar} onInfo={(node) => setInfoNodeId(node.id)} onEditText={unauthorized} onDecreaseFont={unauthorized} onIncreaseFont={unauthorized} onToggleDialog={unauthorized} onAnnotate={unauthorized} onGenerateImage={unauthorized} onUpload={unauthorized} onDownload={unauthorized} onSaveAsset={unauthorized} onMaskEdit={unauthorized} onEmotion={unauthorized} onCrop={unauthorized} onSplit={unauthorized} onUpscale={unauthorized} onAngle={unauthorized} onViewImage={unauthorized} onExtractVideoLastFrame={unauthorized} extractingVideoFrame={false} onReversePrompt={unauthorized} onRetry={unauthorized} onToggleFreeResize={unauthorized} onToggleLocked={unauthorized} onDelete={unauthorized} />
 
-            <div className="absolute bottom-5 left-5 z-[70]"><CanvasZoomControls scale={viewport.k} containerRef={containerRef} onScaleChange={setZoom} onReset={resetViewport} isMiniMapOpen={false} onToggleMiniMap={unauthorized} onOpenShortcuts={unauthorized} /></div>
+            <div className="absolute bottom-5 left-5 z-[70]"><CanvasZoomControls scale={viewport.k} containerRef={containerRef} onScaleChange={setZoom} onFit={fitSharedCanvasContent} isMiniMapOpen={false} onToggleMiniMap={unauthorized} onOpenShortcuts={unauthorized} /></div>
             <div className="pointer-events-none absolute bottom-5 right-5 z-[70] max-w-[340px] text-right text-xs leading-5" style={{ color: theme.node.muted }}>访客操作仅在当前页面临时生效</div>
 
             {contextMenu ? <SharedContextMenu menu={contextMenu} onAdd={addNode} onInfo={() => { if (contextMenu.nodeId) setInfoNodeId(contextMenu.nodeId); setContextMenu(null); }} onUnauthorized={() => { setContextMenu(null); unauthorized(); }} /> : null}

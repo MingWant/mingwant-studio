@@ -2,6 +2,8 @@ import { useCallback, type Dispatch, type SetStateAction } from "react";
 import { App } from "antd";
 
 import type { CanvasStylePreset } from "@/components/canvas/canvas-style-picker-modal";
+import { appendCanvasNodesWithFrameExpansion } from "@/lib/canvas/canvas-frame";
+import { placeCanvasNodeInContext } from "@/lib/canvas/canvas-layout";
 import { createCanvasNode } from "@/lib/canvas/canvas-project-domain";
 import { CanvasNodeType, type CanvasNodeData, type CanvasNodeMetadata, type Position } from "@/types/canvas";
 
@@ -45,11 +47,13 @@ export function useCanvasStyleWorkflow({
             styleNode = { ...current, title: `画风 · ${preset.title}`, metadata: { ...current.metadata, ...metadata } };
             nodesRef.current = nodesRef.current.map((node) => node.id === current.id ? styleNode : node);
         } else {
-            styleNode = createCanvasNode(CanvasNodeType.Text, getCanvasCenter(), metadata);
+            const center = getCanvasCenter();
+            styleNode = createCanvasNode(CanvasNodeType.Text, center, metadata);
             styleNode.title = `画风 · ${preset.title}`;
             styleNode.width = 420;
             styleNode.height = 240;
-            nodesRef.current = [...nodesRef.current, styleNode];
+            styleNode = placeCanvasNodeInContext(nodesRef.current, styleNode, { x: center.x - styleNode.width / 2, y: center.y - styleNode.height / 2 });
+            nodesRef.current = appendCanvasNodesWithFrameExpansion(nodesRef.current, [styleNode]);
         }
         setNodes(nodesRef.current);
         const selection = new Set([styleNode.id]);

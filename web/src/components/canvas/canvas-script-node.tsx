@@ -55,12 +55,15 @@ const columnOptions: Array<{ label: string; value: StoryboardColumn }> = [
     { label: "负面要求", value: "negativePrompt" },
 ];
 
-export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionReferences, onOpen, onCreateImageNodes, onCreateVideoNodes, onGenerateImages, onGenerateVideos, onCopyVideoPrompts, onMergeVideos, onRunNextStage, onCreateActionBoards, onRetryBatch, onRetryBatchItem, onStopBatch, onCancelBatchItem, onAddRow, onRemoveRow, onUpdateRow, onPromptChange, onModelChange, onGenerateScript, onShotDurationChange, onShotCountChange, onComposerHeightChange, onConnectStart, onScrollTopChange, workspaceMode = "professional" }: {
+export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionReferences, activeConnectionHandleId, activeConnectionHandleSide, connectingHandleType, onOpen, onCreateImageNodes, onCreateVideoNodes, onGenerateImages, onGenerateVideos, onCopyVideoPrompts, onMergeVideos, onRunNextStage, onCreateActionBoards, onRetryBatch, onRetryBatchItem, onStopBatch, onCancelBatchItem, onAddRow, onRemoveRow, onUpdateRow, onPromptChange, onModelChange, onGenerateScript, onShotDurationChange, onShotCountChange, onComposerHeightChange, onConnectStart, onScrollTopChange, workspaceMode = "professional" }: {
     node: CanvasNodeData;
     batch?: CanvasGenerationBatch;
     pipeline: CanvasStoryboardPipelineProgress;
     scale: number;
     mentionReferences: CanvasResourceReference[];
+    activeConnectionHandleId?: string;
+    activeConnectionHandleSide?: "left" | "right";
+    connectingHandleType?: "source" | "target";
     onOpen: () => void;
     onCreateImageNodes: () => void;
     onCreateVideoNodes: () => void;
@@ -276,15 +279,15 @@ export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionR
                         onClick={submitPrompt}
                     />
                 </div>
-                <RowHandle side="left" top={composerHeight / 2} scale={scale} tone="idle" theme={theme} title="连接故事或画风文本；运行时会自动带入分镜提示词" onPointerDown={(event) => onConnectStart(event, "context", "target")} />
+                {!connectingHandleType || connectingHandleType === "source" ? <RowHandle side="left" top={composerHeight / 2} scale={scale} tone="idle" active={activeConnectionHandleId === "storyboard:context" && activeConnectionHandleSide === "left"} theme={theme} title="连接故事或画风文本；运行时会自动带入分镜提示词" onPointerDown={(event) => onConnectStart(event, "context", "target")} /> : null}
             </div>
             {rows.map((row, index) => {
                 const top = STORYBOARD_HEADER_HEIGHT + index * STORYBOARD_ROW_HEIGHT + STORYBOARD_ROW_HEIGHT / 2 - scrollTop;
                 if (top < STORYBOARD_HEADER_HEIGHT + 4 || top > STORYBOARD_HEADER_HEIGHT + tableHeight - 4) return null;
                 return (
                     <div key={`ports-${row.id}`}>
-                        <RowHandle side="left" top={top} scale={scale} tone={batchItemTone(batchItemByRowId.get(row.id)) || row.status} theme={theme} onPointerDown={(event) => onConnectStart(event, row.id, "target")} />
-                        <RowHandle side="right" top={top} scale={scale} tone={batchItemTone(batchItemByRowId.get(row.id)) || row.status} theme={theme} onPointerDown={(event) => onConnectStart(event, row.id, "source")} />
+                        {!connectingHandleType || connectingHandleType === "source" ? <RowHandle side="left" top={top} scale={scale} tone={batchItemTone(batchItemByRowId.get(row.id)) || row.status} active={activeConnectionHandleId === `row:${row.id}` && activeConnectionHandleSide === "left"} theme={theme} onPointerDown={(event) => onConnectStart(event, row.id, "target")} /> : null}
+                        {!connectingHandleType || connectingHandleType === "target" ? <RowHandle side="right" top={top} scale={scale} tone={batchItemTone(batchItemByRowId.get(row.id)) || row.status} active={activeConnectionHandleId === `row:${row.id}` && activeConnectionHandleSide === "right"} theme={theme} onPointerDown={(event) => onConnectStart(event, row.id, "source")} /> : null}
                     </div>
                 );
             })}
@@ -516,8 +519,8 @@ function editorRow(shotNumber: number): StoryboardRow {
     return { id: `shot-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`, shotNumber, durationSeconds: 6, plotDescription: "", dialogue: "", characters: [], shotSize: "", emotion: "", lightingAndAtmosphere: "", audioEffects: "", camera: "", motion: "", timeBeats: "", imageGenerationPrompt: "", videoMotionPrompt: "", negativePrompt: "", referenceNodeIds: [], status: "idle" };
 }
 
-function RowHandle({ side, top, scale, tone, theme, title, onPointerDown }: { side: "left" | "right"; top: number; scale: number; tone?: StoryboardRow["status"]; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; title?: string; onPointerDown: (event: ReactPointerEvent) => void }) {
-    const color = tone === "loading" ? theme.accent.primary : tone === "error" ? theme.accent.danger : tone === "success" ? theme.node.activeStroke : theme.node.muted;
+function RowHandle({ side, top, scale, tone, active = false, theme, title, onPointerDown }: { side: "left" | "right"; top: number; scale: number; tone?: StoryboardRow["status"]; active?: boolean; theme: (typeof canvasThemes)[keyof typeof canvasThemes]; title?: string; onPointerDown: (event: ReactPointerEvent) => void }) {
+    const color = active ? theme.accent.primary : tone === "loading" ? theme.accent.primary : tone === "error" ? theme.accent.danger : tone === "success" ? theme.node.activeStroke : theme.node.muted;
     const inverseScale = 1 / Math.max(scale, 0.05);
     return (
         <button
@@ -525,10 +528,10 @@ function RowHandle({ side, top, scale, tone, theme, title, onPointerDown }: { si
             aria-label={title || `${side === "left" ? "输入" : "输出"}连接点`}
             title={title || `${side === "left" ? "引入参考" : "连接到图片、视频或生成节点"}`}
             className={`canvas-connection-handle absolute z-50 flex -translate-y-1/2 cursor-pointer items-center justify-center rounded-full outline-none focus-visible:ring-2 ${side === "left" ? "left-0 -translate-x-1/2" : "right-0 translate-x-1/2"}`}
-            style={{ top, width: 32 * inverseScale, height: 32 * inverseScale, "--tw-ring-color": theme.accent.primary } as CSSProperties}
+            style={{ top, width: 44 * inverseScale, height: 44 * inverseScale, "--tw-ring-color": theme.accent.primary } as CSSProperties}
             onPointerDown={onPointerDown}
         >
-            <span className="block rounded-full shadow-sm transition-transform hover:scale-110" style={{ width: 14 * inverseScale, height: 14 * inverseScale, border: `${2 * inverseScale}px solid ${theme.node.panel}`, background: color }} />
+            <span className="block rounded-full shadow-sm" style={{ width: 14 * inverseScale, height: 14 * inverseScale, border: `${2 * inverseScale}px solid ${theme.node.panel}`, background: color, boxShadow: active ? `0 0 0 ${4 * inverseScale}px ${theme.accent.primary}2e` : undefined }} />
         </button>
     );
 }

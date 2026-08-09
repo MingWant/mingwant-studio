@@ -1,7 +1,9 @@
 import { nanoid } from "nanoid";
 
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
+import { appendCanvasNodesWithFrameExpansion, expandCanvasFramesToFit } from "@/lib/canvas/canvas-frame";
 import { imageMetadata } from "@/lib/canvas/canvas-generation-task-sync";
+import { placeCanvasNodeGroup } from "@/lib/canvas/canvas-layout";
 import { fitNodeSize, nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import { prepareInPlaceMediaVersion } from "@/lib/canvas/canvas-media-versions";
 import { buildImageGenerationMetadata, getGenerationCount, isGenerationCanceled, runBackendCanvasGenerationTask } from "@/lib/canvas/canvas-project-generation";
@@ -27,11 +29,13 @@ export async function executeImageGeneration({
     sourceTaskId,
     confirmNewProviderRequest,
     projectId,
+    nodesRef,
     setNodes,
     setConnections,
     setSelectedNodeIds,
     setSelectedConnectionId,
     setDialogNodeId,
+    revealGeneratedNodes,
     startGenerationRequest,
     finishGenerationRequest,
     bindGenerationTask,
@@ -59,7 +63,7 @@ export async function executeImageGeneration({
     const rootWidth = isImageNode && !isEmptyImageNode ? sourceNode?.width || imageConfig.width : imageConfig.width;
     const rootHeight = isImageNode && !isEmptyImageNode ? sourceNode?.height || imageConfig.height : imageConfig.height;
 
-    const rootNode: CanvasNodeData = {
+    let rootNode: CanvasNodeData = {
         id: rootId,
         type: CanvasNodeType.Image,
         title: effectivePrompt.slice(0, 32) || "Generated Image",
@@ -85,7 +89,7 @@ export async function executeImageGeneration({
             failedPromptFingerprint: undefined,
         },
     };
-    const childNodes: CanvasNodeData[] = childIds.map((id, index) => ({
+    let childNodes: CanvasNodeData[] = childIds.map((id, index) => ({
         id,
         type: CanvasNodeType.Image,
         title: effectivePrompt.slice(0, 32) || "Generated Image",
@@ -97,26 +101,33 @@ export async function executeImageGeneration({
         height: imageConfig.height,
         metadata: { prompt: effectivePrompt, status: NODE_STATUS_LOADING, size: generationConfig.size, batchRootId: count > 1 ? rootId : undefined, ...generationMetadata, generationErrorCode: undefined, failedPromptFingerprint: undefined },
     }));
+    if (!isImageNode) {
+        const [placedRoot, ...placedChildren] = placeCanvasNodeGroup(nodesRef.current, [rootNode, ...childNodes], 44, sourceNode);
+        rootNode = placedRoot;
+        childNodes = placedChildren;
+    } else if (childNodes.length) {
+        childNodes = placeCanvasNodeGroup(nodesRef.current, childNodes, 44, sourceNode);
+    }
     const batchConnections = [...(isImageNode ? [] : [{ id: nanoid(), fromNodeId: nodeId, toNodeId: rootId }]), ...childIds.map((childId) => ({ id: nanoid(), fromNodeId: rootId, toNodeId: childId }))];
 
     setNodes((current) => {
         const versioned = isImageNode && !isEmptyImageNode ? prepareInPlaceMediaVersion(current, nodeId) : current;
-        return [
-        ...versioned.map((node) => {
+        const updated = versioned.map((node) => {
             if (node.id !== nodeId) return node;
             if (isConfigNode) return { ...node, metadata: { ...node.metadata, prompt: effectivePrompt, status: NODE_STATUS_LOADING, errorDetails: undefined } };
             if (isEmptyImageNode) return { ...node, position: rootNode.position, width: rootNode.width, height: rootNode.height, title: rootNode.title, metadata: { ...node.metadata, ...rootNode.metadata, errorDetails: undefined } };
             if (isImageNode) return { ...node, title: rootNode.title, metadata: { ...node.metadata, ...rootNode.metadata, errorDetails: undefined } };
             return { ...node, type: CanvasNodeType.Text, title: prompt.slice(0, 32) || "Prompt", width: parentConfig.width, height: parentConfig.height, metadata: { ...node.metadata, content: prompt, richText: undefined, prompt, status: NODE_STATUS_SUCCESS, fontSize: 14, errorDetails: undefined } };
-        }),
-        ...(isImageNode ? [] : [rootNode]),
-        ...childNodes,
-    ];
+        });
+        const appended = appendCanvasNodesWithFrameExpansion(updated, [...(isImageNode ? [] : [rootNode]), ...childNodes]);
+        return isEmptyImageNode && sourceNode?.parentId ? expandCanvasFramesToFit(appended, new Set([sourceNode.parentId])) : appended;
     });
     setConnections((current) => [...current, ...batchConnections]);
     setSelectedNodeIds(new Set([nodeId]));
     setSelectedConnectionId(null);
     setDialogNodeId(nodeId);
+    const insertedNodeIds = [...(isImageNode ? [] : [rootId]), ...childIds];
+    if (insertedNodeIds.length) requestAnimationFrame(() => revealGeneratedNodes?.(insertedNodeIds));
 
     targetIds.forEach((targetId) => startGenerationRequest(targetId, nodeId, nodeId, controller));
     if (count > 1) startGenerationRequest(rootId, nodeId, nodeId, controller);
@@ -133,7 +144,7 @@ export async function executeImageGeneration({
                 const imageSize = fitNodeSize(uploaded.width, uploaded.height, imageConfig.width, imageConfig.height);
                 setNodes((current) => {
                     const root = current.find((node) => node.id === rootId);
-                    return current.map((node) => {
+                    const resized = current.map((node) => {
                         if (node.id !== targetId && node.id !== rootId) return node;
                         const center = { x: node.position.x + node.width / 2, y: node.position.y + node.height / 2 };
                         const geometry = node.metadata?.locked ? {} : { position: { x: center.x - imageSize.width / 2, y: center.y - imageSize.height / 2 }, width: imageSize.width, height: imageSize.height };
@@ -141,6 +152,10 @@ export async function executeImageGeneration({
                         if (node.id === targetId) return { ...node, ...geometry, metadata: { ...node.metadata, ...imageMetadata(uploaded) } };
                         return node;
                     });
+                    const parentIds = new Set(resized
+                        .filter((node) => (node.id === targetId || node.id === rootId) && node.parentId)
+                        .map((node) => node.parentId as string));
+                    return expandCanvasFramesToFit(resized, parentIds);
                 });
                 hasSuccess = true;
                 if (isConfigNode) setNodes((current) => current.map((node) => (node.id === nodeId ? { ...node, metadata: { ...node.metadata, status: NODE_STATUS_SUCCESS, errorDetails: undefined } } : node)));

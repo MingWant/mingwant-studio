@@ -3,7 +3,9 @@ import { App } from "antd";
 import { nanoid } from "nanoid";
 
 import { imageMetadata } from "@/lib/canvas/canvas-generation-task-sync";
+import { appendCanvasNodesWithFrameExpansion, expandCanvasFramesToFit } from "@/lib/canvas/canvas-frame";
 import { fitNodeSize } from "@/lib/canvas/canvas-node-size";
+import { placeCanvasNodeGroup, placeCanvasNodeInContext } from "@/lib/canvas/canvas-layout";
 import { createCanvasNode } from "@/lib/canvas/canvas-project-domain";
 import { createDirectorScene } from "@/lib/canvas/director/director-scene";
 import { uploadImage } from "@/services/image-storage";
@@ -49,7 +51,7 @@ export function useCanvasDirector({
         let scene = createDirectorScene(`镜头 ${shotIndex}`);
         const shot = scene.shots[0];
         scene = { ...scene, shots: [{ ...shot, name: `镜头 ${shotIndex}` }] };
-        const node = createCanvasNode(CanvasNodeType.Config, position || getCanvasCenter(), {
+        let node = createCanvasNode(CanvasNodeType.Config, position || getCanvasCenter(), {
             workflowKind: "shot",
             workflowTitle: `镜头 ${shotIndex}`,
             shotIndex,
@@ -61,7 +63,8 @@ export function useCanvasDirector({
             directorShotId: shot.id,
         });
         node.title = `镜头 ${shotIndex}`;
-        const nextNodes = [...nodesRef.current, node];
+        node = placeCanvasNodeInContext(nodesRef.current, node);
+        const nextNodes = appendCanvasNodesWithFrameExpansion(nodesRef.current, [node]);
         nodesRef.current = nextNodes;
         setNodes(nextNodes);
         setSelectedNodeIds(new Set([node.id]));
@@ -98,6 +101,8 @@ export function useCanvasDirector({
         const existingIds = [sourceNode.metadata?.directorPreviewNodeId, sourceNode.metadata?.directorDepthNodeId, sourceNode.metadata?.directorNormalNodeId];
         const nextNodes = [...nodesRef.current];
         const outputIds: string[] = [];
+        const createdNodes: CanvasNodeData[] = [];
+        const existingOffsets: Position[] = [];
         uploads.forEach((image, index) => {
             const id = existingIds[index] || `image-director-${Date.now()}-${index}`;
             const size = fitNodeSize(image.width, image.height);
@@ -105,15 +110,33 @@ export function useCanvasDirector({
                 id,
                 type: CanvasNodeType.Image,
                 title: `${sourceNode.title} · ${labels[index]}`,
-                position: { x: sourceNode.position.x - 3 * (size.width + 36) + index * (size.width + 36), y: sourceNode.position.y },
+                position: { x: sourceNode.position.x - 3 * (size.width + 36) - 28 + index * (size.width + 36), y: sourceNode.position.y },
                 width: size.width,
                 height: size.height,
                 metadata: { ...imageMetadata(image), prompt: output.prompt, workflowKind: "reference_set", assetTags: [labels[index], `镜头:${sourceNode.title}`] },
             };
             const currentIndex = nextNodes.findIndex((item) => item.id === id);
-            if (currentIndex >= 0) nextNodes[currentIndex] = node;
-            else nextNodes.push(node);
+            if (currentIndex >= 0) {
+                const existingNode = nextNodes[currentIndex];
+                existingOffsets.push({ x: existingNode.position.x - node.position.x, y: existingNode.position.y - node.position.y });
+                nextNodes[currentIndex] = { ...node, position: existingNode.position, parentId: existingNode.parentId };
+            } else {
+                nextNodes.push(node);
+                createdNodes.push(node);
+            }
             outputIds.push(id);
+        });
+        if (existingOffsets.length) {
+            const layoutOffset = existingOffsets.reduce((sum, offset) => ({ x: sum.x + offset.x, y: sum.y + offset.y }), { x: 0, y: 0 });
+            createdNodes.forEach((node) => {
+                node.position = { x: node.position.x + layoutOffset.x / existingOffsets.length, y: node.position.y + layoutOffset.y / existingOffsets.length };
+            });
+        }
+        const outputIdSet = new Set(outputIds);
+        const placedById = new Map(placeCanvasNodeGroup(nodesRef.current.filter((node) => !outputIdSet.has(node.id)), createdNodes, 32, sourceNode).map((node) => [node.id, node]));
+        createdNodes.forEach((node) => {
+            const placed = placedById.get(node.id);
+            if (placed) Object.assign(node, placed);
         });
         const nextConnections = [...connectionsRef.current];
         outputIds.forEach((id) => {
@@ -131,7 +154,8 @@ export function useCanvasDirector({
             videoCameraMovePrompt: output.prompt,
             referenceAssetNodeIds: Array.from(new Set([...(sourceNode.metadata?.referenceAssetNodeIds || []), ...outputIds])),
         };
-        const finalizedNodes = nextNodes.map((item) => item.id === sourceNode.id ? { ...item, metadata: { ...item.metadata, ...directorMetadata } } : item);
+        const parentIds = new Set(outputIds.map((id) => nextNodes.find((node) => node.id === id)?.parentId).filter((id): id is string => Boolean(id)));
+        const finalizedNodes = expandCanvasFramesToFit(nextNodes.map((item) => item.id === sourceNode.id ? { ...item, metadata: { ...item.metadata, ...directorMetadata } } : item), parentIds);
         nodesRef.current = finalizedNodes;
         connectionsRef.current = nextConnections;
         setNodes(finalizedNodes);

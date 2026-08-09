@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import { canvasThemes, type CanvasBackgroundMode } from "@/lib/canvas-theme";
 import { applyCanvasLiveViewport, subscribeCanvasViewportPreview } from "@/lib/canvas/canvas-live-viewport";
+import { clampCanvasScale } from "@/lib/canvas/canvas-viewport";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { ViewportTransform } from "@/types/canvas";
 
@@ -120,7 +121,8 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
     useEffect(() => {
         const handleKeyDown = (event: KeyboardEvent) => {
             if (event.code !== "Space") return;
-            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement) return;
+            const target = event.target instanceof Element ? event.target : null;
+            if (event.target instanceof HTMLInputElement || event.target instanceof HTMLTextAreaElement || event.target instanceof HTMLSelectElement || event.target instanceof HTMLButtonElement || target?.closest("[contenteditable='true'],[data-canvas-no-zoom]")) return;
             setIsSpacePressed(true);
         };
 
@@ -173,7 +175,7 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
             const mouseY = event.clientY - rect.top;
             const zoomDelta = isPinchZoom && !looksLikeMouseWheel ? TRACKPAD_PINCH_ZOOM_DELTA : WHEEL_ZOOM_DELTA;
             const factor = Math.pow(1.1, -deltaY / zoomDelta);
-            const newScale = clampScale(current.k * factor);
+            const newScale = clampCanvasScale(current.k * factor);
             const worldX = (mouseX - current.x) / current.k;
             const worldY = (mouseY - current.y) / current.k;
 
@@ -193,8 +195,7 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
         const isBackgroundClick = !target?.closest("[data-node-id],[data-connection-id]");
         const isTouch = event.pointerType === "touch";
 
-        const hasSelectionModifier = event.shiftKey || event.ctrlKey || event.metaKey || event.altKey;
-        if (event.button === 0 && !isSpacePressed && !isTouch && isBackgroundClick && hasSelectionModifier) {
+        if (event.button === 0 && !isSpacePressed && !isTouch && isBackgroundClick) {
             event.preventDefault();
             event.currentTarget.setPointerCapture(event.pointerId);
             onCanvasMouseDown?.(event);
@@ -245,24 +246,29 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
             return;
         }
 
-        if (isBackgroundClick && (event.button === 1 || event.button === 0)) {
-            const current = viewportRef.current;
-            event.preventDefault();
-            event.currentTarget.setPointerCapture(event.pointerId);
-            interactingRef.current = true;
-            panState.current = {
-                isPanning: true,
-                pointerId: event.pointerId,
-                startX: event.clientX,
-                startY: event.clientY,
-                initialX: current.x,
-                initialY: current.y,
-                hasMoved: false,
-            };
-            setIsPanning(true);
-            document.body.style.cursor = "grabbing";
-        }
+    };
 
+    const handleNavigationPointerDownCapture = (event: React.PointerEvent<HTMLDivElement>) => {
+        if (event.pointerType === "touch" || (event.button !== 1 && !(event.button === 0 && isSpacePressed))) return;
+        const target = event.target instanceof Element ? event.target : null;
+        if (target?.closest("[data-canvas-no-zoom],[data-connection-create-menu]")) return;
+        // Space + 左键和中键都应在节点上也能平移，捕获阶段先于节点拖拽接管指针。
+        const current = viewportRef.current;
+        event.preventDefault();
+        event.stopPropagation();
+        event.currentTarget.setPointerCapture(event.pointerId);
+        interactingRef.current = true;
+        panState.current = {
+            isPanning: true,
+            pointerId: event.pointerId,
+            startX: event.clientX,
+            startY: event.clientY,
+            initialX: current.x,
+            initialY: current.y,
+            hasMoved: false,
+        };
+        setIsPanning(true);
+        document.body.style.cursor = "grabbing";
     };
 
     useEffect(() => {
@@ -279,7 +285,7 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
                     const centerX = (first.x + second.x) / 2 - rect.left;
                     const centerY = (first.y + second.y) / 2 - rect.top;
                     const distance = Math.max(Math.hypot(second.x - first.x, second.y - first.y), 1);
-                    const scale = clampScale(pinch.initialScale * (distance / pinch.initialDistance));
+                    const scale = clampCanvasScale(pinch.initialScale * (distance / pinch.initialDistance));
                     scheduleViewportChange({
                         x: centerX - pinch.worldX * scale,
                         y: centerY - pinch.worldY * scale,
@@ -366,7 +372,7 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
     return (
         <div
             ref={containerRef}
-            className={`relative h-full w-full select-none overflow-hidden touch-none ${isPanning ? "cursor-grabbing" : "cursor-grab"}`}
+            className={`relative h-full w-full select-none overflow-hidden touch-none ${isPanning ? "cursor-grabbing" : isSpacePressed ? "cursor-grab" : "cursor-default"}`}
             style={{
                 background: theme.canvas.background,
                 overscrollBehavior: "none",
@@ -378,6 +384,7 @@ export function InfiniteCanvas({ containerRef, viewport, backgroundMode = "lines
                 "--canvas-grid-y": `${viewport.y % (48 * viewport.k)}px`,
                 "--canvas-dot-size": viewport.k < 0.12 ? "0.8px" : "1.15px",
             } as React.CSSProperties}
+            onPointerDownCapture={handleNavigationPointerDownCapture}
             onPointerDown={handlePointerDown}
             onDoubleClick={(event) => {
                 const target = event.target instanceof Element ? event.target : null;
@@ -431,8 +438,4 @@ function wheelDeltaToPixels(delta: number, deltaMode: number) {
     if (deltaMode === 1) return delta * 16;
     if (deltaMode === 2) return delta * 720;
     return delta;
-}
-
-function clampScale(scale: number) {
-    return Math.min(Math.max(scale, 0.05), 2);
 }

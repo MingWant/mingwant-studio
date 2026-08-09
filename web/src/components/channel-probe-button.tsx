@@ -3,7 +3,7 @@ import { Activity } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 
 import { isGeminiModelProtocol, modelProtocolCapability, modelProtocolLabel, type ModelProtocol } from "@/lib/model-protocols";
-import { recordChannelProbeReadiness, recordChannelToolProbeReadiness } from "@/lib/channel-probe-readiness";
+import { CHANNEL_PROBE_VERIFIER_VERSION, recordChannelProbeReadiness, recordChannelToolProbeReadiness } from "@/lib/channel-probe-readiness";
 import { createClientId } from "@/lib/client-id";
 import { getActiveUserScope, scopedLocalStorage } from "@/lib/user-scope";
 import { createChannelProbe, getChannelProbe, type ChannelProbeStatus } from "@/services/api/channel-probes";
@@ -16,6 +16,13 @@ export type ChannelProbeModelOption = {
     protocol: ModelProtocol;
 };
 
+export type ChannelToolProbeSummary = {
+    model: string;
+    status?: string;
+    checkedAt?: string;
+    verifierVersion?: string;
+};
+
 type ChannelProbeButtonProps = {
     channel: ModelChannel;
     models?: ChannelProbeModelOption[];
@@ -23,11 +30,12 @@ type ChannelProbeButtonProps = {
     size?: ButtonProps["size"];
     className?: string;
     disabled?: boolean;
+    toolProbeSummary?: ChannelToolProbeSummary;
     onCompleted?: (probe: ChannelProbeStatus) => void | Promise<void>;
     onToolCompleted?: (probe: ChannelProbeStatus) => void | Promise<void>;
 };
 
-export function ChannelProbeButton({ channel, models, label = "测活", size = "small", className, disabled = false, onCompleted, onToolCompleted }: ChannelProbeButtonProps) {
+export function ChannelProbeButton({ channel, models, label = "测活", size = "small", className, disabled = false, toolProbeSummary, onCompleted, onToolCompleted }: ChannelProbeButtonProps) {
     const { message } = App.useApp();
     const options = useMemo(() => models || channelProbeModels(channel), [channel, models]);
     const userRole = useUserStore((state) => state.user?.role);
@@ -117,6 +125,7 @@ export function ChannelProbeButton({ channel, models, label = "测活", size = "
                 }
                 setToolProbeRunning(false);
                 const probeChannel = probeChannelSnapshotsRef.current.get(next.id) || channel;
+                notifyToolProbeCompleted(next, (content) => message.success(content), (content) => message.error(content));
                 await finalizeChannelToolProbe(probeChannel, next, onToolCompleted, (content) => message.warning(content));
                 probeChannelSnapshotsRef.current.delete(next.id);
             } catch (error) {
@@ -213,6 +222,7 @@ export function ChannelProbeButton({ channel, models, label = "测活", size = "
             }
             if (next.status !== "queued" && next.status !== "running") {
                 setToolProbeRunning(false);
+                notifyToolProbeCompleted(next, (content) => message.success(content), (content) => message.error(content));
                 await finalizeChannelToolProbe(channelSnapshot, next, onToolCompleted, (content) => message.warning(content));
                 probeChannelSnapshotsRef.current.delete(next.id);
             }
@@ -227,6 +237,12 @@ export function ChannelProbeButton({ channel, models, label = "测活", size = "
     };
 
     const toolProbeSucceeded = toolProbe?.status === "succeeded" && toolProbe.result?.ok === true;
+    const configuredToolProbe = channel.modelCosts?.find((item) => item.model === selectedModel || modelOptionName(item.model) === selectedModel);
+    const savedToolProbe = toolProbeSummary?.model === selectedModel && toolProbeSummary.checkedAt
+        ? toolProbeSummary
+        : configuredToolProbe?.toolProbeCheckedAt
+            ? { model: selectedModel, status: configuredToolProbe.toolProbeStatus, checkedAt: configuredToolProbe.toolProbeCheckedAt, verifierVersion: configuredToolProbe.toolProbeVerifierVersion }
+            : undefined;
 
     const trigger = (
         <Button
@@ -289,15 +305,40 @@ export function ChannelProbeButton({ channel, models, label = "测活", size = "
                             </div>
                             {toolProbe?.kind === "tool" && (toolProbe.status === "queued" || toolProbe.status === "running") ? <div className="mt-3 flex items-center gap-2 text-xs text-foreground/55"><Spin size="small" />{toolProbe.stage || "工具诊断进行中"}</div> : null}
                             {toolProbe?.kind === "tool" && toolProbe.status !== "queued" && toolProbe.status !== "running" ? <Alert className="mt-3" type={toolProbeSucceeded ? "success" : "error"} showIcon message={toolProbeSucceeded ? "Agent 工具调用通过" : "Agent 工具调用未通过"} description={toolProbeSucceeded ? `已收到 ${toolProbe.result?.toolName || "probe_extract_record"} 工具调用并校验参数；耗时 ${formatProbeDuration(toolProbe.result?.durationMs || 0)}，这条请求没有执行画布操作。` : toolProbe.error || "后台没有返回可校验的工具调用结果"} /> : null}
+                            {!toolProbe && savedToolProbe ? <SavedToolProbeState summary={savedToolProbe} className="mt-3" /> : null}
                             {toolProbePollError ? <Alert className="mt-3" type="warning" showIcon message="工具诊断状态刷新暂时失败" description={`${toolProbePollError}；后台任务仍会继续，页面将自动重试。`} /> : null}
                         </div>
                     ) : null}
+                    {!probe && savedToolProbe ? <SavedToolProbeState summary={savedToolProbe} /> : null}
                     {pollError ? <Alert type="warning" showIcon message="状态刷新暂时失败" description={`${pollError}；后台任务仍会继续，页面将自动重试。`} /> : null}
                     {active ? <div className="text-xs leading-5 text-foreground/50">当前运行的是低成本测活探针（输出上限 256 token），不是创作台正式请求；模型启动本身较慢时仍会按后台“文本任务超时”继续等待。关闭弹窗不会取消任务，也可以到任务中心查看“渠道测活”。</div> : null}
                 </div>
             </Modal>
         </>
     );
+}
+
+function notifyToolProbeCompleted(probe: ChannelProbeStatus, success: (content: string) => void, failure: (content: string) => void) {
+    if (probe.status === "succeeded" && probe.result?.ok) {
+        success("Agent 工具调用诊断已通过，结果已显示在弹窗内");
+        return;
+    }
+    failure("Agent 工具调用诊断未通过，请查看弹窗内的失败原因");
+}
+
+function SavedToolProbeState({ summary, className }: { summary: ChannelToolProbeSummary; className?: string }) {
+    const checkedTime = Date.parse(summary.checkedAt || "");
+    const age = Date.now() - checkedTime;
+    const stale = !Number.isFinite(checkedTime)
+        || age > 7 * 24 * 60 * 60 * 1_000
+        || age < -5 * 60 * 1_000
+        || summary.verifierVersion !== CHANNEL_PROBE_VERIFIER_VERSION;
+    const checkedAt = Number.isFinite(checkedTime) ? new Date(checkedTime).toLocaleString("zh-CN") : "检查时间异常";
+    if (stale) {
+        return <Alert className={className} type="warning" showIcon message="最近一次工具诊断需要重测" description={`后台保存的结果已过期或版本不匹配；最近检查：${checkedAt}。`} />;
+    }
+    const succeeded = summary.status === "succeeded";
+    return <Alert className={className} type={succeeded ? "success" : "error"} showIcon message={succeeded ? "最近一次 Agent 工具调用通过" : "最近一次 Agent 工具调用未通过"} description={`这是后台保存的最近一次诊断结论；检查时间：${checkedAt}。重新测试后会在这里更新。`} />;
 }
 
 function cloneProbeChannel(channel: ModelChannel): ModelChannel {

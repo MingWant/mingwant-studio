@@ -159,7 +159,7 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
             width: 180,
             render: (_, item) => (
                 <Space>
-                    {item.capability === "text" ? <ChannelProbeButton channel={channel} models={[{ model: item.modelKey, label: item.displayName || item.modelKey, protocol: textProbeProtocol(channel, item) }]} onCompleted={refreshAfterProbe} onToolCompleted={refreshAfterProbe} /> : null}
+                    {item.capability === "text" ? <ChannelProbeButton channel={channel} models={[{ model: item.modelKey, label: item.displayName || item.modelKey, protocol: textProbeProtocol(channel, item) }]} toolProbeSummary={{ model: item.modelKey, status: item.toolProbeStatus, checkedAt: item.toolProbeCheckedAt, verifierVersion: item.toolProbeVerifierVersion }} onCompleted={refreshAfterProbe} onToolCompleted={refreshAfterProbe} /> : null}
                     <Button size="small" onClick={() => startEdit(item)}>编辑</Button>
                     <Popconfirm title="删除模型" description="删除后模型不再显示，历史账单仍会保留。该操作不能在页面恢复。" okText="删除" cancelText="取消" onConfirm={() => void remove(item)}>
                         <Button size="small" danger title="删除模型" aria-label="删除模型" icon={<Trash2 className="size-3.5" />} />

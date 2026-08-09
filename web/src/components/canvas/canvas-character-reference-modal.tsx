@@ -1,10 +1,10 @@
 import { Modal } from "antd";
-import { AudioLines, BadgeCheck, Image as ImageIcon, UserRound, Volume2 } from "lucide-react";
+import { AudioLines, BadgeCheck, Image as ImageIcon, Pin, RefreshCw, UserRound, Volume2 } from "lucide-react";
 import type { ReactNode } from "react";
 
 import type { CanvasNodeData } from "@/types/canvas";
 
-export function CanvasCharacterReferenceModal({ node, open, onClose }: { node: CanvasNodeData | null; open: boolean; onClose: () => void }) {
+export function CanvasCharacterReferenceModal({ node, open, onClose, onVersionPolicyChange }: { node: CanvasNodeData | null; open: boolean; onClose: () => void; onVersionPolicyChange: (nodeId: string, policy: "current" | "pinned") => void }) {
     if (!node) return null;
     const metadata = node.metadata;
     const definition = metadata?.characterDefinition || {};
@@ -13,6 +13,7 @@ export function CanvasCharacterReferenceModal({ node, open, onClose }: { node: C
     const visualReady = metadata?.characterVisualStatus === "ready";
     const voiceReady = metadata?.characterVoiceStatus === "ready";
     const voiceProfile = metadata?.characterVoiceProfile;
+    const versionPolicy = metadata?.characterVersionPolicy === "pinned" ? "pinned" : "current";
 
     return (
         <Modal
@@ -60,7 +61,7 @@ export function CanvasCharacterReferenceModal({ node, open, onClose }: { node: C
                             </span>
                             <div className="min-w-0">
                                 <h2 className="truncate text-xl font-semibold leading-7">{name}</h2>
-                                <p className="mt-1 text-[11px] text-foreground/45">项目角色引用 · 当前版本</p>
+                                <p className="mt-1 text-[11px] text-foreground/45">项目角色引用 · {versionPolicy === "pinned" ? "固定版本" : "跟随当前版本"}</p>
                             </div>
                         </div>
                         <div className="mt-4 flex flex-wrap gap-1.5">
@@ -70,6 +71,15 @@ export function CanvasCharacterReferenceModal({ node, open, onClose }: { node: C
                     </header>
 
                     <div className="space-y-7 px-6 py-6">
+                        <section className="rounded-md border border-border/75 bg-foreground/[.025] p-3">
+                            <div className="text-xs font-semibold">角色版本策略</div>
+                            <div className="mt-2 grid grid-cols-2 gap-2">
+                                <button type="button" className={`flex min-h-10 items-center justify-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition ${versionPolicy === "current" ? "border-[var(--workspace-accent)] bg-[var(--workspace-accent-soft)] text-[var(--workspace-accent)]" : "border-border hover:bg-foreground/[.04]"}`} onClick={() => onVersionPolicyChange(node.id, "current")}><RefreshCw className="size-3.5" />跟随角色更新</button>
+                                <button type="button" disabled={!metadata?.characterVersionId} className={`flex min-h-10 items-center justify-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition disabled:cursor-not-allowed disabled:opacity-35 ${versionPolicy === "pinned" ? "border-[var(--workspace-accent)] bg-[var(--workspace-accent-soft)] text-[var(--workspace-accent)]" : "border-border hover:bg-foreground/[.04]"}`} onClick={() => onVersionPolicyChange(node.id, "pinned")}><Pin className="size-3.5" />固定此版本</button>
+                            </div>
+                            <p className="mt-2 text-[10px] leading-4 text-foreground/42">固定版本会让后续分镜继续读取同一套角色设定与三视图；跟随更新适合角色仍在迭代的阶段。</p>
+                        </section>
+
                         <DetailSection icon={<BadgeCheck />} title="身份与外观">
                             <DetailRow label="剧情身份" value={stringValue(definition.role)} />
                             <DetailRow label="别名" value={aliases.join("、")} />

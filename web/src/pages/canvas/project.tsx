@@ -207,6 +207,7 @@ function InfiniteCanvasPage() {
     const [projectAssetOpen, setProjectAssetOpen] = useState(false);
     const [projectAssetInitialCategory, setProjectAssetInitialCategory] = useState("all");
     const [projectAssetInsertPosition, setProjectAssetInsertPosition] = useState<Position | undefined>();
+    const [storyboardReferenceTarget, setStoryboardReferenceTarget] = useState<{ scriptNodeId: string; rowId?: string } | null>(null);
     const [infoNodeId, setInfoNodeId] = useState<string | null>(null);
     const [previewNodeId, setPreviewNodeId] = useState<string | null>(null);
     const [scriptEditorNodeId, setScriptEditorNodeId] = useState<string | null>(null);
@@ -598,6 +599,7 @@ function InfiniteCanvasPage() {
         handleFileDragOver,
         handleImageInputChange,
         handleProjectAssetsInsert,
+        handleReferenceImageUploadRequest,
         handleProjectChapterInsert,
         handleUploadRequest,
         imageInputRef,
@@ -621,6 +623,7 @@ function InfiniteCanvasPage() {
     });
 
     const openProjectAssets = useCallback((initialCategory = "all", position?: Position) => {
+        setStoryboardReferenceTarget(null);
         setProjectAssetInitialCategory(initialCategory);
         setProjectAssetInsertPosition(position);
         setProjectAssetOpen(true);
@@ -628,6 +631,7 @@ function InfiniteCanvasPage() {
     const closeProjectAssets = useCallback(() => {
         setProjectAssetOpen(false);
         setProjectAssetInsertPosition(undefined);
+        setStoryboardReferenceTarget(null);
     }, []);
 
     const {
@@ -1272,6 +1276,7 @@ function InfiniteCanvasPage() {
         generateScriptVideos,
         removeScriptRow,
         replaceScriptRows,
+        setScriptReferences,
         updateScriptRow,
     } = useCanvasStoryboard({
         projectId,
@@ -1283,6 +1288,43 @@ function InfiniteCanvasPage() {
         focusGeneratedNodes,
         enqueueGenerationBatch,
     });
+
+    const storyboardReferenceResources = useMemo(
+        () => Array.from(resourceReferenceByNodeId.values()).filter((reference) => reference.kind === "image" || reference.kind === "character"),
+        [resourceReferenceByNodeId],
+    );
+    const storyboardReferencePosition = useCallback((scriptNodeId: string, rowId?: string) => {
+        const scriptNode = nodesRef.current.find((node) => node.id === scriptNodeId && node.type === CanvasNodeType.Script);
+        if (!scriptNode) return getCanvasCenter();
+        const rowIndex = rowId ? Math.max(0, (scriptNode.metadata?.storyboard?.rows || []).findIndex((row) => row.id === rowId)) : 0;
+        return {
+            x: scriptNode.position.x - 220,
+            y: scriptNode.position.y + (rowId ? STORYBOARD_HEADER_HEIGHT + rowIndex * STORYBOARD_ROW_HEIGHT + STORYBOARD_ROW_HEIGHT / 2 : 92),
+        };
+    }, [getCanvasCenter, nodesRef]);
+    const openStoryboardReferenceAssets = useCallback((scriptNodeId: string, rowId?: string) => {
+        setStoryboardReferenceTarget({ scriptNodeId, rowId });
+        setProjectAssetInitialCategory("all");
+        setProjectAssetInsertPosition(storyboardReferencePosition(scriptNodeId, rowId));
+        setProjectAssetOpen(true);
+    }, [storyboardReferencePosition]);
+    const uploadStoryboardReferenceImage = useCallback((scriptNodeId: string, rowId?: string) => {
+        handleReferenceImageUploadRequest(storyboardReferencePosition(scriptNodeId, rowId), (node) => {
+            setScriptReferences(scriptNodeId, rowId, [node.id], true);
+            setDialogNodeId(null);
+            message.success(rowId ? "参考图已绑定到当前镜头" : "参考图已应用到全部镜头");
+        });
+    }, [handleReferenceImageUploadRequest, message, setDialogNodeId, setScriptReferences, storyboardReferencePosition]);
+    const updateCharacterVersionPolicy = useCallback((nodeId: string, policy: "current" | "pinned") => {
+        setNodes((current) => {
+            const patched = current.map((node) => node.id === nodeId && node.metadata?.workflowKind === "character"
+                ? { ...node, metadata: { ...node.metadata, characterVersionPolicy: policy } }
+                : node);
+            return policy === "current" && linkedProjectQuery.data ? refreshCanvasCharacterReferenceNodes(patched, linkedProjectQuery.data.assets) : patched;
+        });
+        if (policy === "current") void linkedProjectQuery.refetch();
+        message.success(policy === "pinned" ? "已固定角色版本，后续生成不会随角色更新漂移" : "已改为跟随角色当前版本");
+    }, [linkedProjectQuery, message, setNodes]);
 
     const handleRetryNode = useCanvasGenerationRetry({
         projectId,
@@ -1425,6 +1467,7 @@ function InfiniteCanvasPage() {
                     pipeline={pipeline}
                     scale={viewport.k}
                     mentionReferences={mentionReferencesByNodeId.get(contentNode.id) || EMPTY_RESOURCE_REFERENCES}
+                    referenceResources={storyboardReferenceResources}
                     activeConnectionHandleId={connectionTargetNodeId === contentNode.id ? connectionTargetHandleId : undefined}
                     activeConnectionHandleSide={connectionTargetNodeId === contentNode.id ? connectingParams?.handleType === "source" ? "left" : "right" : undefined}
                     connectingHandleType={connectingParams?.handleType}
@@ -1444,6 +1487,9 @@ function InfiniteCanvasPage() {
                     onAddRow={() => addScriptRow(contentNode.id)}
                     onRemoveRow={(rowId) => removeScriptRow(contentNode.id, rowId)}
                     onUpdateRow={(rowId, patch) => updateScriptRow(contentNode.id, rowId, patch)}
+                    onReferenceChange={(rowId, referenceNodeId, enabled) => setScriptReferences(contentNode.id, rowId, [referenceNodeId], enabled)}
+                    onAddReferenceAsset={currentProject?.projectId ? (rowId) => openStoryboardReferenceAssets(contentNode.id, rowId) : undefined}
+                    onUploadReferenceImage={(rowId) => uploadStoryboardReferenceImage(contentNode.id, rowId)}
                     onPromptChange={(composerContent) => handleConfigNodeChange(contentNode.id, { composerContent })}
                     onModelChange={(model) => handleConfigNodeChange(contentNode.id, { model })}
                     onGenerateScript={(prompt) => void generateScriptRows(contentNode.id, prompt)}
@@ -1487,7 +1533,7 @@ function InfiniteCanvasPage() {
                 workspaceMode={workspaceMode}
             />
         );
-    }, [addScriptRow, cancelSubmittedBatchItem, configInputsById, confirmStopGeneration, connectionTargetHandleId, connectionTargetNodeId, connectingParams?.handleType, copyStoryboardVideoPrompts, createAndGenerateScriptVideos, createScriptActionBoards, createScriptImageNodes, createScriptVideoNodes, currentProject?.directorScenes, generateScriptImages, generateScriptRows, generateScriptVideos, handleConfigNodeChange, handleConnectStart, handleGenerateNode, handleNodeResize, mentionReferencesByNodeId, mergeVideosByIds, openDirectorWorkbench, openStoryInput, removeScriptRow, retryFailedBatchItems, runStoryboardNextStage, runningNodeIds, stopRemainingBatchItems, updateScriptRow, viewport.k, workspaceMode]);
+    }, [addScriptRow, cancelSubmittedBatchItem, configInputsById, confirmStopGeneration, connectionTargetHandleId, connectionTargetNodeId, connectingParams?.handleType, copyStoryboardVideoPrompts, createAndGenerateScriptVideos, createScriptActionBoards, createScriptImageNodes, createScriptVideoNodes, currentProject?.directorScenes, currentProject?.projectId, generateScriptImages, generateScriptRows, generateScriptVideos, handleConfigNodeChange, handleConnectStart, handleGenerateNode, handleNodeResize, mentionReferencesByNodeId, mergeVideosByIds, openDirectorWorkbench, openStoryboardReferenceAssets, openStoryInput, removeScriptRow, retryFailedBatchItems, runStoryboardNextStage, runningNodeIds, setScriptReferences, stopRemainingBatchItems, storyboardReferenceResources, updateScriptRow, uploadStoryboardReferenceImage, viewport.k, workspaceMode]);
 
     const handleCanvasNodeHoverStart = useCallback((nodeId: string) => {
         if (nodeDraggingRef.current) return;
@@ -1829,6 +1875,7 @@ function InfiniteCanvasPage() {
                     node={characterReferenceNode}
                     open={Boolean(characterReferenceNode)}
                     onClose={() => setCharacterReferenceNodeId(null)}
+                    onVersionPolicyChange={updateCharacterVersionPolicy}
                 />
 
                 <CanvasTextEditorModal
@@ -1925,7 +1972,19 @@ function InfiniteCanvasPage() {
                     onInsert={handleAssetInsert}
                     onClose={closeAssetPicker}
                 />
-                <CanvasProjectAssetModal open={projectAssetOpen} detail={linkedProjectQuery.data} initialCategory={projectAssetInitialCategory} onClose={closeProjectAssets} onInsert={(payloads) => handleProjectAssetsInsert(payloads, projectAssetInsertPosition)} />
+                <CanvasProjectAssetModal
+                    open={projectAssetOpen}
+                    detail={linkedProjectQuery.data}
+                    initialCategory={projectAssetInitialCategory}
+                    referenceOnly={Boolean(storyboardReferenceTarget)}
+                    onClose={closeProjectAssets}
+                    onInsert={async (payloads) => {
+                        const placed = await handleProjectAssetsInsert(payloads, projectAssetInsertPosition);
+                        if (!storyboardReferenceTarget || !placed?.length) return;
+                        const referenceNodeIds = placed.filter((node) => node.type === CanvasNodeType.Image || (node.metadata?.workflowKind === "character" && node.metadata.characterAssetId)).map((node) => node.id);
+                        setScriptReferences(storyboardReferenceTarget.scriptNodeId, storyboardReferenceTarget.rowId, referenceNodeIds, true);
+                    }}
+                />
                 {codexCompactAgent && !assistantMounted ? <CanvasLocalAgentPanel headless snapshot={agentSnapshot} canUndoOps={canUndoAgentOps} undoOpsCount={agentUndoCount} onApplyOps={applyAgentOps} onUndoOps={undoAgentOps} autoConnect={codexAutoConnect} /> : null}
             </section>
             {assistantMounted ? (

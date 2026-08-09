@@ -279,8 +279,8 @@ export function createProjectCharacter(projectId: string, input: { name: string;
     return request<ProjectCharacterDetail>(api.post(`/projects/${encodeURIComponent(projectId)}/characters`, input));
 }
 
-export function getProjectCharacter(projectId: string, assetId: string) {
-    return request<ProjectCharacterDetail>(api.get(`/projects/${encodeURIComponent(projectId)}/characters/${encodeURIComponent(assetId)}`));
+export function getProjectCharacter(projectId: string, assetId: string, versionId?: string) {
+    return request<ProjectCharacterDetail>(api.get(`/projects/${encodeURIComponent(projectId)}/characters/${encodeURIComponent(assetId)}`, versionId ? { params: { versionId } } : undefined));
 }
 
 export function updateProjectCharacter(projectId: string, assetId: string, input: { name: string; definition: Record<string, unknown> }) {

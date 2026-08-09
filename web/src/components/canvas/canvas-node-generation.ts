@@ -13,7 +13,9 @@ import { projectShotGenerationBlockReason, storyboardRowGenerationContract } fro
 export type CharacterGenerationReference = {
     nodeId: string;
     assetId: string;
+    characterName?: string;
     requestedVersionId?: string;
+    versionPolicy?: "current" | "pinned";
 };
 
 export type ResolvedCharacterVoice = {
@@ -42,6 +44,29 @@ export type NodeGenerationContext = {
     videoCount: number;
     audioCount: number;
 };
+
+export function normalizeNodeGenerationContext(context: NodeGenerationContext): NodeGenerationContext {
+    // TypeScript 类型不能约束旧画布、远端同步或手工导入的运行时数据；这里是所有生成模式的统一可空边界。
+    const referenceImages = Array.isArray(context.referenceImages) ? context.referenceImages : [];
+    const referenceVideos = Array.isArray(context.referenceVideos) ? context.referenceVideos : [];
+    const referenceAudios = Array.isArray(context.referenceAudios) ? context.referenceAudios : [];
+    const characterReferences = Array.isArray(context.characterReferences) ? context.characterReferences : [];
+    const resolvedCharacterVersions = Array.isArray(context.resolvedCharacterVersions) ? context.resolvedCharacterVersions : [];
+    const resolvedCharacterVoices = Array.isArray(context.resolvedCharacterVoices) ? context.resolvedCharacterVoices : [];
+    return {
+        ...context,
+        prompt: typeof context.prompt === "string" ? context.prompt : "",
+        referenceImages,
+        referenceVideos,
+        referenceAudios,
+        characterReferences,
+        resolvedCharacterVersions,
+        resolvedCharacterVoices,
+        imageCount: referenceImages.length,
+        videoCount: referenceVideos.length,
+        audioCount: referenceAudios.length,
+    };
+}
 
 export type NodeGenerationInput = {
     nodeId: string;
@@ -265,7 +290,8 @@ function getConnectedStoryboardRows(nodeId: string, nodes: CanvasNodeData[], con
     return connections.flatMap((connection): NodeGenerationInput[] => {
         if (!targetNodeIds.has(connection.toNodeId) || !connection.fromHandleId?.startsWith("row:")) return [];
         const scriptNode = nodes.find((node) => node.id === connection.fromNodeId && node.type === CanvasNodeType.Script);
-        const row = scriptNode?.metadata?.storyboard?.rows.find((item) => `row:${item.id}` === connection.fromHandleId);
+        const rows = scriptNode?.metadata?.storyboard?.rows;
+        const row = (Array.isArray(rows) ? rows : []).find((item) => `row:${item.id}` === connection.fromHandleId);
         if (!scriptNode || !row) return [];
         const blockReason = projectShotGenerationBlockReason(row);
         // 数据库镜头契约损坏时只能降级展示，禁止旧子节点绕过分镜入口继续创建计费任务。
@@ -299,31 +325,40 @@ function getConnectedStoryboardRows(nodeId: string, nodes: CanvasNodeData[], con
 }
 
 export function buildNodeResponseMessages(context: NodeGenerationContext): AiTextMessage[] {
-    if (!context.referenceImages.length) {
-        return [{ role: "user", content: context.prompt }];
+    const normalizedContext = normalizeNodeGenerationContext(context);
+    if (!normalizedContext.referenceImages.length) {
+        return [{ role: "user", content: normalizedContext.prompt }];
     }
 
     return [
         {
             role: "user",
-            content: [{ type: "text" as const, text: context.prompt }, ...context.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))],
+            content: [{ type: "text" as const, text: normalizedContext.prompt }, ...normalizedContext.referenceImages.map((image) => ({ type: "image_url" as const, image_url: { url: image.dataUrl } }))],
         },
     ];
 }
 
 export async function hydrateNodeGenerationContext(context: NodeGenerationContext, projectId: string, domainProjectId?: string, mode?: CanvasGenerationMode, includeCharacterVoiceSamples = false) {
     const { imageToDataUrl } = await import("@/services/image-storage");
+    const normalizedContext = normalizeNodeGenerationContext(context);
     let referenceImages = await Promise.all(
-        context.referenceImages.map(async (image) => {
+        normalizedContext.referenceImages.map(async (image) => {
             if (image.source?.kind === "drawing") return resolveCanvasDrawingReference(projectId, image);
             return { ...image, dataUrl: await imageToDataUrl(image) };
         }),
     );
-    if (!context.characterReferences.length) return { ...context, referenceImages };
+    if (!normalizedContext.characterReferences.length) return { ...normalizedContext, referenceImages };
+    if (normalizedContext.characterReferences.some((reference) => reference.versionPolicy === "pinned" && !reference.requestedVersionId)) {
+        throw new Error("固定角色版本信息缺失，请打开角色卡切换为跟随当前版本后重新固定");
+    }
     if (!domainProjectId) throw new Error("角色引用未关联制作项目，无法解析角色版本");
     const { getProjectCharacter } = await import("@/services/api/projects");
     const { resourceFileUrl, resourceIdFromStorageKey, resourceStorageKey } = await import("@/services/api/resources");
-    const details = await Promise.all(context.characterReferences.map((reference) => getProjectCharacter(domainProjectId, reference.assetId)));
+    const characterEntries = await Promise.all(normalizedContext.characterReferences.map(async (reference) => ({
+        reference,
+        detail: await getProjectCharacter(domainProjectId, reference.assetId, reference.requestedVersionId),
+    })));
+    const details = characterEntries.map((entry) => entry.detail);
     const remainingBudget = 9 - referenceImages.length;
     const selected = details.flatMap((detail) => {
         const representation = preferredCharacterRepresentation(detail.character.representations);
@@ -345,9 +380,9 @@ export async function hydrateNodeGenerationContext(context: NodeGenerationContex
     } satisfies ReferenceImage));
     const hydratedCharacterImages = await Promise.all(characterImages.map(async (image) => ({ ...image, dataUrl: await imageToDataUrl(image) })));
     referenceImages = [...referenceImages, ...hydratedCharacterImages];
-    const characterBlocks = details.map((detail) => compileCharacterReferencePrompt(detail.asset.title, detail.character.definition));
-    const resolvedCharacterVersions = details.map((detail) => ({ assetId: detail.asset.id, versionId: detail.character.versionId }));
-    const resolvedCharacterVoices = details.flatMap((detail): ResolvedCharacterVoice[] => {
+    const characterBlocks = characterEntries.map(({ detail, reference }) => compileCharacterReferencePrompt(reference.characterName || detail.asset.title, detail.character.definition));
+    const resolvedCharacterVersions = characterEntries.map(({ detail }) => ({ assetId: detail.asset.id, versionId: detail.character.versionId }));
+    const resolvedCharacterVoices = characterEntries.flatMap(({ detail, reference }): ResolvedCharacterVoice[] => {
         const voice = detail.character.voice;
         if (!voice) return [];
         const language = stringField(detail.character.definition.voiceLanguage) || stringField(voice.profile.language);
@@ -358,7 +393,7 @@ export async function hydrateNodeGenerationContext(context: NodeGenerationContex
         return [{
             assetId: detail.asset.id,
             versionId: detail.character.versionId,
-            characterName: detail.asset.title,
+            characterName: reference.characterName || detail.asset.title,
             voiceKey: stringField(voice.profile.voiceKey),
             sampleResourceId: sampleResourceId || undefined,
             language: language || undefined,
@@ -368,7 +403,7 @@ export async function hydrateNodeGenerationContext(context: NodeGenerationContex
             instructions: [language && `语言与口音：${language}`, voiceAge && `声音年龄感：${voiceAge}`, timbre && `音色气质：${timbre}`, deliveryInstructions].filter(Boolean).join("；"),
         }];
     });
-    const usedAudioResourceIds = new Set(context.referenceAudios.map((audio) => resourceIdFromStorageKey(audio.storageKey)).filter(Boolean));
+    const usedAudioResourceIds = new Set(normalizedContext.referenceAudios.map((audio) => resourceIdFromStorageKey(audio.storageKey)).filter(Boolean));
     const voiceSamples: ResolvedCharacterVoice[] = [];
     // 视频模型接收声音样本；独立配音任务仍通过 voiceKey 选音色，不能把两种协议混用。
     if (mode === "video" && includeCharacterVoiceSamples) {
@@ -378,7 +413,7 @@ export async function hydrateNodeGenerationContext(context: NodeGenerationContex
             voiceSamples.push(voice);
         });
     }
-    if (context.referenceAudios.length + voiceSamples.length > 3) throw new Error(`当前模型参考音频容量不足：已连接 ${context.referenceAudios.length} 个音频，角色声音样本还需要 ${voiceSamples.length} 个名额`);
+    if (normalizedContext.referenceAudios.length + voiceSamples.length > 3) throw new Error(`当前模型参考音频容量不足：已连接 ${normalizedContext.referenceAudios.length} 个音频，角色声音样本还需要 ${voiceSamples.length} 个名额`);
     const characterVoiceAudios = voiceSamples.map((voice) => ({
         id: `character-voice-${voice.assetId}`,
         name: `${voice.characterName}-声音样本.mp3`,
@@ -386,11 +421,11 @@ export async function hydrateNodeGenerationContext(context: NodeGenerationContex
         url: resourceFileUrl(voice.sampleResourceId!),
         storageKey: resourceStorageKey(voice.sampleResourceId!),
     } satisfies ReferenceAudio));
-    const referenceAudios = [...context.referenceAudios, ...characterVoiceAudios];
+    const referenceAudios = [...normalizedContext.referenceAudios, ...characterVoiceAudios];
     const voiceBlocks = mode === "video" ? resolvedCharacterVoices.map(compileResolvedVoicePrompt) : [];
     return {
-        ...context,
-        prompt: [context.prompt.trim(), ...characterBlocks, ...voiceBlocks].filter(Boolean).join("\n\n"),
+        ...normalizedContext,
+        prompt: [normalizedContext.prompt.trim(), ...characterBlocks, ...voiceBlocks].filter(Boolean).join("\n\n"),
         referenceImages,
         referenceAudios,
         resolvedCharacterVersions,
@@ -407,7 +442,8 @@ function readNodeTextInput(node: CanvasNodeData) {
 
 function readCharacterReference(node: CanvasNodeData): CharacterGenerationReference | null {
     const assetId = node.metadata?.workflowKind === "character" ? node.metadata.characterAssetId?.trim() : "";
-    return assetId ? { nodeId: node.id, assetId, requestedVersionId: node.metadata?.characterVersionPolicy === "pinned" ? node.metadata.characterVersionId : undefined } : null;
+    const versionPolicy = node.metadata?.characterVersionPolicy === "pinned" ? "pinned" : "current";
+    return assetId ? { nodeId: node.id, assetId, characterName: node.metadata?.characterName || node.title, versionPolicy, requestedVersionId: versionPolicy === "pinned" ? node.metadata?.characterVersionId : undefined } : null;
 }
 
 function preferredCharacterRepresentation(representations: Array<{ id: string; resourceId: string; role: string }>) {

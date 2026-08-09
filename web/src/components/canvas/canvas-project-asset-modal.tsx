@@ -12,7 +12,7 @@ import { useAssetStore, type Asset } from "@/stores/use-asset-store";
 const categoryLabels: Record<string, string> = { all: "全部资产", character: "角色", product: "商品", brand: "品牌", rights: "授权文件", environment: "场景", wardrobe: "服饰", prop: "道具", weapon: "武器", style: "画风", other: "其他" };
 type ProjectPickerItem = { id: string; category: string; character?: ProjectAsset; media?: Asset };
 
-export function CanvasProjectAssetModal({ open, detail, initialCategory = "all", onClose, onInsert }: { open: boolean; detail?: ProjectDetail; initialCategory?: string; onClose: () => void; onInsert: (payloads: InsertAssetPayload[]) => Promise<void> | void }) {
+export function CanvasProjectAssetModal({ open, detail, initialCategory = "all", referenceOnly = false, onClose, onInsert }: { open: boolean; detail?: ProjectDetail; initialCategory?: string; referenceOnly?: boolean; onClose: () => void; onInsert: (payloads: InsertAssetPayload[]) => Promise<void> | void }) {
     const mediaAssets = useAssetStore((state) => state.assets);
     const [category, setCategory] = useState("all");
     const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set());
@@ -23,8 +23,8 @@ export function CanvasProjectAssetModal({ open, detail, initialCategory = "all",
             if (asset.category === "character" && asset.character) return [{ id: asset.id, category: "character", character: asset }];
             const media = mediaById.get(asset.id);
             return media && media.kind !== "model" && media.kind !== "entity" ? [{ id: asset.id, category: asset.category || media.category || "other", media }] : [];
-        });
-    }, [detail?.assets, mediaAssets]);
+        }).filter((item) => !referenceOnly || Boolean(item.character || item.media?.kind === "image"));
+    }, [detail?.assets, mediaAssets, referenceOnly]);
     const categories = useMemo(() => ["all", ...Array.from(new Set(items.map((item) => item.category)))], [items]);
     const visible = category === "all" ? items : items.filter((item) => item.category === category);
 
@@ -43,12 +43,12 @@ export function CanvasProjectAssetModal({ open, detail, initialCategory = "all",
 
     return <Modal open={open} title={null} footer={null} destroyOnHidden onCancel={onClose} width="min(920px, calc(100vw - 24px))" styles={{ container: { padding: 0, overflow: "hidden" }, body: { padding: 0 } }}>
         <div className="flex h-[min(620px,calc(100vh-80px))] min-h-[440px] flex-col overflow-hidden">
-            <header className="flex h-12 shrink-0 items-center justify-between border-b border-border py-0 pl-4 pr-12"><h2 className="text-sm font-semibold">引用项目角色与资产</h2><span className="text-[11px] text-foreground/42">已选 {selectedIds.size} 项</span></header>
+            <header className="flex h-12 shrink-0 items-center justify-between border-b border-border py-0 pl-4 pr-12"><h2 className="text-sm font-semibold">{referenceOnly ? "选择角色与参考图" : "引用项目角色与资产"}</h2><span className="text-[11px] text-foreground/42">已选 {selectedIds.size} 项</span></header>
             <div className="grid min-h-0 flex-1 grid-rows-[auto_minmax(0,1fr)] sm:grid-cols-[150px_minmax(0,1fr)] sm:grid-rows-1">
                 <nav className="thin-scrollbar flex min-w-0 gap-1 overflow-x-auto border-b border-border p-2 sm:block sm:overflow-y-auto sm:border-b-0 sm:border-r" aria-label="项目资产分类">{categories.map((item) => <button key={item} type="button" onClick={() => setCategory(item)} className={`flex h-11 min-w-[104px] shrink-0 items-center justify-between rounded-md px-2 text-xs sm:w-full sm:min-w-0 ${category === item ? "bg-foreground/[.08] font-medium" : "text-foreground/55 hover:bg-foreground/[.04]"}`}><span>{categoryLabels[item] || "其他"}</span><span className="min-w-5 rounded bg-foreground/[.05] px-1 text-center text-[10px] tabular-nums">{item === "all" ? items.length : items.filter((asset) => asset.category === item).length}</span></button>)}</nav>
-                <div className="thin-scrollbar min-h-0 overflow-y-auto p-3">{visible.length ? <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">{visible.map((item) => <ProjectAssetCard key={item.id} item={item} selected={selectedIds.has(item.id)} onToggle={() => toggle(item.id)} />)}</div> : <WorkspaceState icon="assets" compact className="h-full" title="此分类没有可引用资产" description="先在项目角色与资产中完成角色确认或素材关联。" />}</div>
+                <div className="thin-scrollbar min-h-0 overflow-y-auto p-3">{visible.length ? <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 lg:grid-cols-4">{visible.map((item) => <ProjectAssetCard key={item.id} item={item} selected={selectedIds.has(item.id)} onToggle={() => toggle(item.id)} />)}</div> : <WorkspaceState icon="assets" compact className="h-full" title={referenceOnly ? "此分类没有角色或图片" : "此分类没有可引用资产"} description="先在项目角色与资产中完成角色确认或素材关联。" />}</div>
             </div>
-            <footer className="flex h-12 shrink-0 items-center justify-between border-t border-border px-3"><span className="text-[10px] text-foreground/42">角色引用会在生成时解析当前角色版本</span><div className="flex gap-2"><Button size="small" onClick={onClose}>取消</Button><Button size="small" type="primary" disabled={!selectedIds.size} loading={inserting} onClick={() => void insert()}>引入 {selectedIds.size || ""} 项</Button></div></footer>
+            <footer className="flex h-12 shrink-0 items-center justify-between border-t border-border px-3"><span className="text-[10px] text-foreground/42">{referenceOnly ? "引入后会自动绑定到当前分镜范围" : "角色引用会在生成时解析当前角色版本"}</span><div className="flex gap-2"><Button size="small" onClick={onClose}>取消</Button><Button size="small" type="primary" disabled={!selectedIds.size} loading={inserting} onClick={() => void insert()}>引入 {selectedIds.size || ""} 项</Button></div></footer>
         </div>
     </Modal>;
 }

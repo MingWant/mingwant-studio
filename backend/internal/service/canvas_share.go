@@ -44,6 +44,7 @@ var publicCanvasMetadataKeys = map[string]bool{
 	"imageBatchExpanded": true, "mimeType": true, "bytes": true, "durationMs": true, "assetTags": true,
 	"workflowKind": true, "workflowTitle": true, "workflowDescription": true, "shotIndex": true,
 	"sceneId": true, "characterIds": true, "referenceSetId": true, "referenceAssetNodeIds": true,
+	"referenceCount": true, "characterReferenceCount": true,
 	"characterName": true, "characterPrompt": true, "characterAliases": true, "characterView": true, "characterViewNodeIds": true,
 	"videoEditOperation": true, "videoCameraMoveId": true, "videoCameraMovePrompt": true,
 	"videoStartFrameNodeId": true, "videoEndFrameNodeId": true, "versionOfNodeId": true,

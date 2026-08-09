@@ -61,7 +61,7 @@ export function useCanvasUpload({
     const { message } = App.useApp();
     const queryClient = useQueryClient();
     const imageInputRef = useRef<HTMLInputElement>(null);
-    const uploadTargetRef = useRef<{ nodeId?: string; position?: Position } | null>(null);
+    const uploadTargetRef = useRef<{ nodeId?: string; position?: Position; imageOnly?: boolean; onCreated?: (node: CanvasNodeData) => void } | null>(null);
     const assetInsertPositionRef = useRef<Position | null>(null);
     const uploadStatusIdRef = useRef(0);
     const statusTimersRef = useRef<Set<number>>(new Set());
@@ -139,12 +139,12 @@ export function useCanvasUpload({
             if (domainProjectId) progress.update("写入项目资产", 4);
             const persisted = await persistMediaNode(node);
             progress.done(persisted ? "图片已添加到画布" : "图片已添加，项目资产待重试");
-            return true;
+            return node;
         } catch (error) {
             const details = error instanceof Error ? error.message : "图片上传失败";
             progress.fail(details);
             message.error(details);
-            return false;
+            return undefined;
         }
     }, [domainProjectId, message, nodesRef, persistMediaNode, selectInsertedNode, setNodes, startUploadStatus]);
 
@@ -297,6 +297,14 @@ export function useCanvasUpload({
         imageInputRef.current?.click();
     }, [nodesRef]);
 
+    const handleReferenceImageUploadRequest = useCallback((position: Position | undefined, onCreated: (node: CanvasNodeData) => void) => {
+        uploadTargetRef.current = { position, imageOnly: true, onCreated };
+        if (imageInputRef.current) {
+            imageInputRef.current.accept = "image/*";
+            imageInputRef.current.click();
+        }
+    }, []);
+
     const replaceNodeMedia = useCallback(async (nodeId: string, file: File) => {
         const currentNode = nodesRef.current.find((node) => node.id === nodeId);
         if (!currentNode) return false;
@@ -448,6 +456,10 @@ export function useCanvasUpload({
         const target = uploadTargetRef.current;
         try {
             if (!file || (!file.type.startsWith("image/") && !file.type.startsWith("video/") && !isAudioFile(file))) return;
+            if (target?.imageOnly && !file.type.startsWith("image/")) {
+                message.warning("参考素材请选择图片文件");
+                return;
+            }
             if (target?.nodeId) {
                 const targetNode = nodesRef.current.find((node) => node.id === target.nodeId);
                 const compatible = !targetNode
@@ -464,7 +476,8 @@ export function useCanvasUpload({
             }
             const position = target?.position || getCanvasCenter();
             const avoidOverlap = !target?.position;
-            await (isAudioFile(file) ? createAudioFileNode(file, position, avoidOverlap) : file.type.startsWith("video/") ? createVideoFileNode(file, position, avoidOverlap) : createImageFileNode(file, position, avoidOverlap));
+            const created = await (isAudioFile(file) ? createAudioFileNode(file, position, avoidOverlap) : file.type.startsWith("video/") ? createVideoFileNode(file, position, avoidOverlap) : createImageFileNode(file, position, avoidOverlap));
+            if (created && typeof created === "object") target?.onCreated?.(created);
         } finally {
             uploadTargetRef.current = null;
             event.target.value = "";
@@ -628,6 +641,7 @@ export function useCanvasUpload({
             setSelectedConnectionId(null);
             setDialogNodeId(null);
             message.success(`已引入 ${created.length} 项项目资产`);
+            return placed;
         } catch (error) {
             message.error(error instanceof Error ? error.message : "项目资产引入失败");
             throw error;
@@ -646,6 +660,7 @@ export function useCanvasUpload({
         handleFileDragOver,
         handleImageInputChange,
         handleProjectAssetsInsert,
+        handleReferenceImageUploadRequest,
         handleProjectChapterInsert,
         handleUploadRequest,
         imageInputRef,

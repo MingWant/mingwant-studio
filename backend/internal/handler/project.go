@@ -284,7 +284,7 @@ func RegisterProjectRoutes(r *gin.RouterGroup, svc *service.Service) {
 			failService(c, err)
 			return
 		}
-		character, err := svc.ProjectCharacter(user.ID, c.Param("id"), c.Param("assetId"))
+		character, err := svc.ProjectCharacterVersion(user.ID, c.Param("id"), c.Param("assetId"), c.Query("versionId"))
 		if err != nil {
 			failService(c, err)
 			return

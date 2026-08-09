@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ReactNode } from "react";
-import { BookOpenCheck, ChevronRight, Clock3, FileText, Image as ImageIcon, LoaderCircle, Lock, Maximize2, Music2, Pencil, Play, RefreshCw, Replace, Square, Star, Video } from "lucide-react";
+import { BookOpenCheck, ChevronRight, Clock3, FileText, Image as ImageIcon, Images, LoaderCircle, Lock, Maximize2, Music2, Pencil, Play, RefreshCw, Replace, Square, Star, Video } from "lucide-react";
 
 import { canvasThemes } from "@/lib/canvas-theme";
 import { resourceStorageLabel, resourceStorageLocation, resourceStorageTitle } from "@/lib/canvas/resource-storage-status";
@@ -1016,10 +1016,12 @@ function ImageContent({
     const imageContainerRef = useRef<HTMLDivElement>(null);
     const nearViewport = useNearViewport(imageContainerRef);
     const { url, loading } = useNodeResourceUrl(node, nearViewport);
+    const referenceCount = node.metadata?.referenceCount ?? node.metadata?.references?.length ?? (node.metadata?.generationType === "edit" ? 1 : 0);
+    const characterReferenceCount = node.metadata?.characterReferenceCount || 0;
 
     return (
         <BatchFrame batchCount={isBatchRoot ? batchCount : 0} batchExpanded={batchExpanded} batchOpening={batchOpening} batchRecovering={batchRecovering} theme={theme} onToggleBatch={onToggleBatch}>
-            <div ref={imageContainerRef} className="h-full w-full overflow-hidden rounded-[18px]">
+            <div ref={imageContainerRef} className="relative h-full w-full overflow-hidden rounded-[18px]">
                 {url ? (
                     <img
                         src={url}
@@ -1031,6 +1033,7 @@ function ImageContent({
                         className={`pointer-events-none block h-full w-full select-none ${node.metadata?.freeResize ? "object-fill" : "object-contain"}`}
                     />
                 ) : <div className="grid size-full place-items-center" style={{ color: theme.node.muted }}>{loading ? <LoaderCircle className="size-5 animate-spin" /> : <ImageIcon className="size-5 opacity-45" />}</div>}
+                {referenceCount > 0 ? <span className="pointer-events-none absolute left-2 top-2 inline-flex h-6 items-center gap-1 rounded-md border border-white/15 bg-black/60 px-1.5 text-[9px] font-medium text-white shadow-sm backdrop-blur" title={`使用 ${referenceCount} 张参考图${characterReferenceCount ? `，其中 ${characterReferenceCount} 个角色版本已记录` : ""}`}><Images className="size-3" />参考 {referenceCount}{characterReferenceCount ? ` · 角色 ${characterReferenceCount}` : ""}</span> : null}
             </div>
         </BatchFrame>
     );

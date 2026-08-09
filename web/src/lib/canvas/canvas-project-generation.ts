@@ -44,9 +44,14 @@ export async function runBackendCanvasGenerationTask({
     metadata?: Record<string, unknown>;
     onTaskCreated?: (task: GenerationTask) => void;
 }) {
-    const taskReferenceImages = await Promise.all(referenceImages.map(prepareBackendImageReference));
-    const taskReferenceVideos = await Promise.all(referenceVideos.map((video) => mediaToBackendReference(video)));
-    const taskReferenceAudios = await Promise.all(referenceAudios.map((audio) => mediaToBackendReference(audio)));
+    // 画布旧缓存和外部导入数据可能显式保存 null；任务创建边界统一收敛为空数组，
+    // 避免在供应商尚未调用时抛出没有业务含义的 null.length / null.map。
+    const safeReferenceImages = Array.isArray(referenceImages) ? referenceImages : [];
+    const safeReferenceVideos = Array.isArray(referenceVideos) ? referenceVideos : [];
+    const safeReferenceAudios = Array.isArray(referenceAudios) ? referenceAudios : [];
+    const taskReferenceImages = await Promise.all(safeReferenceImages.map(prepareBackendImageReference));
+    const taskReferenceVideos = await Promise.all(safeReferenceVideos.map((video) => mediaToBackendReference(video)));
+    const taskReferenceAudios = await Promise.all(safeReferenceAudios.map((audio) => mediaToBackendReference(audio)));
     const taskMask = mask ? await prepareBackendImageReference(mask) : undefined;
     const task = await createGenerationTask({
         projectId,
@@ -202,6 +207,7 @@ export function buildImageGenerationMetadata(type: CanvasImageGenerationType, co
         transparentBackground: config.transparentBackground,
         count,
         references: references.map(referenceUrl).filter((url): url is string => Boolean(url)),
+        referenceCount: references.length,
     };
 }
 
@@ -361,27 +367,38 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
     const model = normalizeModelOptionValue(selectedModel, config.channels) || selectedModel;
     const modelConfig = { ...config, model };
     const requestConfig = resolveModelRequestConfig(modelConfig, model);
-    const requestChannel = modelConfig.channels.find((channel) => channel.id === requestConfig.resolvedChannelId);
-    const modelCost = requestChannel?.modelCosts?.find((item) => item.model === requestConfig.model);
-    const capability = videoCapabilityFromConfig(modelCost?.capabilityConfig, requestConfig.interfaceType);
-    const rawVideoSize = node?.metadata?.size || config.size || defaultConfig.size;
-    const requestedRatio = ratioFromSize(rawVideoSize, capability.ratios) || normalizeCapabilityRatio(capability.defaultRatio);
-    const videoSize = isSeedanceVideoConfig(modelConfig) ? requestedRatio : sizeForCapabilityRatio(requestedRatio);
-    const rawVideoResolution = node?.metadata?.vquality || config.vquality || defaultConfig.vquality;
-    const normalizedResolution = normalizeCapabilityResolution(rawVideoResolution);
-    const supportedResolutions = capability.resolutions.map(normalizeCapabilityResolution);
-    const videoResolution = supportedResolutions.includes(normalizedResolution) ? normalizedResolution.replace(/p$/, "") : normalizeCapabilityResolution(capability.defaultResolution).replace(/p$/i, "");
-    const videoDuration = normalizeCapabilityDuration(node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds, capability);
+    const rawSize = node?.metadata?.size || config.size || defaultConfig.size;
+    let size = rawSize;
+    let videoSeconds = normalizeVideoDuration(node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds);
+    let videoResolution = normalizeVideoResolution(node?.metadata?.vquality || config.vquality || defaultConfig.vquality);
+    let videoGenerateAudio = node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio;
+    let videoWatermark = node?.metadata?.watermark || config.videoWatermark || defaultConfig.videoWatermark;
+
+    // 图片、文本和音频任务不依赖视频能力 JSON。旧渠道若把视频列表保存为 null，
+    // 不应阻断图片任务，更不能在任务创建前泄漏原始 JavaScript 异常。
+    if (mode === "video") {
+        const requestChannel = modelConfig.channels.find((channel) => channel.id === requestConfig.resolvedChannelId);
+        const modelCost = requestChannel?.modelCosts?.find((item) => item.model === requestConfig.model);
+        const capability = videoCapabilityFromConfig(modelCost?.capabilityConfig, requestConfig.interfaceType);
+        const requestedRatio = ratioFromSize(rawSize, capability.ratios) || normalizeCapabilityRatio(capability.defaultRatio);
+        size = isSeedanceVideoConfig(modelConfig) ? requestedRatio : sizeForCapabilityRatio(requestedRatio);
+        const normalizedResolution = normalizeCapabilityResolution(node?.metadata?.vquality || config.vquality || defaultConfig.vquality);
+        const supportedResolutions = capability.resolutions.map(normalizeCapabilityResolution);
+        videoResolution = supportedResolutions.includes(normalizedResolution) ? normalizedResolution.replace(/p$/, "") : normalizeCapabilityResolution(capability.defaultResolution).replace(/p$/i, "");
+        videoSeconds = String(normalizeCapabilityDuration(node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds, capability));
+        if (!capability.generateAudio.supported) videoGenerateAudio = "false";
+        if (!capability.watermark.supported) videoWatermark = "false";
+    }
     return {
         ...modelConfig,
         model,
         quality: node?.metadata?.quality || config.quality || defaultConfig.quality,
-        size: mode === "video" ? videoSize : rawVideoSize,
+        size,
         transparentBackground: (node?.metadata?.transparentBackground || config.transparentBackground) === "true" ? "true" : "false",
-        videoSeconds: mode === "video" ? String(videoDuration) : normalizeVideoDuration(node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds),
-        vquality: mode === "video" ? videoResolution : normalizeVideoResolution(node?.metadata?.vquality || config.vquality || defaultConfig.vquality),
-        videoGenerateAudio: mode === "video" && !capability.generateAudio.supported ? "false" : node?.metadata?.generateAudio || config.videoGenerateAudio || defaultConfig.videoGenerateAudio,
-        videoWatermark: mode === "video" && !capability.watermark.supported ? "false" : node?.metadata?.watermark || config.videoWatermark || defaultConfig.videoWatermark,
+        videoSeconds,
+        vquality: videoResolution,
+        videoGenerateAudio,
+        videoWatermark,
         audioVoice: node?.metadata?.audioVoice || config.audioVoice || defaultConfig.audioVoice,
         audioFormat: node?.metadata?.audioFormat || config.audioFormat || defaultConfig.audioFormat,
         audioSpeed: node?.metadata?.audioSpeed || config.audioSpeed || defaultConfig.audioSpeed,

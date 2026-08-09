@@ -174,6 +174,7 @@ func storyboardCinematicQualityContract(shotDuration int, shotCount int) string 
 - timeBeats 覆盖完整 durationSeconds，并明确开始、变化与结束落点；使用精确时间段时，各段总和必须等于镜头时长。
 - styleGuide、visualPrompt 和 videoPrompt 禁止写入 2.39:1、16:9 等具体画幅比例，也不要讨论画幅配置。
 - negativePrompt 只写本镜真实存在的风险；没有具体风险时返回空字符串，不复制通用禁词清单。
+- 所有可见文本只使用正常文字和标点，不要添加 emoji、图标或装饰符号，避免兼容网关错误解码后污染分镜内容。
 - assetTags 只能引用输入中存在的画布资产标签；业务项目中的精确资产版本仍由项目镜头绑定负责。
 - 未指定镜头数量时优先生成 3 个镜头，剧情确有必要时最多 5 个；每个字段使用能执行的短句，避免重复解释和长篇 prose，确保结果能在输出上限内完整收束。
 - 为了兼容慢推理模型和五分钟级上游网关，默认严格生成 3 个镜头；只有用户明确指定镜头数量时才改变数量。每个镜头的 description、purpose、informationChange、camera、motion、timeBeats 控制在短句范围内，visualPrompt 和 videoPrompt 各不超过约 160 个中文字符；不要在每个镜头重复 styleGuide、角色设定或制作说明。
@@ -208,6 +209,7 @@ func buildManualStoryboardPlannerPrompt(brief string, requirements string, shotD
 - %s
 - 每个镜头都要有可见的画面描述、图片生成提示词和视频动作提示词；没有台词时写“无”。
 - 提示词使用短句，保持人物、场景、道具和光线连续，不要重复整段风格说明。
+- 不要添加 emoji、图标或装饰符号，只使用正常文字和标点。
 - 不要解释过程，不要写 Markdown 表格；按下面的标签格式逐镜输出纯文本即可：
 
 镜头 1：

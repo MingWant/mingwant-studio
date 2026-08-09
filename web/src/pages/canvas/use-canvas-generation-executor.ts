@@ -89,7 +89,15 @@ export function useCanvasGenerationExecutor({
                 reportPreflightFailure(errorDetails);
                 return;
             }
-            let generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, mode);
+            let generationConfig: ReturnType<typeof buildGenerationConfig>;
+            try {
+                generationConfig = buildGenerationConfig(effectiveConfig, sourceNode, mode);
+            } catch {
+                const errorDetails = "生成模型参数异常，请重新选择模型后再试";
+                reportPreflightFailure(errorDetails);
+                message.error(errorDetails);
+                return;
+            }
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
                 reportPreflightFailure("生成模型配置已变化，请重新确认模型后再提交");
                 navigateToSettings({ continueCreation: true });

@@ -204,10 +204,22 @@ export function useCanvasGenerationBatches({ projectId, projectLoaded, nodes, no
                 }
             }
 
+            let reportedConfigError = false;
             for (const { batch, item, node, generationMode } of candidates) {
                 const key = batchItemKey(batch.id, item.id);
                 if (controllersRef.current.has(key)) continue;
-                const generationConfig = buildGenerationConfig(effectiveConfig, node, generationMode);
+                let generationConfig: ReturnType<typeof buildGenerationConfig>;
+                try {
+                    generationConfig = buildGenerationConfig(effectiveConfig, node, generationMode);
+                } catch {
+                    const errorDetails = "生成模型参数异常，请重新选择模型后再试";
+                    updateBatch(batch.sourceNodeId, batch.id, (current) => withUpdatedItem(current, item.id, { status: "failed", errorDetails, costUncertain: false }));
+                    if (!reportedConfigError) {
+                        reportedConfigError = true;
+                        message.error(errorDetails);
+                    }
+                    continue;
+                }
                 if (!isAiConfigReady(generationConfig, generationConfig.model)) {
                     updateBatch(batch.sourceNodeId, batch.id, (current) => withUpdatedItem(current, item.id, { status: "failed", errorDetails: "生成模型未配置，请完成配置后重试" }));
                     continue;
@@ -241,7 +253,7 @@ export function useCanvasGenerationBatches({ projectId, projectLoaded, nodes, no
         } finally {
             schedulingRef.current = false;
         }
-    }, [activeTaskLimit, effectiveConfig, handleGenerateNode, isAiConfigReady, nodesRef, projectId, projectLoaded, reconcileBatches, updateBatch]);
+    }, [activeTaskLimit, effectiveConfig, handleGenerateNode, isAiConfigReady, message, nodesRef, projectId, projectLoaded, reconcileBatches, updateBatch]);
 
     const retryFailedBatchItems = useCallback(async (sourceNodeId: string, batchId: string, itemId?: string) => {
         const batch = findBatch(nodesRef.current, sourceNodeId, batchId);

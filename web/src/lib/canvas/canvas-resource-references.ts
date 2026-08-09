@@ -17,6 +17,7 @@ export type CanvasResourceReference = {
     active: boolean;
     sourceType?: CanvasNodeType;
     skill?: UpdreamSkill;
+    characterVersionPolicy?: "current" | "pinned";
 };
 
 export function canvasResourceMentionToken(reference: CanvasResourceReference) {
@@ -85,6 +86,7 @@ function labelResourceNodes(nodes: CanvasNodeData[], active: boolean) {
                 text: node.metadata?.workflowKind === "character" ? node.metadata.characterPrompt : node.type === CanvasNodeType.Text ? node.metadata?.content || node.metadata?.prompt : node.type === CanvasNodeType.Skill ? skillResourceText(node) : undefined,
                 active,
                 sourceType: node.type,
+                characterVersionPolicy: node.metadata?.workflowKind === "character" ? node.metadata.characterVersionPolicy : undefined,
             },
         ];
     });

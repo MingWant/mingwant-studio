@@ -5,7 +5,7 @@ import { nanoid } from "nanoid";
 
 import { appendCanvasNodesWithFrameExpansion, expandCanvasFramesToFit, FRAME_HEADER_HEIGHT, getFrameChildIds, getFrameChildren, isFrameNode } from "@/lib/canvas/canvas-frame";
 import { alignCanvasNodes, layoutCanvasFlow, layoutCanvasNodes, nextCanvasVersionLabel, placeCanvasNodeGroup, placeCanvasNodeInContext, type CanvasAlignmentMode } from "@/lib/canvas/canvas-layout";
-import { createCanvasNode, removeCanvasNodes } from "@/lib/canvas/canvas-project-domain";
+import { createCanvasNode, removeCanvasNodes, removeStoryboardReferenceConnection } from "@/lib/canvas/canvas-project-domain";
 import { getGenerationCount } from "@/lib/canvas/canvas-project-generation";
 import { isolateCopiedNodeMetadata } from "@/lib/canvas/canvas-node-copy";
 import { useEffectiveConfig } from "@/stores/use-config-store";
@@ -269,10 +269,12 @@ export function useCanvasNodeOperations({
     }, [commitConnections, commitNodes, connectionsRef, nodesRef, onNodesDeleted, selectNodes]);
 
     const deleteConnection = useCallback((connectionId: string) => {
-        commitConnections(connectionsRef.current.filter((connection) => connection.id !== connectionId));
+        const result = removeStoryboardReferenceConnection(nodesRef.current, connectionsRef.current, connectionId);
+        if (result.nodes !== nodesRef.current) commitNodes(result.nodes);
+        commitConnections(result.connections);
         setSelectedConnectionId((current) => current === connectionId ? null : current);
         setContextMenu((current) => current?.type === "connection" && current.connectionId === connectionId ? null : current);
-    }, [commitConnections, connectionsRef, setContextMenu, setSelectedConnectionId]);
+    }, [commitConnections, commitNodes, connectionsRef, nodesRef, setContextMenu, setSelectedConnectionId]);
 
     const duplicateNode = useCallback((nodeId: string) => {
         const source = nodesRef.current.find((node) => node.id === nodeId);

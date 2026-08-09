@@ -101,11 +101,11 @@ export function useCanvasStoryboard({
     const effectiveConfig = useEffectiveConfig();
     const isAiConfigReady = useConfigStore((state) => state.isAiConfigReady);
 
-    const confirmGenerationSubmission = useCallback((count: number, model: string, taskLabel: string) => new Promise<boolean>((resolve) => {
+    const confirmGenerationSubmission = useCallback((count: number, model: string, taskLabel: string, referenceNotice = "") => new Promise<boolean>((resolve) => {
         if (!count) return resolve(false);
         modal.confirm({
             title: `确认提交 ${count} 个${taskLabel}任务`,
-            content: `任务数：${count}；模型：${modelOptionName(model) || model}。确认后将提交 ${count} 个外部模型任务，请先核对供应商额度和费用。`,
+            content: `任务数：${count}；模型：${modelOptionName(model) || model}。${referenceNotice}确认后将提交 ${count} 个外部模型任务，请先核对供应商额度和费用。`,
             okText: "确认生成",
             cancelText: "取消",
             centered: true,
@@ -186,6 +186,109 @@ export function useCanvasStoryboard({
     const updateScriptRow = useCallback((nodeId: string, rowId: string, patch: Partial<StoryboardRow>) => {
         updateScriptRows(nodeId, (rows) => rows.map((row) => row.id === rowId ? { ...row, ...patch } : row));
     }, [updateScriptRows]);
+
+    const setScriptReferences = useCallback((nodeId: string, rowId: string | undefined, referenceNodeIds: string[], enabled: boolean) => {
+        const requestedIds = Array.from(new Set(referenceNodeIds.filter((id) => id && id !== nodeId)));
+        const scriptNode = nodesRef.current.find((node) => node.id === nodeId && node.type === CanvasNodeType.Script);
+        const storyboard = scriptNode?.metadata?.storyboard;
+        const storyboardRows = Array.isArray(storyboard?.rows) ? storyboard.rows : [];
+        if (!scriptNode || !storyboard || !requestedIds.length || (rowId && !storyboardRows.some((row) => row.id === rowId))) return;
+
+        let ids = requestedIds;
+        if (enabled) {
+            const nodeById = new Map(nodesRef.current.map((node) => [node.id, node]));
+            const requestedIdSet = new Set(requestedIds);
+            const visualIds = (values?: string[] | null) => (Array.isArray(values) ? values : []).filter((id) => requestedIdSet.has(id) || isStoryboardVisualReferenceNode(nodeById.get(id)));
+            const currentGlobalIds = visualIds(storyboard.referenceNodeIds);
+            const acceptedIds: string[] = [];
+            requestedIds.forEach((id) => {
+                if (rowId) {
+                    const row = storyboardRows.find((item) => item.id === rowId);
+                    const effective = new Set([...currentGlobalIds, ...visualIds(row?.referenceNodeIds), ...acceptedIds]);
+                    if (effective.has(id) || effective.size < 9) acceptedIds.push(id);
+                    return;
+                }
+                const nextGlobalIds = new Set([...currentGlobalIds, ...acceptedIds, id]);
+                const exceedsCapacity = storyboardRows.length
+                    ? storyboardRows.some((row) => new Set([...nextGlobalIds, ...visualIds(row.referenceNodeIds)]).size > 9)
+                    : nextGlobalIds.size > 9;
+                if (!exceedsCapacity) acceptedIds.push(id);
+            });
+            ids = acceptedIds;
+            if (ids.length < requestedIds.length) message.warning(ids.length
+                ? `每个镜头最多使用 9 项角色或参考图，已绑定容量内的 ${ids.length} 项；其余素材仍保留在画布中`
+                : "当前镜头已达到 9 项角色或参考图上限，本次没有新增绑定");
+            if (!ids.length) return;
+        }
+
+        const toggleIds = (current?: string[] | null) => {
+            const safeCurrent = Array.isArray(current) ? current : [];
+            return enabled
+                ? Array.from(new Set([...safeCurrent, ...ids]))
+                : safeCurrent.filter((id) => !ids.includes(id));
+        };
+        const nextGlobalIds = rowId ? storyboard.referenceNodeIds || [] : toggleIds(storyboard.referenceNodeIds);
+        const nextRows = storyboardRows.map((row) => row.id === rowId ? { ...row, referenceNodeIds: toggleIds(row.referenceNodeIds) } : row);
+        const affectedRows = rowId ? nextRows.filter((row) => row.id === rowId) : nextRows;
+        const effectiveReferenceIds = (row: StoryboardRow) => new Set([...(nextGlobalIds || []), ...(row.referenceNodeIds || [])]);
+        const handleId = rowId ? `row:${rowId}` : "storyboard:context";
+
+        setNodes((current) => {
+            const next = current.map((node) => {
+                if (node.id !== nodeId || node.type !== CanvasNodeType.Script) return node;
+                const currentStoryboard = node.metadata?.storyboard;
+                if (!currentStoryboard) return node;
+                return {
+                    ...node,
+                    metadata: {
+                        ...node.metadata,
+                        storyboard: {
+                            ...currentStoryboard,
+                            referenceNodeIds: rowId ? currentStoryboard.referenceNodeIds || [] : toggleIds(currentStoryboard.referenceNodeIds),
+                            rows: (Array.isArray(currentStoryboard.rows) ? currentStoryboard.rows : []).map((row) => row.id === rowId ? { ...row, referenceNodeIds: toggleIds(row.referenceNodeIds) } : row),
+                        },
+                    },
+                };
+            });
+            nodesRef.current = next;
+            return next;
+        });
+
+        setConnections((current) => {
+            const childReferenceIds = new Map<string, Set<string>>();
+            const primaryImageToVideoEdges = new Set<string>();
+            affectedRows.forEach((row) => {
+                const effective = effectiveReferenceIds(row);
+                if (row.imageNodeId) childReferenceIds.set(row.imageNodeId, effective);
+                if (row.videoNodeId) childReferenceIds.set(row.videoNodeId, effective);
+                if (row.imageNodeId && row.videoNodeId) primaryImageToVideoEdges.add(`${row.imageNodeId}\u0000${row.videoNodeId}`);
+            });
+            let next = current.filter((connection) => {
+                if (!ids.includes(connection.fromNodeId)) return true;
+                if (!enabled && connection.toNodeId === nodeId && connection.toHandleId === handleId) return false;
+                const effective = childReferenceIds.get(connection.toNodeId);
+                if (!effective || effective.has(connection.fromNodeId)) return true;
+                // 分镜图到视频是首帧主链路；即使同一图片曾被选作额外参考，也不能随参考解绑一起误删。
+                return primaryImageToVideoEdges.has(`${connection.fromNodeId}\u0000${connection.toNodeId}`);
+            });
+            if (enabled) {
+                ids.forEach((referenceId) => {
+                    if (!next.some((connection) => connection.fromNodeId === referenceId && connection.toNodeId === nodeId && connection.toHandleId === handleId)) {
+                        next.push({ id: nanoid(), fromNodeId: referenceId, toNodeId: nodeId, toHandleId: handleId });
+                    }
+                });
+            }
+            childReferenceIds.forEach((effective, childNodeId) => {
+                ids.forEach((referenceId) => {
+                    if (referenceId !== childNodeId && effective.has(referenceId) && !next.some((connection) => connection.fromNodeId === referenceId && connection.toNodeId === childNodeId)) {
+                        next.push({ id: nanoid(), fromNodeId: referenceId, toNodeId: childNodeId });
+                    }
+                });
+            });
+            connectionsRef.current = next;
+            return next;
+        });
+    }, [connectionsRef, message, nodesRef, setConnections, setNodes]);
 
     const removeScriptRow = useCallback((nodeId: string, rowId: string) => {
         const node = nodesRef.current.find((item) => item.id === nodeId);
@@ -393,7 +496,20 @@ export function useCanvasStoryboard({
             return !imageNode?.metadata?.content && (!imageNode || !activeNodeIds.has(imageNode.id));
         });
         if (!targetRows.length) return message.info("所选分镜图已生成或正在生成");
-        if (!await confirmGenerationSubmission(targetRows.length, imageModel, "图片生成")) return;
+        const referenceRowCount = targetRows.filter((row) => storyboardRowUsesVisualReferences(scriptNode, row, nodesRef.current)).length;
+        if (referenceRowCount) {
+            try {
+                if (resolveModelRequestConfig(effectiveConfig, imageModel).interfaceType !== "openai-image") {
+                    message.warning("当前图片渠道未声明参考图编辑协议，本次没有提交任务。请切换到支持参考图/图片编辑的图片模型");
+                    return;
+                }
+            } catch {
+                message.warning("图片模型配置无法解析，本次没有提交任务。请先检查渠道与图片协议设置");
+                return;
+            }
+        }
+        const referenceNotice = referenceRowCount ? `其中 ${referenceRowCount} 个镜头会携带角色或参考图，并通过图片编辑协议提交。` : "";
+        if (!await confirmGenerationSubmission(targetRows.length, imageModel, "图片生成", referenceNotice)) return;
         const targets = ensureScriptImageNodes(nodeId, targetRows.map((row) => row.id), imageModel);
         focusGeneratedNodes(targets.map((target) => target.node.id));
         if (enqueueGenerationBatch(nodeId, "storyboard_image", targets.map((target) => ({ rowId: target.row.id, nodeId: target.node.id })))) message.success("分镜图已加入生成队列");
@@ -489,7 +605,8 @@ export function useCanvasStoryboard({
         const targetRowIds = new Set(targetRows.map((row) => row.id));
         const targets = rows.flatMap((row) => {
             if (!targetRowIds.has(row.id)) return [];
-            const currentRow = scriptNode?.metadata?.storyboard?.rows.find((item) => item.id === row.id) || row;
+            const currentRows = scriptNode?.metadata?.storyboard?.rows;
+            const currentRow = (Array.isArray(currentRows) ? currentRows : []).find((item) => item.id === row.id) || row;
             const videoNode = currentRow.videoNodeId ? nodesRef.current.find((node) => node.id === currentRow.videoNodeId && node.type === CanvasNodeType.Video) : undefined;
             if (!videoNode || videoNode.metadata?.content) return [];
             const prompt = (currentRow.videoMotionPrompt || currentRow.plotDescription).trim();
@@ -546,10 +663,11 @@ export function useCanvasStoryboard({
         const targets: Array<{ row: StoryboardRow; node: CanvasNodeData; prompt: string }> = [];
         const createdNodes: CanvasNodeData[] = [];
         actionBoardRows.forEach((row) => {
+            const characters = Array.isArray(row.characters) ? row.characters : [];
             const prompt = [
                 "生成一张电影动作拆分 12 宫格参考图，严格 3 列 4 行，12 个格子清晰分隔，保持同一角色、服装、场景和光线连续。",
                 `镜头 ${row.shotNumber}：${row.plotDescription || row.videoMotionPrompt || "根据镜头剧情补全动作"}`,
-                row.characters.length ? `角色：${row.characters.map((item) => item.characterName).join("、")}` : "",
+                characters.length ? `角色：${characters.map((item) => item.characterName).join("、")}` : "",
                 "按时间顺序展示动作起势、推进、转折、落点和结束姿态，不要添加文字、边框标题或额外画面。",
             ].filter(Boolean).join("\n");
             const existingIndex = nextNodes.findIndex((node) => node.type === CanvasNodeType.Image && node.metadata?.workflowKind === "action_board" && node.metadata.shotIndex === row.shotNumber);
@@ -652,9 +770,23 @@ export function useCanvasStoryboard({
         generateScriptVideos,
         removeScriptRow,
         replaceScriptRows,
+        setScriptReferences,
         updateScriptRow,
         updateScriptRows,
     };
+}
+
+function storyboardRowUsesVisualReferences(scriptNode: CanvasNodeData, row: StoryboardRow, nodes: CanvasNodeData[]) {
+    const referenceIds = new Set([...(scriptNode.metadata?.storyboard?.referenceNodeIds || []), ...(row.referenceNodeIds || [])]);
+    return nodes.some((node) => referenceIds.has(node.id) && isStoryboardVisualReferenceNode(node));
+}
+
+function isStoryboardVisualReferenceNode(node?: CanvasNodeData) {
+    return Boolean(node && (
+        (node.metadata?.workflowKind === "character" && node.metadata.characterAssetId)
+        || (node.type === CanvasNodeType.Image && node.metadata?.content)
+        || (node.type === CanvasNodeType.Drawing && node.metadata?.drawingId)
+    ));
 }
 
 function activeGenerationBatchNodeIds(node: CanvasNodeData, mode: CanvasGenerationBatchMode) {

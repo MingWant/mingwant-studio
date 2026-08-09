@@ -78,8 +78,8 @@ export function isolateCopiedNodeMetadata(node: CanvasNodeData, idMap: ReadonlyM
         editRegion: node.metadata.emotionEdit.editRegion ? { ...node.metadata.emotionEdit.editRegion } : undefined,
     } : undefined;
     metadata.storyboard = node.metadata?.storyboard ? {
-        rows: node.metadata.storyboard.rows.map((row) => copyStoryboardRow(row, idMap)),
-        visibleColumns: [...node.metadata.storyboard.visibleColumns],
+        rows: (Array.isArray(node.metadata.storyboard.rows) ? node.metadata.storyboard.rows : []).map((row) => copyStoryboardRow(row, idMap)),
+        visibleColumns: Array.isArray(node.metadata.storyboard.visibleColumns) ? [...node.metadata.storyboard.visibleColumns] : ["shotNumber", "durationSeconds", "plotDescription", "dialogue"],
         referenceNodeIds: remapReferenceIds(node.metadata.storyboard.referenceNodeIds, idMap) || [],
     } : undefined;
     return metadata;

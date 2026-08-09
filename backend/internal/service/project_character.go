@@ -144,11 +144,30 @@ func (s *Service) CreateProjectCharacter(userID string, projectID string, req Cr
 }
 
 func (s *Service) ProjectCharacter(userID string, projectID string, assetID string) (ProjectCharacterDetail, error) {
+	return s.ProjectCharacterVersion(userID, projectID, assetID, "")
+}
+
+// ProjectCharacterVersion 只在显式固定版本时读取历史快照；默认仍跟随角色当前版本。
+func (s *Service) ProjectCharacterVersion(userID string, projectID string, assetID string, versionID string) (ProjectCharacterDetail, error) {
 	asset, err := s.repo.ProjectCharacterAsset(userID, projectID, strings.TrimSpace(assetID))
 	if err != nil {
 		return ProjectCharacterDetail{}, err
 	}
-	return s.projectCharacterDetail(userID, projectID, asset)
+	requestedVersionID := strings.TrimSpace(versionID)
+	if requestedVersionID == "" {
+		return s.projectCharacterDetail(userID, projectID, asset)
+	}
+	version, err := s.repo.AssetVersionForProject(projectID, requestedVersionID)
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			return ProjectCharacterDetail{}, BadAuthRequest("角色固定版本不可用，请切换为跟随当前版本后重新固定")
+		}
+		return ProjectCharacterDetail{}, err
+	}
+	if version.AssetID != asset.ID {
+		return ProjectCharacterDetail{}, BadAuthRequest("角色固定版本不属于当前角色")
+	}
+	return s.projectCharacterDetailWithVersion(userID, projectID, asset, version)
 }
 
 func (s *Service) UpdateProjectCharacter(userID string, projectID string, assetID string, req UpdateProjectCharacterRequest) (ProjectCharacterDetail, error) {
@@ -424,6 +443,14 @@ func (s *Service) prepareNextCharacterVersion(asset *model.Asset, name string, d
 }
 
 func (s *Service) projectCharacterDetail(userID string, projectID string, asset *model.Asset) (ProjectCharacterDetail, error) {
+	version, err := s.repo.AssetVersion(asset.PrimaryVersionID)
+	if err != nil {
+		return ProjectCharacterDetail{}, err
+	}
+	return s.projectCharacterDetailWithVersion(userID, projectID, asset, version)
+}
+
+func (s *Service) projectCharacterDetailWithVersion(userID string, projectID string, asset *model.Asset, version *model.AssetVersion) (ProjectCharacterDetail, error) {
 	versions, err := s.repo.AssetVersions(asset.ID)
 	if err != nil {
 		return ProjectCharacterDetail{}, err
@@ -432,7 +459,7 @@ func (s *Service) projectCharacterDetail(userID string, projectID string, asset 
 	if err != nil {
 		return ProjectCharacterDetail{}, err
 	}
-	card, err := s.characterCard(userID, asset)
+	card, err := s.characterCardForVersion(userID, version)
 	if err != nil {
 		return ProjectCharacterDetail{}, err
 	}
@@ -445,6 +472,10 @@ func (s *Service) characterCard(userID string, asset *model.Asset) (CharacterCar
 	if err != nil {
 		return CharacterCardSummary{}, err
 	}
+	return s.characterCardForVersion(userID, version)
+}
+
+func (s *Service) characterCardForVersion(userID string, version *model.AssetVersion) (CharacterCardSummary, error) {
 	definition := map[string]any{}
 	if err := json.Unmarshal([]byte(version.DefinitionJSON), &definition); err != nil {
 		return CharacterCardSummary{}, err

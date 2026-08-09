@@ -4,9 +4,7 @@ import type { UpdreamSkill } from "@/services/api/skills";
 const SKILL_REF_PATTERN = /@\[skill:([^\]]+)\]/g;
 
 export function buildSkillMentionReferences(skills: UpdreamSkill[]): CanvasResourceReference[] {
-    if (!Array.isArray(skills)) return [];
-    return skills
-        .filter((skill) => skill.activated ?? true)
+    return activeUsableSkills(skills)
         .map((skill) => ({
             id: `skill:${skill.dir}`,
             nodeId: `skill:${skill.dir}`,
@@ -21,8 +19,7 @@ export function buildSkillMentionReferences(skills: UpdreamSkill[]): CanvasResou
 
 export function expandSkillMentions(prompt: string, skills: UpdreamSkill[]) {
     if (!prompt.trim()) return prompt;
-    if (!Array.isArray(skills)) return prompt;
-    const activeSkills = skills.filter((skill) => skill.activated ?? true);
+    const activeSkills = activeUsableSkills(skills);
     if (!activeSkills.length) return prompt;
 
     const byId = new Map(activeSkills.map((skill) => [skill.dir, skill]));
@@ -39,6 +36,19 @@ export function expandSkillMentions(prompt: string, skills: UpdreamSkill[]) {
         });
 
     return next;
+}
+
+function activeUsableSkills(skills: UpdreamSkill[]) {
+    if (!Array.isArray(skills)) return [];
+    // 社区技能是远端运行时数据；缺少目录或名称的异常记录不能让所有画布生成在排序阶段崩溃。
+    return skills.filter((skill): skill is UpdreamSkill => Boolean(
+        skill
+        && (skill.activated ?? true)
+        && typeof skill.dir === "string"
+        && skill.dir.trim()
+        && typeof skill.name === "string"
+        && skill.name.trim(),
+    ));
 }
 
 export function renderSkillPrompt(skill: Pick<UpdreamSkill, "name" | "description" | "detail_text">) {

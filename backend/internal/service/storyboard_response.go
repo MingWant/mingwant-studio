@@ -462,7 +462,7 @@ func storyboardObjectLabel(value map[string]any) string {
 func storyboardText(value any) (string, bool) {
 	switch typed := value.(type) {
 	case string:
-		return typed, true
+		return sanitizeStoryboardText(typed), true
 	case json.Number:
 		return typed.String(), true
 	case float64:
@@ -475,6 +475,11 @@ func storyboardText(value any) (string, bool) {
 	default:
 		return "", false
 	}
+}
+
+func sanitizeStoryboardText(value string) string {
+	// U+FFFD 表示上游或兼容网关已经丢失原始多字节字符；继续保存只会在表格中显示“��”并污染后续生成提示词。
+	return strings.ReplaceAll(value, "\uFFFD", "")
 }
 
 func storyboardInteger(value any) (int, bool) {
@@ -511,9 +516,11 @@ func normalizeAndValidateStoryboardPlan(plan *agentStoryboardPlan) error {
 // 这里只补齐可编辑脚本所需的确定性默认值；没有任何画面内容的镜头仍然拒绝，
 // 也不会放行流式截断或无法解析的响应。
 func normalizeAndValidateStoryboardPlanWithDefaults(plan *agentStoryboardPlan, defaultDuration int) error {
-	plan.Title = defaultString(strings.TrimSpace(plan.Title), "影视分镜")
-	plan.Logline = defaultString(strings.TrimSpace(plan.Logline), "根据剧情生成的分镜方案")
-	plan.StyleGuide = defaultString(strings.TrimSpace(plan.StyleGuide), "遵循用户指定的项目画风与制作形态，保持角色、空间、道具、色彩和表现媒介一致。")
+	plan.Title = defaultString(strings.TrimSpace(sanitizeStoryboardText(plan.Title)), "影视分镜")
+	plan.Logline = defaultString(strings.TrimSpace(sanitizeStoryboardText(plan.Logline)), "根据剧情生成的分镜方案")
+	plan.StyleGuide = defaultString(strings.TrimSpace(sanitizeStoryboardText(plan.StyleGuide)), "遵循用户指定的项目画风与制作形态，保持角色、空间、道具、色彩和表现媒介一致。")
+	sanitizeStoryboardStrings(plan.Characters)
+	sanitizeStoryboardStrings(plan.Locations)
 	if len(plan.Shots) == 0 {
 		return errors.New("分镜模型没有返回 shots")
 	}
@@ -522,6 +529,7 @@ func normalizeAndValidateStoryboardPlanWithDefaults(plan *agentStoryboardPlan, d
 	}
 	for index := range plan.Shots {
 		shot := &plan.Shots[index]
+		sanitizeStoryboardShot(shot)
 		if strings.TrimSpace(shot.Title) == "" {
 			shot.Title = fmt.Sprintf("镜头 %d", index+1)
 		}
@@ -571,6 +579,45 @@ func normalizeAndValidateStoryboardPlanWithDefaults(plan *agentStoryboardPlan, d
 		}
 	}
 	return nil
+}
+
+func sanitizeStoryboardShot(shot *agentStoryboardShot) {
+	shot.Title = sanitizeStoryboardText(shot.Title)
+	shot.Description = sanitizeStoryboardText(shot.Description)
+	shot.Purpose = sanitizeStoryboardText(shot.Purpose)
+	shot.InformationChange = sanitizeStoryboardText(shot.InformationChange)
+	shot.Dialogue = sanitizeStoryboardText(shot.Dialogue)
+	shot.ShotSize = sanitizeStoryboardText(shot.ShotSize)
+	shot.Emotion = sanitizeStoryboardText(shot.Emotion)
+	shot.Lighting = sanitizeStoryboardText(shot.Lighting)
+	shot.AudioEffects = sanitizeStoryboardText(shot.AudioEffects)
+	shot.VisualPrompt = sanitizeStoryboardText(shot.VisualPrompt)
+	shot.VideoPrompt = sanitizeStoryboardText(shot.VideoPrompt)
+	shot.Camera = sanitizeStoryboardText(shot.Camera)
+	shot.Motion = sanitizeStoryboardText(shot.Motion)
+	shot.TimeBeats = sanitizeStoryboardText(shot.TimeBeats)
+	shot.Negative = sanitizeStoryboardText(shot.Negative)
+	sanitizeStoryboardStrings(shot.AssetTags)
+	sanitizeStoryboardBoundary(shot.StartBoundary)
+	sanitizeStoryboardBoundary(shot.EndBoundary)
+}
+
+func sanitizeStoryboardBoundary(boundary *projectShotBoundary) {
+	if boundary == nil {
+		return
+	}
+	sanitizeStoryboardStrings(boundary.Positions)
+	sanitizeStoryboardStrings(boundary.Facing)
+	sanitizeStoryboardStrings(boundary.Gaze)
+	sanitizeStoryboardStrings(boundary.Hands)
+	sanitizeStoryboardStrings(boundary.HeldProps)
+	sanitizeStoryboardStrings(boundary.VisibleState)
+}
+
+func sanitizeStoryboardStrings(values []string) {
+	for index := range values {
+		values[index] = sanitizeStoryboardText(values[index])
+	}
 }
 
 func validStoryboardBoundary(boundary *projectShotBoundary) bool {

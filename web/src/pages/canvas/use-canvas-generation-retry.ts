@@ -69,10 +69,15 @@ export function useCanvasGenerationRetry({ projectId, domainProjectId, activated
             const batchRoot = node.metadata?.batchRootId ? nodesRef.current.find((item) => item.id === node.metadata?.batchRootId) : null;
             const savedImageMetadata = node.type === CanvasNodeType.Image ? { ...batchRoot?.metadata, ...node.metadata } : undefined;
             const hasSavedImageMetadata = Boolean(savedImageMetadata?.generationType);
-            let generationConfig =
-                hasSavedImageMetadata && savedImageMetadata
+            let generationConfig: ReturnType<typeof buildGenerationConfig>;
+            try {
+                generationConfig = hasSavedImageMetadata && savedImageMetadata
                     ? { ...effectiveConfig, model: savedImageMetadata.model || effectiveConfig.imageModel || effectiveConfig.model, quality: savedImageMetadata.quality || effectiveConfig.quality, size: savedImageMetadata.size || effectiveConfig.size, transparentBackground: (savedImageMetadata.transparentBackground || effectiveConfig.transparentBackground) === "true" ? "true" : "false", count: "1" }
                     : { ...buildGenerationConfig(effectiveConfig, sourceNode, retryMode), count: "1" };
+            } catch {
+                message.error("生成模型参数异常，请重新选择模型后再试");
+                return;
+            }
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
                 navigateToSettings({ continueCreation: true });
                 return;

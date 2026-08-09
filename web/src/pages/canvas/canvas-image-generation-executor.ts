@@ -47,9 +47,20 @@ export async function executeImageGeneration({
     const isImageNode = sourceNode?.type === CanvasNodeType.Image;
     const isEmptyImageNode = isImageNode && !sourceNode?.metadata?.content;
     // 当前图片节点的直接生成是原位重生成；参考图只来自入边，避免把旧结果误当成自身输入。
-    const referenceImages = generationContext.referenceImages;
+    const referenceImages = Array.isArray(generationContext.referenceImages) ? generationContext.referenceImages : [];
+    const characterReferences = Array.isArray(generationContext.characterReferences) ? generationContext.characterReferences : [];
+    const resolvedCharacterVersions = Array.isArray(generationContext.resolvedCharacterVersions) ? generationContext.resolvedCharacterVersions : [];
     const generationType = referenceImages.length ? ("edit" as const) : ("generation" as const);
-    const generationMetadata = buildImageGenerationMetadata(generationType, generationConfig, count, referenceImages);
+    const referenceAssetNodeIds = Array.from(new Set([
+        ...referenceImages.map((image) => image.id).filter((id) => !id.startsWith("character-reference-")),
+        ...characterReferences.map((reference) => reference.nodeId),
+    ]));
+    const generationMetadata = {
+        ...buildImageGenerationMetadata(generationType, generationConfig, count, referenceImages),
+        referenceCount: referenceImages.length,
+        characterReferenceCount: resolvedCharacterVersions.length,
+        referenceAssetNodeIds,
+    };
     const parentConfig = NODE_DEFAULT_SIZE[isConfigNode ? CanvasNodeType.Config : isImageNode ? CanvasNodeType.Image : CanvasNodeType.Text];
     const imageDefaults = NODE_DEFAULT_SIZE[CanvasNodeType.Image];
     // 生成中占位框按设置比例显示，避免 16:9 任务显示成默认 340x240。
@@ -137,7 +148,7 @@ export async function executeImageGeneration({
     await Promise.all(
         targetIds.map(async (targetId) => {
             try {
-                const result = await runBackendCanvasGenerationTask({ projectId, nodeId: targetId, mode: "image", prompt: effectivePrompt, config: { ...generationConfig, count: "1" }, referenceImages, signal: controller.signal, sourceTaskId, confirmNewProviderRequest, metadata: { sourceNodeId: nodeId, resolvedCharacterVersions: generationContext.resolvedCharacterVersions }, onTaskCreated: (task) => bindGenerationTask(targetId, task) });
+                const result = await runBackendCanvasGenerationTask({ projectId, nodeId: targetId, mode: "image", prompt: effectivePrompt, config: { ...generationConfig, count: "1" }, referenceImages, signal: controller.signal, sourceTaskId, confirmNewProviderRequest, metadata: { sourceNodeId: nodeId, resolvedCharacterVersions }, onTaskCreated: (task) => bindGenerationTask(targetId, task) });
                 const image = result.images?.[0];
                 if (!image?.dataUrl) throw new Error("后端任务没有返回图片");
                 const uploaded = await uploadImage(image.dataUrl);

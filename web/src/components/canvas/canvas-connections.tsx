@@ -138,8 +138,9 @@ function connectionPath(startX: number, startY: number, endX: number, endY: numb
         return `M ${startX} ${startY} C ${startX + curvature} ${startY}, ${endX - curvature} ${endY}, ${endX} ${endY}`;
     }
 
-    // 有中间障碍或发生回连时改走节点群外侧通道，保持流程方向清楚且不穿卡片。
-    const laneNodes = [from, to, ...blockers].filter((node): node is CanvasNodeData => Boolean(node));
+    // 有中间障碍或发生回连时改走节点群外侧通道；转角使用圆滑曲线，避免避障成功却退化成生硬折线。
+    // 正向避障只需要绕开真正挡路的节点；把超高的起终点也算入会让路线被无谓拉到画布远端。
+    const laneNodes = (forwardGap >= 0 && blockers.length ? blockers : [from, to, ...blockers]).filter((node): node is CanvasNodeData => Boolean(node));
     const upperLane = Math.min(startY, endY, ...laneNodes.map((node) => node.position.y)) - 56;
     const lowerLane = Math.max(startY, endY, ...laneNodes.map((node) => node.position.y + node.height)) + 56;
     const upperCost = Math.abs(startY - upperLane) + Math.abs(endY - upperLane);
@@ -157,7 +158,40 @@ function connectionPath(startX: number, startY: number, endX: number, endY: numb
             ? Math.min(endX - 2, Math.max(endX - lead, Math.max(...blockers.map((node) => node.position.x + node.width)) + 24))
             : endX - closeCorridorInset
         : endX - lead;
-    return `M ${startX} ${startY} L ${exitX} ${startY} L ${exitX} ${detourY} L ${entryX} ${detourY} L ${entryX} ${endY} L ${endX} ${endY}`;
+    return roundedOrthogonalPath([
+        { x: startX, y: startY },
+        { x: exitX, y: startY },
+        { x: exitX, y: detourY },
+        { x: entryX, y: detourY },
+        { x: entryX, y: endY },
+        { x: endX, y: endY },
+    ]);
+}
+
+function roundedOrthogonalPath(points: Position[], cornerRadius = 32) {
+    const route = points.filter((point, index) => index === 0 || point.x !== points[index - 1].x || point.y !== points[index - 1].y);
+    if (route.length < 2) return "";
+    let path = `M ${route[0].x} ${route[0].y}`;
+    for (let index = 1; index < route.length - 1; index++) {
+        const previous = route[index - 1];
+        const corner = route[index];
+        const next = route[index + 1];
+        const incomingLength = Math.hypot(corner.x - previous.x, corner.y - previous.y);
+        const outgoingLength = Math.hypot(next.x - corner.x, next.y - corner.y);
+        if (!incomingLength || !outgoingLength) continue;
+        const radius = Math.min(cornerRadius, incomingLength / 2, outgoingLength / 2);
+        const before = {
+            x: corner.x - ((corner.x - previous.x) / incomingLength) * radius,
+            y: corner.y - ((corner.y - previous.y) / incomingLength) * radius,
+        };
+        const after = {
+            x: corner.x + ((next.x - corner.x) / outgoingLength) * radius,
+            y: corner.y + ((next.y - corner.y) / outgoingLength) * radius,
+        };
+        path += ` L ${before.x} ${before.y} Q ${corner.x} ${corner.y} ${after.x} ${after.y}`;
+    }
+    const end = route[route.length - 1];
+    return `${path} L ${end.x} ${end.y}`;
 }
 
 function connectionHandleY(node: CanvasNodeData, handleId?: string, scrollTop = 0) {

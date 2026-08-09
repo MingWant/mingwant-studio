@@ -1,4 +1,4 @@
-import { Image as ImageIcon, UserRound, Volume2 } from "lucide-react";
+import { Image as ImageIcon, Pin, UserRound, Volume2 } from "lucide-react";
 import type { ReactNode } from "react";
 
 import type { CanvasNodeData } from "@/types/canvas";
@@ -10,6 +10,7 @@ export function CanvasCharacterReferenceNodeContent({ node }: { node: CanvasNode
         <div className="relative min-h-0 flex-1 overflow-hidden bg-foreground/[.045]">
             {node.metadata?.characterCoverUrl ? <img src={node.metadata.characterCoverUrl} alt={node.metadata?.characterName || node.title} className="h-full w-full object-contain p-2" draggable={false} /> : <div className="grid h-full place-items-center text-foreground/22"><UserRound className="size-12" /></div>}
             <span className="absolute left-3 top-3 rounded bg-black/60 px-2 py-1 text-[10px] font-medium text-white">角色引用</span>
+            {node.metadata?.characterVersionPolicy === "pinned" ? <span className="absolute right-3 top-3 inline-flex items-center gap-1 rounded bg-black/60 px-2 py-1 text-[10px] font-medium text-white"><Pin className="size-3" />固定版本</span> : null}
         </div>
         <div className="shrink-0 border-t border-border/70 px-3 py-2.5">
             <div className="truncate text-sm font-semibold">{node.metadata?.characterName || node.title}</div>

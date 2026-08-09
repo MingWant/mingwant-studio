@@ -4,14 +4,16 @@ import type { ColumnsType } from "antd/es/table";
 import { ChevronDown, ChevronUp, Clapperboard, Copy, Expand, Film, Grid3X3, Image as ImageIcon, ListTree, Merge, Minus, Play, Plus, RefreshCw, Send, Square, Trash2, TriangleAlert, Video, X } from "lucide-react";
 
 import { CanvasResourceMentionTextarea } from "@/components/canvas/canvas-resource-mention-textarea";
+import { StoryboardReferenceControl, type StoryboardReferenceModelStatus } from "@/components/canvas/canvas-storyboard-reference-picker";
 import { ModelPicker } from "@/components/model-picker";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
 import { buildGenerationConfig } from "@/lib/canvas/canvas-project-generation";
+import { sanitizeStoryboardText } from "@/lib/canvas/canvas-storyboard-text";
 import { pipelineStatusLabel, type CanvasStoryboardPipelineProgress, type StoryboardPipelineStage } from "@/lib/canvas/canvas-storyboard-progress";
 import { isContentModerationError } from "@/lib/generation-error";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { navigateToSettings } from "@/lib/settings-navigation";
-import { useEffectiveConfig } from "@/stores/use-config-store";
+import { configuredModelMatchesCapability, modelOptionName, resolveModelRequestConfig, useEffectiveConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import type { CanvasGenerationBatch, CanvasGenerationBatchItem, CanvasGenerationBatchItemStatus, CanvasNodeData, CanvasNodeStatus, CanvasWorkspaceMode, StoryboardColumn, StoryboardRow, StoryboardShotCount, StoryboardShotDuration } from "@/types/canvas";
 
@@ -55,12 +57,13 @@ const columnOptions: Array<{ label: string; value: StoryboardColumn }> = [
     { label: "负面要求", value: "negativePrompt" },
 ];
 
-export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionReferences, activeConnectionHandleId, activeConnectionHandleSide, connectingHandleType, onOpen, onCreateImageNodes, onCreateVideoNodes, onGenerateImages, onGenerateVideos, onCopyVideoPrompts, onMergeVideos, onRunNextStage, onCreateActionBoards, onRetryBatch, onRetryBatchItem, onStopBatch, onCancelBatchItem, onAddRow, onRemoveRow, onUpdateRow, onPromptChange, onModelChange, onGenerateScript, onShotDurationChange, onShotCountChange, onComposerHeightChange, onConnectStart, onScrollTopChange, workspaceMode = "professional" }: {
+export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionReferences, referenceResources, activeConnectionHandleId, activeConnectionHandleSide, connectingHandleType, onOpen, onCreateImageNodes, onCreateVideoNodes, onGenerateImages, onGenerateVideos, onCopyVideoPrompts, onMergeVideos, onRunNextStage, onCreateActionBoards, onRetryBatch, onRetryBatchItem, onStopBatch, onCancelBatchItem, onAddRow, onRemoveRow, onUpdateRow, onReferenceChange, onAddReferenceAsset, onUploadReferenceImage, onPromptChange, onModelChange, onGenerateScript, onShotDurationChange, onShotCountChange, onComposerHeightChange, onConnectStart, onScrollTopChange, workspaceMode = "professional" }: {
     node: CanvasNodeData;
     batch?: CanvasGenerationBatch;
     pipeline: CanvasStoryboardPipelineProgress;
     scale: number;
     mentionReferences: CanvasResourceReference[];
+    referenceResources: CanvasResourceReference[];
     activeConnectionHandleId?: string;
     activeConnectionHandleSide?: "left" | "right";
     connectingHandleType?: "source" | "target";
@@ -80,6 +83,9 @@ export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionR
     onAddRow: () => void;
     onRemoveRow: (rowId: string) => void;
     onUpdateRow: (rowId: string, patch: Partial<StoryboardRow>) => void;
+    onReferenceChange: (rowId: string | undefined, referenceNodeId: string, enabled: boolean) => void;
+    onAddReferenceAsset?: (rowId?: string) => void;
+    onUploadReferenceImage: (rowId?: string) => void;
     onPromptChange: (prompt: string) => void;
     onModelChange: (model: string) => void;
     onGenerateScript: (prompt: string) => void;
@@ -97,6 +103,21 @@ export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionR
     const simpleMode = workspaceMode === "simple";
     const manualMode = workspaceMode === "manual";
     const rows = node.metadata?.storyboard?.rows || [];
+    const referenceModelStatus = useMemo<StoryboardReferenceModelStatus>(() => {
+        const imageModel = effectiveConfig.imageModel;
+        if (!imageModel || !configuredModelMatchesCapability(effectiveConfig, imageModel, "image")) {
+            return { state: "missing", label: "尚未配置图片模型", detail: "添加参考图后，生成前需要先选择支持参考图的图片模型。" };
+        }
+        const label = modelOptionName(imageModel) || imageModel;
+        try {
+            const request = resolveModelRequestConfig(effectiveConfig, imageModel);
+            return request.interfaceType === "openai-image"
+                ? { state: "ready", label: `${label} · 参考图协议已声明`, detail: "任务会走图片编辑接口；实际效果仍取决于渠道是否完整实现该协议。" }
+                : { state: "unsupported", label: `${label} · 未声明参考图协议`, detail: "当前渠道可能忽略参考图，请在设置中改用支持图片编辑的渠道。" };
+        } catch {
+            return { state: "unsupported", label: `${label} · 配置无法解析`, detail: "请检查图片模型的渠道与协议配置后再提交参考图任务。" };
+        }
+    }, [effectiveConfig]);
     const [prompt, setPrompt] = useState(node.metadata?.composerContent || "");
     const [scrollTop, setScrollTop] = useState(0);
     const composerHeightChangeRef = useRef(onComposerHeightChange);
@@ -145,6 +166,18 @@ export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionR
                 <Clapperboard className="size-4" />
                 <span className="min-w-0 flex-1 truncate text-sm font-semibold">{node.title || "分镜脚本"}</span>
                 {batchSummary ? <span className="min-w-0 max-w-[42%] truncate text-[11px] font-medium" title={batchSummary} style={{ color: batch?.status === "partial_failed" ? theme.accent.danger : theme.node.muted }}>{batchSummary}</span> : taskFeedback ? <span className="min-w-0 max-w-[38%] truncate text-[11px] font-medium" title={taskFeedback} style={{ color: node.metadata?.status === "error" ? theme.accent.danger : theme.node.muted }}>{taskFeedback}</span> : null}
+                <StoryboardReferenceControl
+                    disabled={hasActiveBatchItems || node.metadata?.status === "loading"}
+                    scopeLabel="全部镜头"
+                    references={referenceResources}
+                    selectedIds={node.metadata?.storyboard?.referenceNodeIds || []}
+                    modelStatus={referenceModelStatus}
+                    theme={theme}
+                    onToggle={(referenceNodeId, enabled) => onReferenceChange(undefined, referenceNodeId, enabled)}
+                    onAddProjectAsset={onAddReferenceAsset ? () => onAddReferenceAsset() : undefined}
+                    onUploadImage={() => onUploadReferenceImage()}
+                    onOpenSettings={() => navigateToSettings({ continueCreation: true })}
+                />
                 <span className="text-xs font-medium" style={{ color: theme.node.muted }}>{rows.length} 镜 · {totalDuration}s</span>
                 <Tooltip title={nextStageLabel}>
                     <button type="button" disabled={nextStageDisabled} className="inline-flex h-7 shrink-0 items-center gap-1 rounded-md border px-2 text-[10px] font-semibold outline-none transition hover:brightness-105 focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-35" style={{ background: nextStageDisabled ? theme.toolbar.itemHover : theme.accent.primarySoft, borderColor: nextStageDisabled ? theme.node.stroke : `${theme.accent.primary}55`, color: nextStageDisabled ? theme.node.muted : theme.accent.primary, "--tw-ring-color": theme.accent.primary } as CSSProperties} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRunNextStage(prompt.trim()); }} aria-label={nextStageLabel}><Play className="size-3" /><span className="hidden xl:inline">{nextStageLabel}</span></button>
@@ -182,7 +215,7 @@ export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionR
                 tabIndex={0}
                 role="region"
                 aria-label="分镜镜头列表"
-                className="storyboard-scrollbar min-h-0 flex-1 overflow-y-scroll overflow-x-hidden outline-none focus-visible:ring-1 focus-visible:ring-inset"
+                className="storyboard-scrollbar min-h-0 flex-1 overflow-y-auto overflow-x-hidden outline-none focus-visible:ring-1 focus-visible:ring-inset"
                 style={{ "--tw-ring-color": theme.node.muted } as CSSProperties}
                 onScroll={(event) => { const next = event.currentTarget.scrollTop; setScrollTop(next); onScrollTopChange(next); }}
                 onWheel={(event) => event.stopPropagation()}
@@ -197,8 +230,22 @@ export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionR
                         </div>
                         <CompactInput value={row.plotDescription} placeholder="描述画面内容" onChange={(value) => onUpdateRow(row.id, { plotDescription: value })} borderColor={theme.node.stroke} />
                         <CompactInput value={row.dialogue} placeholder="台词或旁白" onChange={(value) => onUpdateRow(row.id, { dialogue: value })} borderColor={theme.node.stroke} />
-                        <div className="grid h-full place-items-center">
-                            <button type="button" disabled={rows.length <= 1} className="grid size-7 place-items-center rounded outline-none opacity-55 transition enabled:hover:bg-red-500/10 enabled:hover:opacity-100 focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-20" style={{ color: theme.accent.danger, "--tw-ring-color": theme.accent.danger } as CSSProperties} title={rows.length <= 1 ? "至少保留一个镜头" : "删除镜头"} aria-label={`删除镜头 ${row.shotNumber}`} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemoveRow(row.id); }}><Trash2 className="size-3.5" /></button>
+                        <div className="flex h-full items-center justify-center gap-0.5">
+                            <StoryboardReferenceControl
+                                compact
+                                disabled={hasActiveBatchItems || node.metadata?.status === "loading"}
+                                scopeLabel={`镜头 ${row.shotNumber}`}
+                                references={referenceResources}
+                                selectedIds={row.referenceNodeIds || []}
+                                inheritedIds={node.metadata?.storyboard?.referenceNodeIds || []}
+                                modelStatus={referenceModelStatus}
+                                theme={theme}
+                                onToggle={(referenceNodeId, enabled) => onReferenceChange(row.id, referenceNodeId, enabled)}
+                                onAddProjectAsset={onAddReferenceAsset ? () => onAddReferenceAsset(row.id) : undefined}
+                                onUploadImage={() => onUploadReferenceImage(row.id)}
+                                onOpenSettings={() => navigateToSettings({ continueCreation: true })}
+                            />
+                            <button type="button" disabled={rows.length <= 1} className="grid size-6 place-items-center rounded outline-none opacity-55 transition enabled:hover:bg-red-500/10 enabled:hover:opacity-100 focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-20" style={{ color: theme.accent.danger, "--tw-ring-color": theme.accent.danger } as CSSProperties} title={rows.length <= 1 ? "至少保留一个镜头" : "删除镜头"} aria-label={`删除镜头 ${row.shotNumber}`} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemoveRow(row.id); }}><Trash2 className="size-3.5" /></button>
                         </div>
                     </div>
                 )) : <button type="button" className="grid h-full min-h-24 w-full place-items-center text-sm" style={{ color: theme.node.muted }} onClick={(event) => { event.stopPropagation(); onAddRow(); }}>+ 添加第一个镜头</button>}
@@ -279,7 +326,7 @@ export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionR
                         onClick={submitPrompt}
                     />
                 </div>
-                {!connectingHandleType || connectingHandleType === "source" ? <RowHandle side="left" top={composerHeight / 2} scale={scale} tone="idle" active={activeConnectionHandleId === "storyboard:context" && activeConnectionHandleSide === "left"} theme={theme} title="连接故事或画风文本；运行时会自动带入分镜提示词" onPointerDown={(event) => onConnectStart(event, "context", "target")} /> : null}
+                {!connectingHandleType || connectingHandleType === "source" ? <RowHandle side="left" top={composerHeight / 2} scale={scale} tone="idle" active={activeConnectionHandleId === "storyboard:context" && activeConnectionHandleSide === "left"} theme={theme} title="连接故事、画风、角色或参考图；图片与角色会应用到全部镜头" onPointerDown={(event) => onConnectStart(event, "context", "target")} /> : null}
             </div>
             {rows.map((row, index) => {
                 const top = STORYBOARD_HEADER_HEIGHT + index * STORYBOARD_ROW_HEIGHT + STORYBOARD_ROW_HEIGHT / 2 - scrollTop;
@@ -504,7 +551,7 @@ export function CanvasScriptEditor({ node, open, onClose, onUpdateRows, onVisibl
 }
 
 function CompactInput({ value, placeholder, borderColor, onChange }: { value: string; placeholder: string; borderColor: string; onChange: (value: string) => void }) {
-    return <textarea className="min-w-0 h-full resize-none overflow-x-hidden border-r bg-transparent px-4 py-2.5 text-xs leading-5 outline-none transition placeholder:opacity-35 focus:bg-black/[0.02] dark:focus:bg-white/[0.025]" style={{ borderColor }} value={value} placeholder={placeholder} onChange={(event) => onChange(event.target.value)} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} />;
+    return <textarea data-canvas-wheel-scroll className="min-w-0 h-full resize-none overflow-x-hidden border-r bg-transparent px-4 py-2.5 text-xs leading-5 outline-none transition placeholder:opacity-35 focus:bg-black/[0.02] dark:focus:bg-white/[0.025]" style={{ borderColor }} value={sanitizeStoryboardText(value)} placeholder={placeholder} onChange={(event) => onChange(sanitizeStoryboardText(event.target.value))} onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()} />;
 }
 
 function HeaderCell({ children, borderColor, align = "left" }: { children: ReactNode; borderColor: string; align?: "left" | "center" }) {

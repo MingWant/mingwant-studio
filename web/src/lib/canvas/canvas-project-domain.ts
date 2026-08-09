@@ -5,6 +5,7 @@ import type { NodeGenerationInput } from "@/components/canvas/canvas-node-genera
 import { isFrameNode } from "@/lib/canvas/canvas-frame";
 import { nodeSizeFromRatio } from "@/lib/canvas/canvas-node-size";
 import type { CanvasResourceReference } from "@/lib/canvas/canvas-resource-references";
+import { sanitizeStoryboardRows, sanitizeStoryboardText } from "@/lib/canvas/canvas-storyboard-text";
 import { scopedLocalStorage } from "@/lib/user-scope";
 import type { GenerationTask } from "@/services/api/task-center";
 import { CanvasNodeType, type CanvasConnection, type CanvasNodeData, type CanvasNodeMetadata, type CanvasWorkspaceMode, type ConnectionHandle, type Position, type StoryboardColumn, type StoryboardRow } from "@/types/canvas";
@@ -164,7 +165,7 @@ function recordValue(value: unknown) {
 }
 
 function stringValue(value: unknown) {
-    return typeof value === "string" ? value : "";
+    return typeof value === "string" ? sanitizeStoryboardText(value) : "";
 }
 
 function numberValue(value: unknown, fallback: number) {
@@ -188,12 +189,15 @@ export function cinematicStoryboardColumns(columns?: StoryboardColumn[]): Storyb
 }
 
 export function storyboardRowsFromTask(task: GenerationTask) {
-    const result = JSON.parse(task.resultJson || "{}") as { title?: string; rows?: Array<Partial<StoryboardRow>>; structureRepairUsed?: boolean };
+    const result = JSON.parse(task.resultJson || "{}") as { title?: string; rows?: Array<Partial<StoryboardRow> | null>; structureRepairUsed?: boolean };
     if (!Array.isArray(result.rows) || !result.rows.length) throw new Error("分镜任务没有返回镜头行");
     return {
-        title: result.title?.trim(),
+        title: result.title ? sanitizeStoryboardText(result.title).trim() : undefined,
         structureRepairUsed: result.structureRepairUsed === true,
-        rows: result.rows.map((row, index) => createStoryboardRow(index + 1, { ...row, id: `shot-${Date.now()}-${index + 1}-${Math.random().toString(36).slice(2, 6)}`, shotNumber: index + 1, status: "idle", referenceNodeIds: Array.isArray(row.referenceNodeIds) ? row.referenceNodeIds : [] })),
+        rows: sanitizeStoryboardRows(result.rows.map((row, index) => {
+            const safeRow = row && typeof row === "object" ? row : {};
+            return createStoryboardRow(index + 1, { ...safeRow, id: `shot-${Date.now()}-${index + 1}-${Math.random().toString(36).slice(2, 6)}`, shotNumber: index + 1, status: "idle", referenceNodeIds: Array.isArray(safeRow.referenceNodeIds) ? safeRow.referenceNodeIds : [] });
+        })),
     };
 }
 
@@ -260,7 +264,8 @@ export function attachNodeToStoryboardRow(nodes: CanvasNodeData[], connection: P
     const linkedNode = nodes.find((node) => node.id === linkedNodeId);
     const scriptNode = nodes.find((node) => node.id === scriptNodeId && node.type === CanvasNodeType.Script);
     if (!scriptNodeId || !linkedNode || !scriptNode) return nodes;
-    const row = rowId ? scriptNode.metadata?.storyboard?.rows.find((item) => item.id === rowId) : undefined;
+    const scriptRows = scriptNode.metadata?.storyboard?.rows;
+    const row = rowId && Array.isArray(scriptRows) ? scriptRows.find((item) => item.id === rowId) : undefined;
     const videoPrompt = row ? (row.videoMotionPrompt || row.plotDescription).trim() : "";
 
     return nodes.map((node) => {
@@ -285,9 +290,49 @@ export function attachNodeToStoryboardRow(nodes: CanvasNodeData[], connection: P
     });
 }
 
+export function removeStoryboardReferenceConnection(nodes: CanvasNodeData[], connections: CanvasConnection[], connectionId: string) {
+    const removed = connections.find((connection) => connection.id === connectionId);
+    let nextConnections = connections.filter((connection) => connection.id !== connectionId);
+    const handleId = removed?.toHandleId;
+    const scriptNode = removed && (handleId === "storyboard:context" || handleId?.startsWith("row:"))
+        ? nodes.find((node) => node.id === removed.toNodeId && node.type === CanvasNodeType.Script)
+        : undefined;
+    if (!removed || !scriptNode || nextConnections.some((connection) => connection.fromNodeId === removed.fromNodeId && connection.toNodeId === removed.toNodeId && connection.toHandleId === handleId)) {
+        return { nodes, connections: nextConnections };
+    }
+
+    const storyboard = scriptNode.metadata?.storyboard;
+    if (!storyboard) return { nodes, connections: nextConnections };
+    const rowId = handleId?.startsWith("row:") ? handleId.slice(4) : undefined;
+    const nextGlobalIds = rowId ? storyboard.referenceNodeIds || [] : (storyboard.referenceNodeIds || []).filter((id) => id !== removed.fromNodeId);
+    const nextRows = (Array.isArray(storyboard.rows) ? storyboard.rows : []).map((row) => row.id === rowId ? { ...row, referenceNodeIds: (row.referenceNodeIds || []).filter((id) => id !== removed.fromNodeId) } : row);
+    const affectedRows = rowId ? nextRows.filter((row) => row.id === rowId) : nextRows;
+    const staleChildIds = new Set(affectedRows.flatMap((row) => {
+        const stillEffective = nextGlobalIds.includes(removed.fromNodeId) || (row.referenceNodeIds || []).includes(removed.fromNodeId);
+        return stillEffective ? [] : [row.imageNodeId, row.videoNodeId].filter((id): id is string => Boolean(id));
+    }));
+    const primaryImageToVideoEdges = new Set(affectedRows.flatMap((row) => row.imageNodeId && row.videoNodeId ? [`${row.imageNodeId}\u0000${row.videoNodeId}`] : []));
+    nextConnections = nextConnections.filter((connection) => connection.fromNodeId !== removed.fromNodeId
+        || !staleChildIds.has(connection.toNodeId)
+        || primaryImageToVideoEdges.has(`${connection.fromNodeId}\u0000${connection.toNodeId}`));
+    const nextNodes = nodes.map((node) => node.id !== scriptNode.id ? node : {
+        ...node,
+        metadata: {
+            ...node.metadata,
+            storyboard: {
+                ...storyboard,
+                referenceNodeIds: nextGlobalIds,
+                rows: nextRows,
+            },
+        },
+    });
+    return { nodes: nextNodes, connections: nextConnections };
+}
+
 export function storyboardRowFromHandle(nodes: CanvasNodeData[], nodeId: string, handleId?: string) {
     if (!handleId?.startsWith("row:")) return undefined;
-    return nodes.find((node) => node.id === nodeId && node.type === CanvasNodeType.Script)?.metadata?.storyboard?.rows.find((row) => `row:${row.id}` === handleId);
+    const rows = nodes.find((node) => node.id === nodeId && node.type === CanvasNodeType.Script)?.metadata?.storyboard?.rows;
+    return (Array.isArray(rows) ? rows : []).find((row) => `row:${row.id}` === handleId);
 }
 
 export function expandStoryboardTextMentions(prompt: string, references: CanvasResourceReference[]) {
@@ -472,8 +517,8 @@ export function removeCanvasNodes(nodes: CanvasNodeData[], requestedIds: Set<str
                       ...detached.metadata,
                       storyboard: {
                           ...storyboard,
-                          referenceNodeIds: storyboard.referenceNodeIds.filter((id) => !removedIds.has(id)),
-                          rows: storyboard.rows.map((row) => ({
+                          referenceNodeIds: (Array.isArray(storyboard.referenceNodeIds) ? storyboard.referenceNodeIds : []).filter((id) => !removedIds.has(id)),
+                          rows: (Array.isArray(storyboard.rows) ? storyboard.rows : []).map((row) => ({
                               ...row,
                               referenceNodeIds: (row.referenceNodeIds || []).filter((id) => !removedIds.has(id)),
                               imageNodeId: row.imageNodeId && !removedIds.has(row.imageNodeId) ? row.imageNodeId : undefined,

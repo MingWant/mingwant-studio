@@ -25,7 +25,6 @@ type providerToolProbeCall struct {
 // 工具诊断沿用真实 Agent 的协议和 SSE 入口，但固定为一个无副作用函数；
 // 结果由后台任务持久化，响应丢失时不会让浏览器直接重发一笔不确定请求。
 func runChannelToolProbeTask(ctx context.Context, input canvasGenerationInput) (map[string]interface{}, error) {
-	toolChoice := channelProbeToolChoice(input.Config.Model)
 	var raw []byte
 	var mimeType string
 	var delivery providerStreamDelivery
@@ -35,7 +34,9 @@ func runChannelToolProbeTask(ctx context.Context, input canvasGenerationInput) (
 		messages := []map[string]interface{}{{"role": "user", "content": input.Prompt}}
 		body := chatCompletionsTextRequestBody(input, messages, true)
 		body["tools"] = []interface{}{channelProbeChatTool(input.Config.Model)}
-		body["tool_choice"] = toolChoice
+		if toolChoice, sendToolChoice := channelProbeToolChoice(input.Config.Model); sendToolChoice {
+			body["tool_choice"] = toolChoice
+		}
 		raw, mimeType, delivery, err = postStreamingJSON(ctx, input.Config, "/chat/completions", body)
 	case "openai-response":
 		responseInput, inputErr := textResponseInput(input)
@@ -99,15 +100,32 @@ func runChannelToolProbeTask(ctx context.Context, input canvasGenerationInput) (
 	}, nil
 }
 
-func channelProbeToolChoice(model string) interface{} {
-	value := strings.ToLower(strings.TrimSpace(model))
-	value = strings.NewReplacer("/", "-", ":", "-", "_", "-").Replace(value)
+func channelProbeToolChoice(model string) (interface{}, bool) {
+	value := normalizedChannelProbeChatModel(model)
+	// DeepSeek V4 的思考模式支持工具调用，但会拒绝整个 tool_choice 字段；
+	// 省略后由固定提示词和本地结果校验继续要求 probe_extract_record，不能因
+	// 400 参数拒绝把“接口不接受强制选择”误报成“不支持 Function Calling”。
+	if channelProbeDeepSeekV4Model(value) {
+		return nil, false
+	}
 	// 与浏览器在线 Agent 保持同一兼容边界：这些别名明确可能拒绝 required，
 	// 但返回文本时仍会由本地结果校验判定工具诊断失败。
 	if strings.Contains(value, "kimi-k3-ls") || strings.Contains(value, "kimi-k2.7-code") || strings.Contains(value, "kimi-k2-7-code") || strings.Contains(value, "kimi-k27-code") || strings.Contains(value, "kimi-k2.6") || strings.Contains(value, "kimi-k2-6") || strings.Contains(value, "kimi-k26") {
-		return "auto"
+		return "auto", true
 	}
-	return "required"
+	return "required", true
+}
+
+func normalizedChannelProbeChatModel(model string) string {
+	value := strings.ToLower(strings.TrimSpace(model))
+	return strings.NewReplacer("/", "-", ":", "-", "_", "-").Replace(value)
+}
+
+func channelProbeDeepSeekV4Model(normalizedModel string) bool {
+	return normalizedModel == "deepseek-v4" ||
+		strings.HasPrefix(normalizedModel, "deepseek-v4-") ||
+		strings.Contains(normalizedModel, "-deepseek-v4-") ||
+		strings.HasSuffix(normalizedModel, "-deepseek-v4")
 }
 
 func channelProbeToolParameters() map[string]interface{} {
@@ -174,8 +192,7 @@ func channelProbeChatTool(model string) map[string]interface{} {
 }
 
 func channelProbeKimiChatModel(model string) bool {
-	value := strings.ToLower(strings.TrimSpace(model))
-	value = strings.NewReplacer("/", "-", ":", "-", "_", "-").Replace(value)
+	value := normalizedChannelProbeChatModel(model)
 	return strings.Contains(value, "kimi") || strings.Contains(value, "moonshot")
 }
 

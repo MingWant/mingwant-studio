@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
-import { chatToolAssistantMessage, onlineAgentChatReasoningOptions, requireUsableAgentToolResponse, resolveOnlineAgentToolChoice } from "../src/lib/agent-tool-response";
+import { chatToolAssistantMessage, onlineAgentChatOmitsToolChoice, onlineAgentChatPreservesReasoningContent, onlineAgentChatReasoningOptions, requireUsableAgentToolResponse, resolveOnlineAgentToolChoice } from "../src/lib/agent-tool-response";
 
 const toolCall = (name: string, id = "call-1") => ({ id, function: { name } });
 
@@ -47,14 +47,25 @@ describe("online agent semantic response boundary", () => {
         expect(onlineAgentChatReasoningOptions("gpt-4o-mini")).toEqual({});
     });
 
-    test("only Kimi models known not to support required use auto", () => {
+    test("known thinking models that reject required use provider auto", () => {
         expect(resolveOnlineAgentToolChoice("kimi-k2.7-code", "chat-completion", "required")).toBe("auto");
         expect(resolveOnlineAgentToolChoice("vendor/kimi-k2.6", "chat-completion", "required")).toBe("auto");
         expect(resolveOnlineAgentToolChoice("kimi-k3-ls", "chat-completion", "required")).toBe("auto");
         expect(resolveOnlineAgentToolChoice("kimi-k3", "chat-completion", "required")).toBe("required");
         expect(resolveOnlineAgentToolChoice("vendor/moonshot-kimi", "chat-completion", "required")).toBe("required");
+        expect(resolveOnlineAgentToolChoice("deepseek-v4-pro", "chat-completion", "required")).toBe("auto");
+        expect(resolveOnlineAgentToolChoice("vendor/deepseek-v4-flash", "chat-completion", "required")).toBe("auto");
         expect(resolveOnlineAgentToolChoice("kimi-k3-ls", "gemini-content", "required")).toBe("required");
         expect(resolveOnlineAgentToolChoice("gpt-4o-mini", "chat-completion", "required")).toBe("required");
+    });
+
+    test("DeepSeek V4 omits tool_choice and preserves reasoning state only on its Chat protocol", () => {
+        expect(onlineAgentChatOmitsToolChoice("vendor/deepseek-v4-pro", "chat-completion")).toBe(true);
+        expect(onlineAgentChatOmitsToolChoice("deepseek-v4-pro", "openai-response")).toBe(false);
+        expect(onlineAgentChatOmitsToolChoice("deepseek-v3.2", "chat-completion")).toBe(false);
+        expect(onlineAgentChatPreservesReasoningContent("deepseek-v4-flash")).toBe(true);
+        expect(onlineAgentChatPreservesReasoningContent("kimi-k3")).toBe(true);
+        expect(onlineAgentChatPreservesReasoningContent("generic-model")).toBe(false);
     });
 
     test("chat tool follow-up preserves provider reasoning content without exposing it as visible content", () => {

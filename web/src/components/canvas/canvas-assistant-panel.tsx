@@ -15,7 +15,7 @@ import { useUserStore } from "@/stores/use-user-store";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
 import { navigateToSettings } from "@/lib/settings-navigation";
 import { ChannelProbeButton, channelProbeModels } from "@/components/channel-probe-button";
-import { onlineAgentToolChoiceReason, resolveOnlineAgentToolChoice } from "@/lib/agent-tool-response";
+import { onlineAgentChatOmitsToolChoice, onlineAgentToolChoiceReason, resolveOnlineAgentToolChoice } from "@/lib/agent-tool-response";
 import { onlineAgentFailureMessage } from "@/lib/agent-error";
 import { cinematicAgentSessionOpsJson, createCinematicAgentSession, isAgentSessionPollingAbort, isAgentSessionTrackingError, resumeCinematicAgentSession } from "@/lib/canvas/canvas-agent-session";
 import { backendAgentProviderConfig, cinematicCreationMessageId, cinematicRequestConfigIdentity, cinematicSessionMessageId } from "@/lib/canvas/canvas-cinematic-request";
@@ -911,12 +911,13 @@ export function CanvasAssistantPanel({ nodes, selectedNodeIds, snapshot, project
             const agentTools = manualTextPath ? [] : onlineAgentToolsForRequest(loopRequestConfig, loop.toolIntent);
             const requestedToolChoice = manualTextPath ? ("auto" as const) : ("required" as const);
             const toolChoice = resolveOnlineAgentToolChoice(loopRequestConfig.model, loopRequestConfig.interfaceType, requestedToolChoice);
+            const toolChoiceOmitted = agentTools.length > 0 && onlineAgentChatOmitsToolChoice(loopRequestConfig.model, loopRequestConfig.interfaceType);
             // 已明确测得非流式时，短 Agent 也不能继续强塞 stream=true：允许它在一轮预算内
             // 用完整 JSON 返回工具调用；其它测活结论只影响风险提示和预算，不阻止请求。
             const streamRequest = manualTextPath
                 ? loop.streamingReadinessState === "stream"
                 : loop.streamingReadinessState !== "non_stream";
-            addOnlineLog(`Agent ${manualTextPath ? "文本整理" : "Tool Loop"} ${loop.step} 开始`, { toolChoiceRequested: requestedToolChoice, toolChoiceSent: toolChoice, toolChoiceReason: onlineAgentToolChoiceReason(loopRequestConfig.model, loopRequestConfig.interfaceType, requestedToolChoice), outputTokenLimit: "provider", model: loopRequestConfig.model, channelId: loopRequestConfig.channelId, protocol: loopRequestConfig.interfaceType || "未声明", apiFormat: loopRequestConfig.apiFormat, endpoint: agentEndpointLabel(loopRequestConfig), toolProfile: onlineAgentToolProfile(loopRequestConfig, loop.toolIntent), toolCount: agentTools.length, manualTextPath, streamRequested: streamRequest, messageCount: messages.length });
+            addOnlineLog(`Agent ${manualTextPath ? "文本整理" : "Tool Loop"} ${loop.step} 开始`, { toolChoiceRequested: requestedToolChoice, toolChoiceSent: toolChoiceOmitted ? "省略（上游默认 auto）" : toolChoice, toolChoiceReason: onlineAgentToolChoiceReason(loopRequestConfig.model, loopRequestConfig.interfaceType, requestedToolChoice), outputTokenLimit: "provider", model: loopRequestConfig.model, channelId: loopRequestConfig.channelId, protocol: loopRequestConfig.interfaceType || "未声明", apiFormat: loopRequestConfig.apiFormat, endpoint: agentEndpointLabel(loopRequestConfig), toolProfile: onlineAgentToolProfile(loopRequestConfig, loop.toolIntent), toolCount: agentTools.length, manualTextPath, streamRequested: streamRequest, messageCount: messages.length });
             let streamed = "";
             let result: ToolResponseResult;
             try {
@@ -972,7 +973,9 @@ export function CanvasAssistantPanel({ nodes, selectedNodeIds, snapshot, project
                 }
                 await continueOnlineToolLoop(sessionId, assistantId, messages, result, loop);
             } else {
-                const detail = toolChoice === "auto"
+                const detail = toolChoiceOmitted
+                    ? "当前 DeepSeek V4 思考模式拒绝 tool_choice 参数，系统已省略该字段并在本地要求首轮必须返回工具调用；本次仍未返回工具调用，画布操作未执行，本轮不会继续。"
+                    : toolChoice === "auto"
                     ? "当前模型接口不支持强制 tool_choice=required，系统已改用 auto 并在本地要求首轮必须返回工具调用；本次仍未返回工具调用，画布操作未执行，本轮不会继续。"
                     : "模型没有按首轮 required 要求返回工具调用；画布操作未执行，本轮不会继续。";
                 throw new OnlineAgentModelCallError(loop.step, new Error(detail));

@@ -4,14 +4,34 @@
 
 export type AgentToolChoice = "auto" | "required" | { type: "function"; name: string };
 
+function normalizedAgentModel(model: string) {
+    return model.trim().toLowerCase().replace(/[/:_]/g, "-");
+}
+
+function isDeepSeekV4Model(model: string) {
+    return /(?:^|-)deepseek-v4(?:-|$)/.test(normalizedAgentModel(model));
+}
+
+/** DeepSeek V4 思考模式使用上游默认 auto；即使显式发送 auto，部分兼容层也会拒绝整个字段。 */
+export function onlineAgentChatOmitsToolChoice(model: string, interfaceType: string | undefined) {
+    return interfaceType === "chat-completion" && isDeepSeekV4Model(model);
+}
+
+/** 只向明确要求续传推理状态的 Chat 协议回传 reasoning_content，避免污染普通兼容网关。 */
+export function onlineAgentChatPreservesReasoningContent(model: string) {
+    const normalizedModel = normalizedAgentModel(model);
+    return normalizedModel.includes("kimi") || normalizedModel.includes("moonshot") || isDeepSeekV4Model(model);
+}
+
 /**
- * Kimi 的 tool_choice 能力按模型区分：官方 K3 支持 required，而 K2.7 Code/K2.6
- * 及第三方 K3-LS 兼容别名不一定支持。只对已知不兼容族改用 auto，避免网关先
- * 因字段拒绝整次请求；本地首轮校验仍会阻止没有工具调用的回答。
+ * Kimi 的 tool_choice 能力按模型区分；DeepSeek V4 思考模式则拒绝整个字段。
+ * 对这些已知不兼容族使用上游默认 auto，避免网关先因参数拒绝整次请求；
+ * 本地首轮校验仍会阻止没有工具调用的回答。
  */
 export function resolveOnlineAgentToolChoice(model: string, interfaceType: string | undefined, requested: AgentToolChoice): AgentToolChoice {
     if (requested !== "required" || interfaceType !== "chat-completion") return requested;
-    const normalizedModel = model.trim().toLowerCase().replace(/[/:_]/g, "-");
+    if (onlineAgentChatOmitsToolChoice(model, interfaceType)) return "auto";
+    const normalizedModel = normalizedAgentModel(model);
     if (
         normalizedModel.includes("kimi-k3-ls") ||
         normalizedModel.includes("kimi-k2.7-code") ||
@@ -27,7 +47,8 @@ export function resolveOnlineAgentToolChoice(model: string, interfaceType: strin
 export function onlineAgentToolChoiceReason(model: string, interfaceType: string | undefined, requested: AgentToolChoice) {
     const resolved = resolveOnlineAgentToolChoice(model, interfaceType, requested);
     if (resolved === requested) return "";
-    const normalizedModel = model.trim().toLowerCase().replace(/[/:_]/g, "-");
+    if (onlineAgentChatOmitsToolChoice(model, interfaceType)) return "当前 DeepSeek V4 思考模式拒绝 tool_choice 参数，已省略该字段并由本地首轮校验确保必须返回工具调用";
+    const normalizedModel = normalizedAgentModel(model);
     if (normalizedModel.includes("kimi-k3-ls")) return "当前 Kimi K3-LS 是第三方兼容别名，未声明 tool_choice=required，已改用 auto 并由本地首轮校验确保必须返回工具调用";
     return "当前 Kimi K2.7 Code/K2.6 兼容接口可能不接受 tool_choice=required，已改用 auto 并由本地首轮校验确保必须返回工具调用";
 }
@@ -50,8 +71,8 @@ export function chatToolAssistantMessage(calls: ChatToolCallInput[]): Record<str
     const assistantContent = calls.find((call) => typeof call.assistantContent === "string")?.assistantContent;
     return {
         role: "assistant",
-        // Kimi 的兼容实现要求回传首轮 choice.message；content 为空时仍发送空字符串，
-        // 但不能丢掉网关在工具调用前附带的可见说明，否则部分兼容层会拒绝第二轮上下文。
+        // Kimi/DeepSeek 的思考工具协议要求回传首轮 choice.message；content 为空时
+        // 仍发送空字符串，也不能丢掉工具调用前附带的可见说明。
         content: assistantContent ?? "",
         tool_calls: calls.map((call) => ({ id: call.call_id, type: "function", function: { name: call.name, arguments: call.arguments } })),
         ...(reasoningContent ? { reasoning_content: reasoningContent } : {}),

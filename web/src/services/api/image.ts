@@ -2,7 +2,7 @@ import axios from "axios";
 
 import { buildApiUrl, isSystemProxyBaseUrl, resolveBackendApiUrl, resolveModelRequestConfig, type AiConfig, type ModelChannel } from "@/stores/use-config-store";
 import { nanoid } from "nanoid";
-import { chatToolAssistantMessage, onlineAgentChatReasoningOptions, requireUsableAgentToolResponse, resolveOnlineAgentToolChoice, type AgentToolChoice } from "@/lib/agent-tool-response";
+import { chatToolAssistantMessage, onlineAgentChatOmitsToolChoice, onlineAgentChatPreservesReasoningContent, onlineAgentChatReasoningOptions, requireUsableAgentToolResponse, resolveOnlineAgentToolChoice, type AgentToolChoice } from "@/lib/agent-tool-response";
 import { createClientId } from "@/lib/client-id";
 import { confirmsProviderBillingUncertain, confirmsProviderWasNotCalled, isProviderBillingUncertainStatus, providerBillingUncertainMessage, providerConnectionUncertainMessage } from "@/lib/provider-request-error";
 import { channelRequest } from "@/services/api/custom-channel-relay";
@@ -235,10 +235,9 @@ function toChatCompletionMessages(messages: ResponseInputMessage[], model = "") 
                 toolNameById.set(call.call_id, call.name);
                 index += 1;
             }
-            // reasoning_content 是 Kimi/Moonshot 的临时协议状态；其他兼容网关即使
-            // 在首轮返回该字段，也可能拒绝把未知字段带回第二轮 assistant 消息。
-            // 工具调用、参数和可见 content 仍完整保留，不影响普通 Chat 多轮上下文。
-            const protocolCalls = isKimiChatModel(model)
+            // 只为明确要求续传推理状态的 Kimi/Moonshot、DeepSeek V4 保留
+            // reasoning_content；普通兼容网关仍剥离未知字段，避免第二轮被拒绝。
+            const protocolCalls = onlineAgentChatPreservesReasoningContent(model)
                 ? toolCalls
                 : toolCalls.map((call) => ({ call_id: call.call_id, name: call.name, arguments: call.arguments, ...(call.assistantContent !== undefined ? { assistantContent: call.assistantContent } : {}) }));
             result.push(chatToolAssistantMessage(protocolCalls));
@@ -1161,8 +1160,12 @@ export async function requestToolResponse(config: ToolRequestConfig, messages: R
                 ...toGeminiToolOptions(tools, effectiveToolChoice),
             }), onDelta, requestOptions);
         } else if (requestConfig.interfaceType === "chat-completion") {
+            const omitToolChoice = onlineAgentChatOmitsToolChoice(requestConfig.model, requestConfig.interfaceType);
             const chatTools = tools.length
-                ? { tools: toChatCompletionTools(requestConfig.model, tools), tool_choice: toChatCompletionToolChoice(effectiveToolChoice) }
+                ? {
+                    tools: toChatCompletionTools(requestConfig.model, tools),
+                    ...(omitToolChoice ? {} : { tool_choice: toChatCompletionToolChoice(effectiveToolChoice) }),
+                }
                 : {};
             result = await requestStreamingChatCompletion(requestConfig, {
                 model: requestConfig.model,

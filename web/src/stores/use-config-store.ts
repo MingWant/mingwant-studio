@@ -551,7 +551,7 @@ export function defaultBaseUrlForApiFormat(apiFormat: ApiCallFormat) {
 
 export function defaultBaseUrlForChannelInterface(interfaceType?: ChannelInterfaceType) {
     if (isGeminiModelProtocol(interfaceType)) return GEMINI_BASE_URL;
-    if (interfaceType === "newapi" || interfaceType === "newapi-channel-1" || interfaceType === "newapi-channel-2" || interfaceType === "xai-image" || interfaceType === "xai-video") return "";
+    if (interfaceType === "newapi" || interfaceType === "newapi-channel-1" || interfaceType === "newapi-channel-2" || interfaceType === "xai-image" || interfaceType === "grok2api-image" || interfaceType === "xai-video" || interfaceType === "grok2api-video") return "";
     return OPENAI_BASE_URL;
 }
 

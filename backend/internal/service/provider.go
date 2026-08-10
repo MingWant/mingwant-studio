@@ -453,6 +453,9 @@ func systemChannelIDFromBaseURL(baseURL string) string {
 }
 
 func runImageTask(ctx context.Context, input canvasGenerationInput) (map[string]interface{}, error) {
+	if isGrok2APIImageConfig(input.Config) {
+		return runGrok2APIImageTask(ctx, input)
+	}
 	if isXAIImageConfig(input.Config) {
 		return runXAIImageTask(ctx, input)
 	}
@@ -799,6 +802,9 @@ func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]
 	if input.Config.InterfaceType == "gemini-veo" {
 		return runGeminiVeoVideoTask(ctx, input)
 	}
+	if isGrok2APIVideoConfig(input.Config) {
+		return runGrok2APIVideoTask(ctx, input)
+	}
 	if input.Config.InterfaceType == "newapi-channel-2" {
 		return runNewAPIChannel2VideoTask(ctx, input)
 	}
@@ -1043,7 +1049,7 @@ func newAPIChannel2CreateError(modelName string, err error) error {
 		return err
 	}
 	return publicTaskError{
-		message: "NewAPI Video Generations 创建请求已到达中转，但当前 Grok 上游返回 HTTP 404；中转需要把 /v1/video/generations 转换为 xAI 的 /v1/videos/generations。单独修改本系统 Base URL 无法补上中转端缺失的适配，本次请求已被明确拒绝",
+		message: "NewAPI Video Generations 创建请求已到达中转，但当前 Grok 上游返回 HTTP 404；中转需要把 /v1/video/generations 转换为 xAI/grok2api 使用的 /v1/videos/generations。单独修改本系统 Base URL 无法补上中转端缺失的适配，本次请求已被明确拒绝",
 		cause:   err,
 	}
 }
@@ -1401,8 +1407,8 @@ func validateGenerationInterface(mode string, interfaceType string) error {
 	}
 	allowed := map[string]map[string]bool{
 		"text":  {"chat-completion": true, "openai-response": true, "gemini-content": true},
-		"image": {"openai-image": true, "xai-image": true},
-		"video": {"newapi": true, "newapi-channel-1": true, "newapi-channel-2": true, "xai-video": true, "gemini-veo": true},
+		"image": {"openai-image": true, "xai-image": true, "grok2api-image": true},
+		"video": {"newapi": true, "newapi-channel-1": true, "newapi-channel-2": true, "xai-video": true, "grok2api-video": true, "gemini-veo": true},
 		"audio": {"openai-audio": true},
 	}
 	if allowed[mode] != nil && !allowed[mode][interfaceType] {

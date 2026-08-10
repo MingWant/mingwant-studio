@@ -285,6 +285,63 @@ func TestXAIImageGenerationUsesOfficialFields(t *testing.T) {
 	}
 }
 
+func TestRunGrok2APIImageTaskUsesJSONWithoutXAIStorageOptions(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	paths := make([]string, 0, 1)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if authorization := r.Header.Get("Authorization"); authorization != "Bearer test-key" {
+			t.Errorf("Authorization = %q", authorization)
+		}
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/images/edits" {
+			http.NotFound(w, r)
+			return
+		}
+		if contentType := r.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+			t.Errorf("Content-Type = %q", contentType)
+		}
+		var body map[string]interface{}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode grok2api image request: %v", err)
+		}
+		image, ok := body["image"].(map[string]interface{})
+		if !ok || image["url"] != testReferenceImageDataURL || len(image) != 1 {
+			t.Errorf("grok2api image = %#v", body["image"])
+		}
+		if body["response_format"] != "b64_json" || body["resolution"] != "1k" {
+			t.Errorf("grok2api request = %#v", body)
+		}
+		for _, unsupported := range []string{"storage_options", "output", "type"} {
+			if _, exists := body[unsupported]; exists {
+				t.Errorf("request includes unsupported field %q: %#v", unsupported, body)
+			}
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"data":[{"b64_json":"aGVsbG8=","mime_type":"image/png"}]}`))
+	}))
+	defer server.Close()
+
+	config := providerConfig{BaseURL: server.URL + "/v1", APIKey: "test-key", Model: "grok-imagine-image-quality", InterfaceType: "grok2api-image", Size: "auto"}
+	if isXAIImageConfig(config) {
+		t.Fatal("explicit grok2api image protocol must not use xAI Files adapter")
+	}
+	result, err := runImageTask(context.Background(), canvasGenerationInput{
+		Prompt:          "turn it into a sketch",
+		Config:          config,
+		ReferenceImages: []providerMedia{{ID: "image-1", DataURL: testReferenceImageDataURL}},
+	})
+	if err != nil {
+		t.Fatalf("runImageTask() error = %v", err)
+	}
+	images, ok := result["images"].([]map[string]string)
+	if !ok || len(images) != 1 || images[0]["dataUrl"] != testReferenceImageDataURL {
+		t.Fatalf("images = %#v", result["images"])
+	}
+	if got := strings.Join(paths, ","); got != "POST /v1/images/edits" {
+		t.Fatalf("paths = %q", got)
+	}
+}
+
 func TestXAIImageDataURLsDownloadsTemporaryResult(t *testing.T) {
 	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -697,6 +754,77 @@ func TestRunVideoTaskKeepsExplicitNewAPIProtocolForGrokModel(t *testing.T) {
 		t.Fatalf("video = %#v", result["video"])
 	}
 	want := "POST /v1/videos,GET /v1/videos/video-1,GET /files/video.mp4"
+	if got := strings.Join(paths, ","); got != want {
+		t.Fatalf("paths = %q, want %q", got, want)
+	}
+}
+
+func TestRunGrok2APIVideoTaskUsesNativeJSONAndAuthenticatedContent(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	paths := make([]string, 0, 3)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		if authorization := r.Header.Get("Authorization"); authorization != "Bearer test-key" {
+			t.Errorf("Authorization = %q", authorization)
+		}
+		switch r.Method + " " + r.URL.Path {
+		case "POST /v1/videos/generations":
+			if contentType := r.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
+				t.Errorf("Content-Type = %q", contentType)
+			}
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode grok2api request: %v", err)
+			}
+			if body["model"] != "grok-imagine-video-1.5" || body["prompt"] != "make it move" || body["duration"] != float64(8) || body["aspect_ratio"] != "9:16" || body["resolution"] != "720p" {
+				t.Errorf("grok2api request = %#v", body)
+			}
+			image, ok := body["image"].(map[string]interface{})
+			if !ok || image["url"] != testReferenceImageDataURL {
+				t.Errorf("grok2api image = %#v", body["image"])
+			}
+			if _, exists := body["storage_options"]; exists {
+				t.Errorf("grok2api request must not contain storage_options: %#v", body)
+			}
+			if _, exists := body["output"]; exists {
+				t.Errorf("grok2api request must not contain output: %#v", body)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"request_id":"video-1"}`))
+		case "GET /v1/videos/video-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"done","video":{"url":"https://temporary.example/video.mp4"}}`))
+		case "GET /v1/videos/video-1/content":
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write([]byte("video"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := runVideoTask(context.Background(), canvasGenerationInput{
+		Prompt: "make it move",
+		Config: providerConfig{
+			BaseURL:       server.URL + "/v1",
+			APIKey:        "test-key",
+			Model:         "grok-imagine-video-1.5",
+			InterfaceType: "grok2api-video",
+			VideoSeconds:  "8",
+			Size:          "9:16",
+			VQuality:      "720",
+		},
+		ReferenceImages: []providerMedia{{ID: "image-1", DataURL: testReferenceImageDataURL}},
+		Metadata:        map[string]interface{}{"videoEditOperation": "image_to_video"},
+	})
+	if err != nil {
+		t.Fatalf("runVideoTask() error = %v", err)
+	}
+	video, ok := result["video"].(map[string]interface{})
+	if !ok || video["dataUrl"] != "data:video/mp4;base64,dmlkZW8=" {
+		t.Fatalf("video = %#v", result["video"])
+	}
+	want := "POST /v1/videos/generations,GET /v1/videos/video-1,GET /v1/videos/video-1/content"
 	if got := strings.Join(paths, ","); got != want {
 		t.Fatalf("paths = %q, want %q", got, want)
 	}

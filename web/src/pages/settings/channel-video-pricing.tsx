@@ -53,7 +53,9 @@ export function ChannelModelSettings({ channel, onChange }: { channel: ModelChan
 }
 
 function defaultProtocolForModel(channel: ModelChannel, model: string): ModelProtocol {
+    if (isXAIImageModel(model) && (channel.interfaceType === "grok2api-image" || channel.interfaceType === "grok2api-video")) return "grok2api-image";
     if (isXAIImageModel(model) && (!channel.interfaceType || channel.interfaceType === "openai-image" || channel.interfaceType === "xai-image" || channel.interfaceType === "xai-video")) return "xai-image";
+    if (isXAIVideoModel(model) && (channel.interfaceType === "grok2api-image" || channel.interfaceType === "grok2api-video")) return "grok2api-video";
     if (isXAIVideoModel(model) && (!channel.interfaceType || channel.interfaceType === "xai-image" || channel.interfaceType === "xai-video")) return "xai-video";
     if (channel.interfaceType) return channel.interfaceType;
     if (channel.apiFormat === "gemini" && modelMatchesCapability(model, "video")) return "gemini-veo";

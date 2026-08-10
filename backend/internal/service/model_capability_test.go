@@ -20,6 +20,10 @@ func TestDefaultModelCapabilityConfigUsesProtocolLimits(t *testing.T) {
 	if xai == nil || xai.DefaultResolution != "480p" || xai.References.MaxImages != 7 || xai.References.MaxVideos != 1 || xai.References.MaxVideoDuration != 15 || !containsString(xai.Resolutions, "1080p") || containsString(xai.Resolutions, "2160p") || !containsString(xai.Operations, "reference_to_video") || !containsString(xai.Operations, "edit_video") || !containsString(xai.Operations, "extend") {
 		t.Fatalf("xAI video default capability = %#v", xai)
 	}
+	grok2api := DefaultModelCapabilityConfig(string(model.ChannelInterfaceGrok2APIVideo)).Video
+	if grok2api == nil || grok2api.References.MaxImages != 1 || grok2api.References.MaxVideos != 0 || grok2api.References.MaxAudios != 0 || !containsString(grok2api.Resolutions, "1080p") || containsString(grok2api.Resolutions, "2160p") || !containsString(grok2api.Operations, "image_to_video") || containsString(grok2api.Operations, "extend") {
+		t.Fatalf("grok2api video default capability = %#v", grok2api)
+	}
 }
 
 func TestValidateVideoTaskRejectsCapabilityViolations(t *testing.T) {

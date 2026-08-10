@@ -149,6 +149,8 @@ func TestAuthorizeSystemProxyBlocksBackendTaskMediaEndpoints(t *testing.T) {
 		{interfaceType: model.ChannelInterfaceOpenAIImage, path: "/images/edits", contentType: "multipart/form-data; boundary=test"},
 		{interfaceType: model.ChannelInterfaceXAIImage, path: "/images/generations", contentType: "application/json"},
 		{interfaceType: model.ChannelInterfaceXAIImage, path: "/images/edits", contentType: "application/json"},
+		{interfaceType: model.ChannelInterfaceGrok2APIImage, path: "/images/generations", contentType: "application/json"},
+		{interfaceType: model.ChannelInterfaceGrok2APIImage, path: "/images/edits", contentType: "application/json"},
 		{interfaceType: model.ChannelInterfaceOpenAIAudio, path: "/audio/speech", contentType: "application/json"},
 		{interfaceType: model.ChannelInterfaceNewAPIVideo, path: "/videos", contentType: "application/json"},
 	}
@@ -184,7 +186,7 @@ func TestAuthorizeSystemProxyAllowsModelLevelProtocolOverride(t *testing.T) {
 
 func TestAuthorizeSystemProxyBlocksBackendOnlyVideoInterfaces(t *testing.T) {
 	body := []byte(`{"model":"grok-image-video"}`)
-	for _, interfaceType := range []model.ChannelInterfaceType{model.ChannelInterfaceNewAPIChannel2, model.ChannelInterfaceXAIVideo} {
+	for _, interfaceType := range []model.ChannelInterfaceType{model.ChannelInterfaceNewAPIChannel2, model.ChannelInterfaceXAIVideo, model.ChannelInterfaceGrok2APIVideo} {
 		channel := &model.ModelChannel{APIFormat: "openai", InterfaceType: interfaceType, ModelsJSON: `["grok-image-video"]`}
 		if err := authorizeSystemProxy(channel, http.MethodPost, "/video/generations", "application/json", body); err == nil {
 			t.Fatalf("authorizeSystemProxy() error = nil for backend-only interface %q", interfaceType)

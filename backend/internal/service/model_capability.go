@@ -99,6 +99,14 @@ func DefaultModelCapabilityConfig(protocol string) *ModelCapabilityConfig {
 		video.Resolutions = []string{"480p", "720p", "1080p"}
 		video.DefaultResolution = "480p"
 		video.Operations = []string{"text_to_video", "image_to_video", "reference_to_video", "edit_video", "extend"}
+	case model.ChannelInterfaceGrok2APIVideo:
+		// grok2api 的公开兼容层只提供生成和轮询；Build 模型最多接收 1 张图，
+		// 因此默认按最窄公共能力开放，管理员可按实际 Web/Console 路由另行放宽。
+		video.GenerateAudio = VideoBooleanConfig{Supported: false, Default: false}
+		video.References.MaxImages = 1
+		video.Ratios = []string{"16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"}
+		video.Resolutions = []string{"480p", "720p", "1080p"}
+		video.Operations = []string{"text_to_video", "image_to_video"}
 	case model.ChannelInterfaceNewAPIVideo:
 		video.GenerateAudio = VideoBooleanConfig{Supported: false, Default: false}
 		video.References.MaxImages = 1
@@ -561,6 +569,30 @@ func validateVideoTask(profile *VideoCapabilityConfig, input canvasGenerationInp
 			if duration := input.ReferenceVideos[0].DurationMs; duration > 0 && (duration < 2_000 || duration > 15_000) {
 				return BadAuthRequest("xAI 视频续写的原片时长必须为 2-15 秒")
 			}
+		}
+	}
+	if isGrok2APIVideoConfig(input.Config) {
+		if len(input.ReferenceVideos) > 0 || len(input.ReferenceAudios) > 0 {
+			return BadAuthRequest("grok2api 公开视频接口只接受文本和图片")
+		}
+		switch operation {
+		case "text_to_video":
+			if len(input.ReferenceImages) > 0 {
+				return BadAuthRequest("grok2api 文生视频不能同时携带图片")
+			}
+		case "image_to_video":
+			if len(input.ReferenceImages) != 1 {
+				return BadAuthRequest("grok2api 图生视频必须且只能提供 1 张起始图")
+			}
+			if metadataString(input.Metadata, "videoEndFrameNodeId") != "" {
+				return BadAuthRequest("grok2api 图生视频不支持指定尾帧")
+			}
+		case "reference_to_video":
+			if len(input.ReferenceImages) == 0 {
+				return BadAuthRequest("grok2api 参考图模式至少需要 1 张图片")
+			}
+		default:
+			return BadAuthRequest("grok2api 公开视频接口不支持该生成模式")
 		}
 	}
 	return nil

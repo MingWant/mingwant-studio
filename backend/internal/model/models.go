@@ -70,11 +70,13 @@ const (
 	ChannelInterfaceGeminiContent  ChannelInterfaceType = "gemini-content"
 	ChannelInterfaceOpenAIImage    ChannelInterfaceType = "openai-image"
 	ChannelInterfaceXAIImage       ChannelInterfaceType = "xai-image"
+	ChannelInterfaceGrok2APIImage  ChannelInterfaceType = "grok2api-image"
 	ChannelInterfaceOpenAIAudio    ChannelInterfaceType = "openai-audio"
 	ChannelInterfaceNewAPIVideo    ChannelInterfaceType = "newapi"
 	ChannelInterfaceNewAPIChannel1 ChannelInterfaceType = "newapi-channel-1"
 	ChannelInterfaceNewAPIChannel2 ChannelInterfaceType = "newapi-channel-2"
 	ChannelInterfaceXAIVideo       ChannelInterfaceType = "xai-video"
+	ChannelInterfaceGrok2APIVideo  ChannelInterfaceType = "grok2api-video"
 	ChannelInterfaceGeminiVeo      ChannelInterfaceType = "gemini-veo"
 
 	ApiCallStatusSucceeded ApiCallStatus = "succeeded"

@@ -515,11 +515,11 @@ func capabilityForChannel(channel model.ModelChannel) string {
 
 func capabilityForProtocol(protocol model.ChannelInterfaceType) string {
 	switch protocol {
-	case model.ChannelInterfaceOpenAIImage, model.ChannelInterfaceXAIImage:
+	case model.ChannelInterfaceOpenAIImage, model.ChannelInterfaceXAIImage, model.ChannelInterfaceGrok2APIImage:
 		return "image"
 	case model.ChannelInterfaceOpenAIAudio:
 		return "audio"
-	case model.ChannelInterfaceNewAPIVideo, model.ChannelInterfaceNewAPIChannel1, model.ChannelInterfaceNewAPIChannel2, model.ChannelInterfaceXAIVideo, model.ChannelInterfaceGeminiVeo:
+	case model.ChannelInterfaceNewAPIVideo, model.ChannelInterfaceNewAPIChannel1, model.ChannelInterfaceNewAPIChannel2, model.ChannelInterfaceXAIVideo, model.ChannelInterfaceGrok2APIVideo, model.ChannelInterfaceGeminiVeo:
 		return "video"
 	case model.ChannelInterfaceChatCompletion, model.ChannelInterfaceOpenAIResponse, model.ChannelInterfaceGeminiContent:
 		return "text"

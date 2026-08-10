@@ -55,6 +55,26 @@ func TestChannelFromRequestStoresXAIVideoInterfaceType(t *testing.T) {
 	}
 }
 
+func TestChannelFromRequestStoresGrok2APIVideoInterfaceType(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+
+	channel, err := channelFromRequest(ChannelRequest{
+		Name:          "grok2api Video",
+		BaseURL:       server.URL + "/v1",
+		APIKey:        "secret",
+		InterfaceType: "grok2api-video",
+		Models:        []string{"grok-imagine-video-1.5"},
+	}, model.ModelChannel{})
+	if err != nil {
+		t.Fatalf("channelFromRequest() error = %v", err)
+	}
+	if channel.InterfaceType != model.ChannelInterfaceGrok2APIVideo || channel.APIFormat != "openai" {
+		t.Fatalf("channel = %#v", channel)
+	}
+}
+
 func TestChannelFromRequestStoresXAIImageInterfaceType(t *testing.T) {
 	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
 	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
@@ -72,6 +92,26 @@ func TestChannelFromRequestStoresXAIImageInterfaceType(t *testing.T) {
 	}
 	if channel.InterfaceType != model.ChannelInterfaceXAIImage {
 		t.Fatalf("InterfaceType = %q", channel.InterfaceType)
+	}
+}
+
+func TestChannelFromRequestStoresGrok2APIImageInterfaceType(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+
+	channel, err := channelFromRequest(ChannelRequest{
+		Name:          "grok2api Image",
+		BaseURL:       server.URL + "/v1",
+		APIKey:        "secret",
+		InterfaceType: "grok2api-image",
+		Models:        []string{"grok-imagine-image-quality"},
+	}, model.ModelChannel{})
+	if err != nil {
+		t.Fatalf("channelFromRequest() error = %v", err)
+	}
+	if channel.InterfaceType != model.ChannelInterfaceGrok2APIImage || channel.APIFormat != "openai" {
+		t.Fatalf("channel = %#v", channel)
 	}
 }
 

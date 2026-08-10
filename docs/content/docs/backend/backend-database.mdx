@@ -41,7 +41,7 @@
 | `tool_probe_status`、`tool_probe_checked_at` | 最近一次固定无副作用 Function Calling 诊断的终态与检查时间 |
 | `tool_probe_verifier_version`、`tool_probe_config_hash` | 工具 Schema 校验版本和服务端请求配置指纹；配置变化或校验规则升级后不再复用旧结论 |
 
-`protocol` 当前支持 Chat Completions、OpenAI Responses、Gemini GenerateContent、OpenAI Images、OpenAI Audio、OpenAI/NewAPI Videos、NewAPI 媒体任务、NewAPI Video Generations、xAI 视频和 Gemini Veo。保存模型时后端会校验协议与 `capability` 是否一致；后台任务以模型协议为最终请求契约，并据此选择鉴权、创建路径、请求体和轮询方式。
+`protocol` 当前支持 Chat Completions、OpenAI Responses、Gemini GenerateContent、OpenAI Images、xAI Imagine Images、OpenAI Audio、OpenAI/NewAPI Videos、NewAPI 媒体任务、NewAPI Video Generations、xAI 视频和 Gemini Veo。保存模型时后端会校验协议与 `capability` 是否一致；后台任务以模型协议为最终请求契约，并据此选择鉴权、创建路径、请求体和轮询方式。
 
 视频模型能力配置通过管理端保存为版本化 JSON，前端只负责展示和预填。创建任务时，后端会在预留积分前按系统模型行或自定义请求的能力配置核对提示词长度、参考资源数量/大小/时长、输出时长、比例、分辨率、音频、水印和生成模式；带 `resource:` 身份的资源大小和时长以服务端 `resources` 表为准。没有历史配置的模型按协议安全模板校验，非法配置不能通过保存。
 

@@ -441,6 +441,9 @@ func systemChannelIDFromBaseURL(baseURL string) string {
 }
 
 func runImageTask(ctx context.Context, input canvasGenerationInput) (map[string]interface{}, error) {
+	if isXAIImageConfig(input.Config) {
+		return runXAIImageTask(ctx, input)
+	}
 	var payload imageResponse
 	if input.Mask != nil {
 		// 蒙版编辑是强校验写路径：协议能力不明确时必须失败，不能静默退化为整图重绘。
@@ -796,21 +799,21 @@ func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]
 	if isSeedanceVideoConfig(input.Config) {
 		return runSeedanceVideosTask(ctx, input)
 	}
+	isXAIVideo := isXAIVideoConfig(input.Config)
 	if len(input.ReferenceVideos) > 0 || len(input.ReferenceAudios) > 0 {
+		if isXAIVideo {
+			return nil, errors.New("当前 xAI 官方视频接入只支持文本生视频和单张起始图图生视频，本次未调用供应商")
+		}
 		return nil, errors.New("OpenAI Compatible 视频接口不支持参考视频或参考音频，请切换到 Seedance / Agent Plan 渠道")
 	}
 	id := resumedProviderRequestID(ctx)
 	var created map[string]interface{}
-	if id == "" && (input.Config.InterfaceType == "xai-video" || isGrokVideoConfig(input.Config)) {
-		requestBody, err := grokVideoBody(input)
+	if id == "" && isXAIVideo {
+		requestBody, err := xaiVideoBody(input)
 		if err != nil {
 			return nil, err
 		}
-		createPath := "/videos"
-		if input.Config.InterfaceType == "xai-video" {
-			createPath = "/videos/generations"
-		}
-		if err := postJSON(ctx, input.Config, createPath, requestBody, &created); err != nil {
+		if err := postJSON(ctx, input.Config, "/videos/generations", requestBody, &created); err != nil {
 			return nil, err
 		}
 	} else if id == "" {
@@ -891,7 +894,7 @@ func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]
 		}
 		return map[string]interface{}{"mode": "video", "video": map[string]interface{}{"dataUrl": dataURL(mimeType, data), "mimeType": mimeType}}, nil
 	}
-	if status == "failed" || status == "cancelled" {
+	if status == "failed" || status == "cancelled" || status == "expired" {
 		return nil, errors.New("视频生成失败")
 	}
 	return nil, deferProviderPoll(ctx, status, status, 2500*time.Millisecond)
@@ -1331,7 +1334,7 @@ func validateGenerationInterface(mode string, interfaceType string) error {
 	}
 	allowed := map[string]map[string]bool{
 		"text":  {"chat-completion": true, "openai-response": true, "gemini-content": true},
-		"image": {"openai-image": true},
+		"image": {"openai-image": true, "xai-image": true},
 		"video": {"newapi": true, "newapi-channel-1": true, "newapi-channel-2": true, "xai-video": true, "gemini-veo": true},
 		"audio": {"openai-audio": true},
 	}
@@ -1339,63 +1342,6 @@ func validateGenerationInterface(mode string, interfaceType string) error {
 		return fmt.Errorf("接口类型 %s 不支持%s生成", interfaceType, mode)
 	}
 	return nil
-}
-
-func grokVideoBody(input canvasGenerationInput) (map[string]interface{}, error) {
-	if input.Config.InterfaceType == "xai-video" {
-		return xaiVideoBody(input)
-	}
-
-	seconds := defaultString(input.Config.VideoSeconds, "6")
-	duration, err := strconv.Atoi(seconds)
-	if err != nil || duration <= 0 {
-		duration = 6
-	}
-	body := map[string]interface{}{
-		"model":    input.Config.Model,
-		"prompt":   strings.TrimSpace(input.Prompt),
-		"duration": duration,
-		"seconds":  strconv.Itoa(duration),
-	}
-	if size := normalizeVideoSize(input.Config.Size); size != "" {
-		body["size"] = size
-	}
-	if shouldSendNewAPIVideoImages(input) && len(input.ReferenceImages) > 0 {
-		images := make([]string, 0, len(input.ReferenceImages))
-		for _, image := range input.ReferenceImages {
-			url, err := openAIImageInputURL(image)
-			if err != nil {
-				return nil, err
-			}
-			images = append(images, url)
-		}
-		body["image"] = images[0]
-		body["images"] = images
-	}
-	return body, nil
-}
-
-// xAI 生成接口与 legacy /videos 使用不同字段，保持独立可避免兼容字段触发上游 422。
-func xaiVideoBody(input canvasGenerationInput) (map[string]interface{}, error) {
-	body := map[string]interface{}{
-		"model":        input.Config.Model,
-		"prompt":       strings.TrimSpace(input.Prompt),
-		"duration":     normalizeXAIVideoDuration(input.Config.VideoSeconds),
-		"aspect_ratio": normalizeXAIVideoAspectRatio(input.Config.Size),
-		"resolution":   normalizeXAIVideoResolution(input.Config.VQuality),
-	}
-	if !shouldSendNewAPIVideoImages(input) || len(input.ReferenceImages) == 0 {
-		return body, nil
-	}
-	if len(input.ReferenceImages) > 1 {
-		return nil, fmt.Errorf("xAI 图生视频只支持 1 张起始图，当前连接了 %d 张", len(input.ReferenceImages))
-	}
-	imageURL, err := openAIImageInputURL(input.ReferenceImages[0])
-	if err != nil {
-		return nil, err
-	}
-	body["image"] = map[string]interface{}{"url": imageURL}
-	return body, nil
 }
 
 func runSeedanceVideosTask(ctx context.Context, input canvasGenerationInput) (map[string]interface{}, error) {
@@ -2201,10 +2147,6 @@ func isSeedanceVideoConfig(config providerConfig) bool {
 	return strings.Contains(model, "seedance") || strings.Contains(model, "doubao-seedance") || isArkPlanVideoConfig(config)
 }
 
-func isGrokVideoConfig(config providerConfig) bool {
-	return strings.Contains(strings.ToLower(strings.TrimSpace(config.Model)), "grok")
-}
-
 func isArkPlanVideoConfig(config providerConfig) bool {
 	return strings.Contains(strings.ToLower(config.BaseURL), "/api/plan/v3")
 }
@@ -2259,74 +2201,6 @@ func normalizeVideoResolution(value string) string {
 		return value
 	}
 	return value + "p"
-}
-
-func normalizeXAIVideoDuration(value string) int {
-	duration, err := strconv.Atoi(strings.TrimSpace(value))
-	if err != nil || duration <= 0 {
-		return 6
-	}
-	if duration > 15 {
-		return 15
-	}
-	return duration
-}
-
-func normalizeXAIVideoResolution(value string) string {
-	switch strings.ToLower(strings.TrimSpace(value)) {
-	case "480", "480p", "low":
-		return "480p"
-	case "1080", "1080p":
-		return "1080p"
-	default:
-		return "720p"
-	}
-}
-
-func normalizeXAIVideoAspectRatio(value string) string {
-	value = strings.ToLower(strings.TrimSpace(value))
-	allowed := map[string]bool{
-		"1:1": true, "16:9": true, "9:16": true, "4:3": true,
-		"3:4": true, "3:2": true, "2:3": true,
-	}
-	if allowed[value] {
-		return value
-	}
-	parts := strings.Split(value, "x")
-	if len(parts) != 2 {
-		return "16:9"
-	}
-	width, widthErr := strconv.Atoi(strings.TrimSpace(parts[0]))
-	height, heightErr := strconv.Atoi(strings.TrimSpace(parts[1]))
-	if widthErr != nil || heightErr != nil || width <= 0 || height <= 0 {
-		return "16:9"
-	}
-	ratio := float64(width) / float64(height)
-	candidates := []struct {
-		name  string
-		ratio float64
-	}{
-		{name: "1:1", ratio: 1},
-		{name: "16:9", ratio: 16.0 / 9},
-		{name: "9:16", ratio: 9.0 / 16},
-		{name: "4:3", ratio: 4.0 / 3},
-		{name: "3:4", ratio: 3.0 / 4},
-		{name: "3:2", ratio: 3.0 / 2},
-		{name: "2:3", ratio: 2.0 / 3},
-	}
-	bestName := "16:9"
-	bestDifference := 2.0
-	for _, candidate := range candidates {
-		difference := ratio - candidate.ratio
-		if difference < 0 {
-			difference = -difference
-		}
-		if difference < bestDifference {
-			bestName = candidate.name
-			bestDifference = difference
-		}
-	}
-	return bestName
 }
 
 func normalizeSeedanceDuration(value string) int {

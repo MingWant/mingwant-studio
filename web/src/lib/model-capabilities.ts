@@ -71,8 +71,13 @@ export function defaultModelCapabilityConfig(protocol?: string): ModelCapability
             video.generateAudio = { supported: true, default: true };
             video.operations = ["text_to_video", "image_to_video", "audio_to_video", "extend"];
             break;
-        case "newapi":
         case "xai-video":
+            video.references.maxImages = 1;
+            video.ratios = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"];
+            video.resolutions = ["480p", "720p", "1080p"];
+            video.defaultResolution = "480p";
+            break;
+        case "newapi":
             video.references.maxImages = 1;
             video.ratios = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"];
             break;

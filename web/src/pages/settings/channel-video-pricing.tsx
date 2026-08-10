@@ -1,6 +1,6 @@
 import { InputNumber, Segmented, Select } from "antd";
 
-import { MODEL_PROTOCOL_OPTIONS, modelProtocolCapability, modelProtocolDefinition, modelProtocolLabel, type ModelProtocol } from "@/lib/model-protocols";
+import { isXAIImageModel, isXAIVideoModel, MODEL_PROTOCOL_OPTIONS, modelProtocolCapability, modelProtocolDefinition, modelProtocolLabel, type ModelProtocol } from "@/lib/model-protocols";
 import { modelMatchesCapability, modelOptionName, type ModelChannel } from "@/stores/use-config-store";
 
 type ModelCost = NonNullable<ModelChannel["modelCosts"]>[number];
@@ -53,6 +53,8 @@ export function ChannelModelSettings({ channel, onChange }: { channel: ModelChan
 }
 
 function defaultProtocolForModel(channel: ModelChannel, model: string): ModelProtocol {
+    if (isXAIImageModel(model) && (!channel.interfaceType || channel.interfaceType === "openai-image" || channel.interfaceType === "xai-image" || channel.interfaceType === "xai-video")) return "xai-image";
+    if (isXAIVideoModel(model) && (!channel.interfaceType || channel.interfaceType === "newapi" || channel.interfaceType === "xai-image" || channel.interfaceType === "xai-video")) return "xai-video";
     if (channel.interfaceType) return channel.interfaceType;
     if (channel.apiFormat === "gemini" && modelMatchesCapability(model, "video")) return "gemini-veo";
     if (channel.apiFormat === "gemini") return "gemini-content";

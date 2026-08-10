@@ -69,6 +69,7 @@ const (
 	ChannelInterfaceOpenAIResponse ChannelInterfaceType = "openai-response"
 	ChannelInterfaceGeminiContent  ChannelInterfaceType = "gemini-content"
 	ChannelInterfaceOpenAIImage    ChannelInterfaceType = "openai-image"
+	ChannelInterfaceXAIImage       ChannelInterfaceType = "xai-image"
 	ChannelInterfaceOpenAIAudio    ChannelInterfaceType = "openai-audio"
 	ChannelInterfaceNewAPIVideo    ChannelInterfaceType = "newapi"
 	ChannelInterfaceNewAPIChannel1 ChannelInterfaceType = "newapi-channel-1"

@@ -88,7 +88,13 @@ func DefaultModelCapabilityConfig(protocol string) *ModelCapabilityConfig {
 		video.GenerateAudio = VideoBooleanConfig{Supported: true, Default: true}
 		video.Operations = []string{"text_to_video", "image_to_video", "audio_to_video", "extend"}
 		video.DefaultOperation = "text_to_video"
-	case model.ChannelInterfaceNewAPIVideo, model.ChannelInterfaceXAIVideo:
+	case model.ChannelInterfaceXAIVideo:
+		video.GenerateAudio = VideoBooleanConfig{Supported: false, Default: false}
+		video.References.MaxImages = 1
+		video.Ratios = []string{"16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"}
+		video.Resolutions = []string{"480p", "720p", "1080p"}
+		video.DefaultResolution = "480p"
+	case model.ChannelInterfaceNewAPIVideo:
 		video.GenerateAudio = VideoBooleanConfig{Supported: false, Default: false}
 		video.References.MaxImages = 1
 		video.Ratios = []string{"16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"}

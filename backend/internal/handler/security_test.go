@@ -84,6 +84,7 @@ func TestAuthorizeCustomRelayRejectsArbitraryRequestsAndCredentialQueries(t *tes
 		// 图片、音频和普通视频生成必须创建后端持久化任务，不能退回浏览器同步中继。
 		{method: http.MethodPost, target: "https://api.example.com/v1/images/generations", apiFormat: "openai", contentType: "application/json"},
 		{method: http.MethodPost, target: "https://api.example.com/v1/images/edits", apiFormat: "openai", contentType: "multipart/form-data; boundary=test"},
+		{method: http.MethodPost, target: "https://api.x.ai/v1/images/edits", apiFormat: "openai", contentType: "application/json"},
 		{method: http.MethodPost, target: "https://api.example.com/v1/audio/speech", apiFormat: "openai", contentType: "application/json"},
 		{method: http.MethodPost, target: "https://api.example.com/v1/videos", apiFormat: "openai", contentType: "application/json"},
 		{method: http.MethodPost, target: "https://api.example.com/v1/video/generations", apiFormat: "openai", contentType: "application/json"},
@@ -146,6 +147,8 @@ func TestAuthorizeSystemProxyBlocksBackendTaskMediaEndpoints(t *testing.T) {
 	}{
 		{interfaceType: model.ChannelInterfaceOpenAIImage, path: "/images/generations", contentType: "application/json"},
 		{interfaceType: model.ChannelInterfaceOpenAIImage, path: "/images/edits", contentType: "multipart/form-data; boundary=test"},
+		{interfaceType: model.ChannelInterfaceXAIImage, path: "/images/generations", contentType: "application/json"},
+		{interfaceType: model.ChannelInterfaceXAIImage, path: "/images/edits", contentType: "application/json"},
 		{interfaceType: model.ChannelInterfaceOpenAIAudio, path: "/audio/speech", contentType: "application/json"},
 		{interfaceType: model.ChannelInterfaceNewAPIVideo, path: "/videos", contentType: "application/json"},
 	}

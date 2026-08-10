@@ -12,6 +12,7 @@ import { sanitizeStoryboardText } from "@/lib/canvas/canvas-storyboard-text";
 import { pipelineStatusLabel, type CanvasStoryboardPipelineProgress, type StoryboardPipelineStage } from "@/lib/canvas/canvas-storyboard-progress";
 import { isContentModerationError } from "@/lib/generation-error";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { supportsImageReferenceProtocol } from "@/lib/model-protocols";
 import { navigateToSettings } from "@/lib/settings-navigation";
 import { configuredModelMatchesCapability, modelOptionName, resolveModelRequestConfig, useEffectiveConfig } from "@/stores/use-config-store";
 import { useThemeStore } from "@/stores/use-theme-store";
@@ -111,7 +112,7 @@ export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionR
         const label = modelOptionName(imageModel) || imageModel;
         try {
             const request = resolveModelRequestConfig(effectiveConfig, imageModel);
-            return request.interfaceType === "openai-image"
+            return supportsImageReferenceProtocol(request.interfaceType)
                 ? { state: "ready", label: `${label} · 参考图协议已声明`, detail: "任务会走图片编辑接口；实际效果仍取决于渠道是否完整实现该协议。" }
                 : { state: "unsupported", label: `${label} · 未声明参考图协议`, detail: "当前渠道可能忽略参考图，请在设置中改用支持图片编辑的渠道。" };
         } catch {

@@ -515,7 +515,7 @@ func capabilityForChannel(channel model.ModelChannel) string {
 
 func capabilityForProtocol(protocol model.ChannelInterfaceType) string {
 	switch protocol {
-	case model.ChannelInterfaceOpenAIImage:
+	case model.ChannelInterfaceOpenAIImage, model.ChannelInterfaceXAIImage:
 		return "image"
 	case model.ChannelInterfaceOpenAIAudio:
 		return "audio"

@@ -22,6 +22,7 @@ import { buildNodeMentionReferences } from "@/lib/canvas/canvas-resource-referen
 import { placeCanvasNodeGroup } from "@/lib/canvas/canvas-layout";
 import { inspectGenerationRetry } from "@/lib/generation-retry-safety";
 import { resolveChannelProbeReadiness, type ChannelProbeReadiness } from "@/lib/channel-probe-readiness";
+import { supportsImageReferenceProtocol } from "@/lib/model-protocols";
 import { navigateToSettings } from "@/lib/settings-navigation";
 import { createGenerationTask, waitForGenerationTask } from "@/services/api/task-center";
 import { configuredModelMatchesCapability, modelOptionName, resolveModelChannel, resolveModelRequestConfig, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
@@ -499,7 +500,7 @@ export function useCanvasStoryboard({
         const referenceRowCount = targetRows.filter((row) => storyboardRowUsesVisualReferences(scriptNode, row, nodesRef.current)).length;
         if (referenceRowCount) {
             try {
-                if (resolveModelRequestConfig(effectiveConfig, imageModel).interfaceType !== "openai-image") {
+                if (!supportsImageReferenceProtocol(resolveModelRequestConfig(effectiveConfig, imageModel).interfaceType)) {
                     message.warning("当前图片渠道未声明参考图编辑协议，本次没有提交任务。请切换到支持参考图/图片编辑的图片模型");
                     return;
                 }

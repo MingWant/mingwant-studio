@@ -3,6 +3,7 @@ export type ModelProtocol =
     | "openai-response"
     | "gemini-content"
     | "openai-image"
+    | "xai-image"
     | "openai-audio"
     | "newapi"
     | "newapi-channel-1"
@@ -27,6 +28,7 @@ export const MODEL_PROTOCOLS: ModelProtocolDefinition[] = [
     { value: "openai-response", label: "OpenAI Responses", capability: "text", create: "POST /v1/responses", contentType: "application/json", media: "文本与多模态输入" },
     { value: "gemini-content", label: "Gemini GenerateContent", capability: "text", create: "POST /v1beta/models/{model}:streamGenerateContent?alt=sse", contentType: "application/json / SSE", media: "文本与图像输入" },
     { value: "openai-image", label: "OpenAI Images", capability: "image", create: "POST /v1/images/generations", contentType: "application/json / multipart", media: "生成、编辑与参考图" },
+    { value: "xai-image", label: "xAI Imagine Images", capability: "image", create: "POST /v1/images/generations", contentType: "application/json", media: "最多 3 张 URL/Base64 参考图" },
     { value: "openai-audio", label: "OpenAI Audio", capability: "audio", create: "POST /v1/audio/speech", contentType: "application/json", media: "文本转语音" },
     { value: "newapi", label: "OpenAI Compatible Videos", capability: "video", create: "POST /v1/videos", poll: "GET /v1/videos/{task_id}", contentType: "multipart/form-data", media: "input_reference[] 参考图" },
     { value: "newapi-channel-1", label: "NewAPI 媒体任务", capability: "video", create: "POST /v1/videos", poll: "GET /v1/videos/{task_id}", contentType: "application/json", media: "图片、视频、音频公网 URL" },
@@ -56,6 +58,20 @@ export function modelProtocolCapability(value?: string) {
 
 export function isGeminiModelProtocol(value?: string) {
     return value === "gemini-content" || value === "gemini-veo";
+}
+
+export function isXAIImageModel(value?: string) {
+    const model = String(value || "").trim().toLowerCase().split("::").pop()?.replace(/^models\//, "") || "";
+    return model.startsWith("grok-imagine-image");
+}
+
+export function isXAIVideoModel(value?: string) {
+    const model = String(value || "").trim().toLowerCase().split("::").pop()?.replace(/^models\//, "") || "";
+    return model.startsWith("grok-imagine-video");
+}
+
+export function supportsImageReferenceProtocol(value?: string) {
+    return value === "openai-image" || value === "xai-image";
 }
 
 export function modelProtocolSummary(value?: string) {

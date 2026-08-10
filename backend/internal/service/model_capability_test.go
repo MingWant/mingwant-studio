@@ -16,6 +16,10 @@ func TestDefaultModelCapabilityConfigUsesProtocolLimits(t *testing.T) {
 	if media == nil || media.References.MaxVideos != 3 || media.References.MaxAudios != 3 || !media.GenerateAudio.Supported {
 		t.Fatalf("NewAPI media default capability = %#v", media)
 	}
+	xai := DefaultModelCapabilityConfig(string(model.ChannelInterfaceXAIVideo)).Video
+	if xai == nil || xai.DefaultResolution != "480p" || xai.References.MaxImages != 1 || !containsString(xai.Resolutions, "1080p") || containsString(xai.Resolutions, "2160p") {
+		t.Fatalf("xAI video default capability = %#v", xai)
+	}
 }
 
 func TestValidateVideoTaskRejectsCapabilityViolations(t *testing.T) {

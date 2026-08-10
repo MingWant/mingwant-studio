@@ -55,6 +55,41 @@ func TestChannelFromRequestStoresXAIVideoInterfaceType(t *testing.T) {
 	}
 }
 
+func TestChannelFromRequestStoresXAIImageInterfaceType(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
+	defer server.Close()
+
+	channel, err := channelFromRequest(ChannelRequest{
+		Name:          "xAI Imagine",
+		BaseURL:       server.URL + "/v1",
+		APIKey:        "secret",
+		InterfaceType: "xai-image",
+		Models:        []string{"grok-imagine-image-quality"},
+	}, model.ModelChannel{})
+	if err != nil {
+		t.Fatalf("channelFromRequest() error = %v", err)
+	}
+	if channel.InterfaceType != model.ChannelInterfaceXAIImage {
+		t.Fatalf("InterfaceType = %q", channel.InterfaceType)
+	}
+}
+
+func TestInferChannelInterfaceTypeRecognizesXAIImage(t *testing.T) {
+	if got := inferChannelInterfaceType([]string{"grok-imagine-image-quality"}); got != model.ChannelInterfaceXAIImage {
+		t.Fatalf("inferChannelInterfaceType() = %q", got)
+	}
+}
+
+func TestInferChannelInterfaceTypeRecognizesOfficialXAIVideo(t *testing.T) {
+	if got := inferChannelInterfaceType([]string{"grok-imagine-video-1.5"}); got != model.ChannelInterfaceXAIVideo {
+		t.Fatalf("inferChannelInterfaceType() = %q", got)
+	}
+	if got := inferChannelInterfaceType([]string{"grok-video-1.5"}); got != model.ChannelInterfaceNewAPIVideo {
+		t.Fatalf("third-party Grok alias interface = %q", got)
+	}
+}
+
 func TestChannelFromRequestUsesGeminiAuthForVeo(t *testing.T) {
 	channel, err := channelFromRequest(ChannelRequest{
 		Name:          "Gemini Veo",

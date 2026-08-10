@@ -697,7 +697,7 @@ func mergeChannelRequest(req ChannelRequest, channel model.ModelChannel) Channel
 
 func validChannelInterfaceType(value model.ChannelInterfaceType) bool {
 	switch value {
-	case model.ChannelInterfaceChatCompletion, model.ChannelInterfaceOpenAIResponse, model.ChannelInterfaceGeminiContent, model.ChannelInterfaceOpenAIImage, model.ChannelInterfaceOpenAIAudio, model.ChannelInterfaceNewAPIVideo, model.ChannelInterfaceNewAPIChannel1, model.ChannelInterfaceNewAPIChannel2, model.ChannelInterfaceXAIVideo, model.ChannelInterfaceGeminiVeo:
+	case model.ChannelInterfaceChatCompletion, model.ChannelInterfaceOpenAIResponse, model.ChannelInterfaceGeminiContent, model.ChannelInterfaceOpenAIImage, model.ChannelInterfaceXAIImage, model.ChannelInterfaceOpenAIAudio, model.ChannelInterfaceNewAPIVideo, model.ChannelInterfaceNewAPIChannel1, model.ChannelInterfaceNewAPIChannel2, model.ChannelInterfaceXAIVideo, model.ChannelInterfaceGeminiVeo:
 		return true
 	default:
 		return false
@@ -706,9 +706,19 @@ func validChannelInterfaceType(value model.ChannelInterfaceType) bool {
 
 func inferChannelInterfaceType(models []string) model.ChannelInterfaceType {
 	for _, name := range models {
+		if isXAIVideoModelName(name) {
+			return model.ChannelInterfaceXAIVideo
+		}
+	}
+	for _, name := range models {
 		value := strings.ToLower(name)
 		if strings.Contains(value, "video") || strings.Contains(value, "seedance") || strings.Contains(value, "sora") || strings.Contains(value, "veo") || strings.Contains(value, "kling") || strings.Contains(value, "wan") || strings.Contains(value, "hailuo") {
 			return model.ChannelInterfaceNewAPIVideo
+		}
+	}
+	for _, name := range models {
+		if isXAIImageModelName(name) {
+			return model.ChannelInterfaceXAIImage
 		}
 	}
 	for _, name := range models {

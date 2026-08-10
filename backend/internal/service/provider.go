@@ -106,6 +106,7 @@ type providerAnalyticsContext struct {
 	Service                    *Service
 	UserID                     string
 	TaskID                     string
+	TaskAttempts               int
 	LeaseOwner                 string
 	DispatchCheckpointRequired bool
 	BillingOrderID             string
@@ -122,7 +123,7 @@ type providerAnalyticsContext struct {
 
 func withProviderAnalytics(ctx context.Context, service *Service, task model.Task) context.Context {
 	metadata := providerAnalyticsContext{
-		Service: service, UserID: task.UserID, TaskID: task.ID, LeaseOwner: task.LeaseOwner,
+		Service: service, UserID: task.UserID, TaskID: task.ID, TaskAttempts: task.Attempts, LeaseOwner: task.LeaseOwner,
 		DispatchCheckpointRequired: service != nil && task.Status == model.TaskStatusRunning && strings.TrimSpace(task.LeaseOwner) != "",
 		BillingOrderID:             task.BillingOrderID, Capability: capabilityFromTaskType(task.Type), Operation: task.Operation,
 		Model: task.Model, ProviderRequestID: task.ProviderRequestID, PollStage: task.PollStage,
@@ -800,20 +801,47 @@ func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]
 		return runSeedanceVideosTask(ctx, input)
 	}
 	isXAIVideo := isXAIVideoConfig(input.Config)
-	if len(input.ReferenceVideos) > 0 || len(input.ReferenceAudios) > 0 {
-		if isXAIVideo {
-			return nil, errors.New("当前 xAI 官方视频接入不支持参考视频或参考音频；多参考图实验模式只接受图片，本次未调用供应商")
-		}
+	if !isXAIVideo && (len(input.ReferenceVideos) > 0 || len(input.ReferenceAudios) > 0) {
 		return nil, errors.New("OpenAI Compatible 视频接口不支持参考视频或参考音频，请切换到 Seedance / Agent Plan 渠道")
 	}
 	id := resumedProviderRequestID(ctx)
+	xaiRecoveryLocator, xaiRecoveryFilename := "", ""
+	if isXAIVideo {
+		if id != "" {
+			if filename, ok := xaiVideoRecoveryFilename(id); ok {
+				return recoverXAIVideoStoredTask(ctx, input.Config, filename)
+			}
+			if strings.HasPrefix(id, xaiVideoRecoveryLocatorPrefix) {
+				return nil, xaiVideoCreateRecoveryError(errors.New("invalid xAI video recovery locator"))
+			}
+		} else {
+			xaiRecoveryLocator, xaiRecoveryFilename = xaiVideoRecoveryLocator(ctx)
+		}
+	}
 	var created map[string]interface{}
 	if id == "" && isXAIVideo {
-		requestBody, err := xaiVideoBody(input)
+		requestPath, requestBody, err := xaiVideoRequest(input)
 		if err != nil {
 			return nil, err
 		}
-		if err := postJSON(ctx, input.Config, "/videos/generations", requestBody, &created); err != nil {
+		if xaiRecoveryFilename != "" {
+			requestBody["storage_options"] = map[string]interface{}{
+				"filename":      xaiRecoveryFilename,
+				"expires_after": xaiVideoStoredResultExpiresAfterSeconds,
+			}
+		}
+		if err := postJSON(ctx, input.Config, requestPath, requestBody, &created); err != nil {
+			if shouldRecoverXAIImagineCreate(err) && xaiRecoveryLocator != "" {
+				recoveryCtx, checkpointErr := checkpointXAIVideoRecoveryLocator(ctx, xaiRecoveryLocator)
+				if checkpointErr != nil {
+					return nil, xaiVideoCreateRecoveryError(errors.Join(err, checkpointErr))
+				}
+				result, recoveryErr := recoverXAIVideoStoredTask(recoveryCtx, input.Config, xaiRecoveryFilename)
+				if recoveryErr == nil || isProviderPollDeferred(recoveryErr) {
+					return result, recoveryErr
+				}
+				return nil, xaiVideoCreateRecoveryError(errors.Join(err, recoveryErr))
+			}
 			return nil, err
 		}
 	} else if id == "" {
@@ -868,6 +896,13 @@ func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]
 		}
 	}
 	if id == "" {
+		if isXAIVideo && xaiRecoveryLocator != "" {
+			recoveryCtx, checkpointErr := checkpointXAIVideoRecoveryLocator(ctx, xaiRecoveryLocator)
+			if checkpointErr != nil {
+				return nil, xaiVideoCreateRecoveryError(checkpointErr)
+			}
+			return recoverXAIVideoStoredTask(recoveryCtx, input.Config, xaiRecoveryFilename)
+		}
 		return nil, errors.New("视频接口没有返回任务 ID")
 	}
 	ctx = withProviderRequestID(ctx, id)

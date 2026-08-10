@@ -253,7 +253,7 @@ export function retryGenerationTask(id: string, confirmNewProviderRequest: boole
     return request<GenerationTask>(api.post(`/tasks/${encodeURIComponent(id)}/retry`, { confirmNewProviderRequest }));
 }
 
-export function queryFailedVideoProviderTask(id: string) {
+export function queryFailedProviderTask(id: string) {
     return request<ProviderTaskQueryResult>(api.post(`/tasks/${encodeURIComponent(id)}/query-provider`));
 }
 

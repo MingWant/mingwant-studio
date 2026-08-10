@@ -299,7 +299,8 @@ func (s *Service) recordWorkerHeartbeat(err error) {
 	}
 }
 
-// 过期租约重新领取时，只允许继续明确未 dispatched 的新请求或查询已有异步任务；模糊状态绝不能自动重放。
+// 过期租约重新领取时，只允许继续明确未 dispatched 的新请求、查询已有异步任务，
+// 或读取已保存且带严格恢复标识的媒体结果；模糊状态绝不能自动重放。
 func (s *Service) recoveredTaskCanContinue(task *model.Task) (bool, *model.BillingOrder, error) {
 	if task == nil || !task.LeaseRecovered {
 		return true, nil, nil
@@ -329,7 +330,7 @@ func recoverableProviderPollingTask(task *model.Task) bool {
 	if task == nil || strings.TrimSpace(task.ProviderRequestID) == "" {
 		return false
 	}
-	return strings.HasPrefix(task.Type, "canvas_video") || strings.HasPrefix(task.Type, "video_")
+	return strings.HasPrefix(task.Type, "canvas_video") || strings.HasPrefix(task.Type, "video_") || isXAIImageRecoveryTask(task)
 }
 
 func (s *Service) failClaimedTaskBeforeProvider(task *model.Task, claimOwner string, message string) error {

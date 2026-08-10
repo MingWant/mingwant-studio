@@ -40,6 +40,8 @@ export type VideoBooleanConfig = {
     default: boolean;
 };
 
+export const MODEL_CAPABILITY_CONFIG_VERSION = 2;
+
 export function defaultModelCapabilityConfig(protocol?: string): ModelCapabilityConfig {
     const video: VideoCapabilityConfig = {
         references: { promptMaxChars: 10_000, maxImages: 9, maxImageBytes: 30 * 1024 * 1024, maxVideos: 0, maxVideoBytes: 0, maxVideoDurationSeconds: 0, maxAudios: 0, maxAudioBytes: 0, maxAudioDurationSeconds: 0 },
@@ -73,21 +75,42 @@ export function defaultModelCapabilityConfig(protocol?: string): ModelCapability
             break;
         case "xai-video":
             video.references.maxImages = 7;
+            video.references.maxVideos = 1;
+            video.references.maxVideoDurationSeconds = 15;
             video.ratios = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"];
             video.resolutions = ["480p", "720p", "1080p"];
             video.defaultResolution = "480p";
-            video.operations = ["text_to_video", "image_to_video", "reference_to_video"];
+            video.operations = ["text_to_video", "image_to_video", "reference_to_video", "edit_video", "extend"];
             break;
         case "newapi":
             video.references.maxImages = 1;
             video.ratios = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"];
             break;
     }
-    return { version: 1, video };
+    return { version: MODEL_CAPABILITY_CONFIG_VERSION, video };
 }
 
 export function videoCapabilityFromConfig(config: ModelCapabilityConfig | undefined, protocol?: string) {
-    return config?.video || defaultModelCapabilityConfig(protocol).video!;
+    const video = config?.video || defaultModelCapabilityConfig(protocol).video!;
+    // 与后端 v1→v2 的窄迁移保持一致，让尚未重新保存的本地自定义 xAI 配置也能立即看到官方编辑/续写入口。
+    if (protocol === "xai-video" && (config?.version || 0) < MODEL_CAPABILITY_CONFIG_VERSION && isLegacyXAIVideoOperations(video.operations)) {
+        return {
+            ...video,
+            references: { ...video.references, maxVideos: 1, maxVideoDurationSeconds: 15 },
+            operations: ["text_to_video", "image_to_video", "reference_to_video", "edit_video", "extend"],
+        };
+    }
+    return video;
+}
+
+function isLegacyXAIVideoOperations(values: string[]) {
+    if (values.length !== 3) return false;
+    const normalized = values.map((value) => value.trim().toLowerCase());
+    return new Set(normalized).size === normalized.length
+        && normalized.includes("text_to_video")
+        && normalized.includes("image_to_video")
+        && normalized.includes("reference_to_video")
+        && normalized.every((value) => ["text_to_video", "image_to_video", "reference_to_video"].includes(value));
 }
 
 export function resolveVideoOperation(
@@ -109,6 +132,8 @@ export function resolveVideoOperation(
 
     // 连接参考图后，残留的 text_to_video 会让真实输入和任务模式不一致；优先切到可用的图生视频。
     if (stored === "text_to_video" && hasImages && isSupported("image_to_video")) return "image_to_video";
+    if (stored === "text_to_video" && hasVideos && isSupported("extend")) return "extend";
+    if (stored === "text_to_video" && hasAudios && isSupported("audio_to_video")) return "audio_to_video";
     if (stored && isSupported(stored)) return stored as CanvasVideoEditOperation;
 
     const candidates = [preferred, capability?.defaultOperation || "", "text_to_video", "image_to_video"];

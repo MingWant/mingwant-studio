@@ -5,8 +5,9 @@ import { Button } from "antd";
 
 import { VideoSettingsPanel, videoResolutionLabel, videoSecondsLabel, videoSizeLabel } from "@/components/video-settings-panel";
 import { canvasThemes } from "@/lib/canvas-theme";
+import { isXAIVideoRequest } from "@/lib/model-protocols";
 import { useThemeStore } from "@/stores/use-theme-store";
-import type { AiConfig } from "@/stores/use-config-store";
+import { resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
 import type { CanvasVideoEditOperation } from "@/types/canvas";
 
 type CanvasVideoSettingsPopoverProps = {
@@ -23,6 +24,13 @@ export function CanvasVideoSettingsPopover({ config, operation, onConfigChange, 
     const panelRef = useRef<HTMLDivElement>(null);
     const [open, setOpen] = useState(false);
     const [buttonRect, setButtonRect] = useState<DOMRect | null>(null);
+    const request = resolveModelRequestConfig(config, config.model || config.videoModel);
+    const xai = isXAIVideoRequest(request.interfaceType, request.model);
+    const summary = xai && operation === "edit_video"
+        ? "沿用原片参数 · 最高 720P"
+        : xai && operation === "extend"
+          ? `新增 ${videoSecondsLabel(config.videoSeconds)} · 沿用原片画面`
+          : `${videoResolutionLabel(config.vquality)} · ${videoSizeLabel(config.size)} · ${videoSecondsLabel(config.videoSeconds)}`;
 
     useEffect(() => {
         if (!open) return;
@@ -52,7 +60,7 @@ export function CanvasVideoSettingsPopover({ config, operation, onConfigChange, 
             <span ref={buttonRef} className="inline-flex min-w-0">
                 <Button size="small" type="text" className={buttonClassName || "!h-8 !max-w-[170px] !justify-start !rounded-full !px-2.5"} style={{ background: theme.node.fill, color: theme.node.text }} icon={<Settings2 className="size-3.5" />} onClick={() => setOpen((current) => !current)}>
                     <span className="truncate">
-                        {videoResolutionLabel(config.vquality)} · {videoSizeLabel(config.size)} · {videoSecondsLabel(config.videoSeconds)}
+                        {summary}
                     </span>
                 </Button>
             </span>
@@ -107,6 +115,7 @@ function VideoSettingsPortal({
     return createPortal(
         <div
             ref={panelRef}
+            data-canvas-no-zoom
             className="canvas-image-settings-popover aceternity-floating-panel backdrop-blur-2xl"
             style={style}
             onPointerDown={(event) => event.stopPropagation()}

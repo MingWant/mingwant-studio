@@ -17,7 +17,7 @@ func TestDefaultModelCapabilityConfigUsesProtocolLimits(t *testing.T) {
 		t.Fatalf("NewAPI media default capability = %#v", media)
 	}
 	xai := DefaultModelCapabilityConfig(string(model.ChannelInterfaceXAIVideo)).Video
-	if xai == nil || xai.DefaultResolution != "480p" || xai.References.MaxImages != 7 || !containsString(xai.Resolutions, "1080p") || containsString(xai.Resolutions, "2160p") || !containsString(xai.Operations, "reference_to_video") {
+	if xai == nil || xai.DefaultResolution != "480p" || xai.References.MaxImages != 7 || xai.References.MaxVideos != 1 || xai.References.MaxVideoDuration != 15 || !containsString(xai.Resolutions, "1080p") || containsString(xai.Resolutions, "2160p") || !containsString(xai.Operations, "reference_to_video") || !containsString(xai.Operations, "edit_video") || !containsString(xai.Operations, "extend") {
 		t.Fatalf("xAI video default capability = %#v", xai)
 	}
 }
@@ -82,6 +82,58 @@ func TestValidateXAIVideoReferenceModeLimits(t *testing.T) {
 	highResolution.Config.VQuality = "1080"
 	if err := validateVideoTask(profile, highResolution); err == nil || !strings.Contains(err.Error(), "最高支持 720P") {
 		t.Fatalf("xAI reference resolution error = %v", err)
+	}
+}
+
+func TestValidateXAIVideoSourceModes(t *testing.T) {
+	profile := DefaultModelCapabilityConfig(string(model.ChannelInterfaceXAIVideo)).Video
+	edit := canvasGenerationInput{
+		Mode:            "video",
+		Prompt:          "add a silver necklace",
+		// edits 不发送画幅或分辨率；即使旧画布保留了生成接口不支持的值，也不应阻断请求。
+		Config:          providerConfig{InterfaceType: string(model.ChannelInterfaceXAIVideo), VideoSeconds: "8", Size: "21:9", VQuality: "2160"},
+		ReferenceVideos: []providerMedia{{Name: "source.mp4", MimeType: "video/mp4", DurationMs: 7_500}},
+		Metadata:        map[string]interface{}{"videoEditOperation": "edit_video"},
+	}
+	if err := validateVideoTask(profile, edit); err != nil {
+		t.Fatalf("valid xAI video edit rejected: %v", err)
+	}
+	wrongBillingDuration := edit
+	wrongBillingDuration.Config.VideoSeconds = "6"
+	if err := validateVideoTask(profile, wrongBillingDuration); err == nil || !strings.Contains(err.Error(), "计费时长") {
+		t.Fatalf("mismatched xAI edit billing duration error = %v", err)
+	}
+	tooLongEdit := edit
+	tooLongEdit.ReferenceVideos = []providerMedia{{Name: "source.mp4", MimeType: "video/mp4", DurationMs: 8_701}}
+	tooLongEdit.Config.VideoSeconds = "9"
+	if err := validateVideoTask(profile, tooLongEdit); err == nil || !strings.Contains(err.Error(), "8.7 秒") {
+		t.Fatalf("overlong xAI edit error = %v", err)
+	}
+	extend := edit
+	extend.Config.VideoSeconds = "10"
+	extend.ReferenceVideos = []providerMedia{{Name: "source.mp4", MimeType: "video/mp4", DurationMs: 15_000}}
+	extend.Metadata = map[string]interface{}{"videoEditOperation": "extend"}
+	if err := validateVideoTask(profile, extend); err != nil {
+		t.Fatalf("valid xAI extension rejected: %v", err)
+	}
+	extend.Config.VideoSeconds = "11"
+	if err := validateVideoTask(profile, extend); err == nil || !strings.Contains(err.Error(), "2-10 秒") {
+		t.Fatalf("overlong xAI extension error = %v", err)
+	}
+}
+
+func TestNormalizeModelCapabilityConfigMigratesLegacyXAIVideoDefaults(t *testing.T) {
+	legacy := DefaultModelCapabilityConfig(string(model.ChannelInterfaceXAIVideo))
+	legacy.Version = 1
+	legacy.Video.References.MaxVideos = 0
+	legacy.Video.References.MaxVideoDuration = 0
+	legacy.Video.Operations = []string{"text_to_video", "image_to_video", "reference_to_video"}
+	normalized, err := NormalizeModelCapabilityConfig("video", string(model.ChannelInterfaceXAIVideo), legacy)
+	if err != nil {
+		t.Fatalf("NormalizeModelCapabilityConfig() error = %v", err)
+	}
+	if normalized.Version != modelCapabilityConfigVersion || normalized.Video.References.MaxVideos != 1 || !containsString(normalized.Video.Operations, "edit_video") || !containsString(normalized.Video.Operations, "extend") {
+		t.Fatalf("migrated xAI capability = %#v", normalized)
 	}
 }
 

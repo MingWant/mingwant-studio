@@ -16,6 +16,7 @@ import {
     generationReferenceUrls,
     isGenerationCanceled,
     normalizeVideoReferenceImages,
+    normalizeXAISourceVideoConfig,
     resolveMetadataReferences,
     resolveStoredReferenceImages,
     runBackendCanvasGenerationTask,
@@ -191,6 +192,10 @@ export function useCanvasGenerationRetry({ projectId, domainProjectId, activated
                 }
             }
             const videoContext = node.type === CanvasNodeType.Video ? { prompt, referenceImages: videoReferenceImages, referenceVideos: context?.referenceVideos || [], referenceAudios: context?.referenceAudios || [], characterReferences: context?.characterReferences || [], resolvedCharacterVersions: context?.resolvedCharacterVersions || [], resolvedCharacterVoices: context?.resolvedCharacterVoices || [], textCount: context?.textCount || 0, imageCount: videoReferenceImages.length, videoCount: context?.referenceVideos.length || 0, audioCount: context?.referenceAudios.length || 0 } : undefined;
+            if (videoContext) {
+                const operation = buildVideoGenerationMetadata(node, videoContext, generationConfig).videoEditOperation;
+                generationConfig = normalizeXAISourceVideoConfig(generationConfig, operation, videoContext.referenceVideos);
+            }
             setRunningNode(node.id);
             setNodes((current) => current.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, generationErrorCode: undefined, failedPromptFingerprint: undefined, ...(retryMode === "video" ? { taskId: undefined, taskStatus: undefined, taskUpdatedAt: undefined, taskStage: undefined, taskProgress: undefined, taskCreatedAt: undefined } : {}) } } : item)));
             const controller = startGenerationRequest(node.id, sourceNode.id, node.id);

@@ -34,13 +34,17 @@ export function VideoSettingsPanel({ config, operation, onConfigChange, theme, s
         return <SeedanceVideoSettingsPanel config={config} capability={capability} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} />;
     }
 
-    const durationOptions = durationValues(capability);
     const seconds = Number(config.videoSeconds) || capability.duration.default;
     const size = normalizeVideoSizeValue(config.size);
     const dimensions = readSizeDimensions(size);
     const resolution = normalizeCapabilityResolution(config.vquality);
     const request = resolveModelRequestConfig(config, config.model || config.videoModel);
-    const xaiReferenceMode = operation === "reference_to_video" && isXAIVideoRequest(request.interfaceType, request.model);
+    const xai = isXAIVideoRequest(request.interfaceType, request.model);
+    const xaiReferenceMode = operation === "reference_to_video" && xai;
+    const xaiEditMode = operation === "edit_video" && xai;
+    const xaiExtensionMode = operation === "extend" && xai;
+    const xaiSourceVideoMode = xaiEditMode || xaiExtensionMode;
+    const durationOptions = durationValues(capability).filter((value) => !xaiExtensionMode || (value >= 2 && value <= 10));
     const resolutionOptions = uniqueResolutionOptions(capability.resolutions).filter((item) => !xaiReferenceMode || normalizeCapabilityResolution(item.value) !== "1080p");
     const ratio = ratioFromSize(size, capability.ratios);
     const updateDimension = (key: "width" | "height", value: number | null) => {
@@ -50,9 +54,9 @@ export function VideoSettingsPanel({ config, operation, onConfigChange, theme, s
 
     return (
         <ImageSettingsTheme theme={theme}>
-            <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
+            <div data-canvas-no-zoom className={className} style={{ color: theme.node.text }} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
                 {showTitle ? <div className="text-sm font-semibold">视频设置</div> : null}
-                <SettingGroup title="清晰度" color={theme.node.muted}>
+                {!xaiSourceVideoMode ? <SettingGroup title="清晰度" color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-1.5">
                         {resolutionOptions.map((item) => (
                             <OptionPill key={item.value} selected={resolution === normalizeCapabilityResolution(item.value)} theme={theme} onClick={() => onConfigChange("vquality", item.value)}>
@@ -61,8 +65,8 @@ export function VideoSettingsPanel({ config, operation, onConfigChange, theme, s
                         ))}
                     </div>
                     {xaiReferenceMode ? <div className="text-[10px] leading-4 opacity-55">多参考图实验模式最高支持 720P</div> : null}
-                </SettingGroup>
-                <SettingGroup title="尺寸" color={theme.node.muted}>
+                </SettingGroup> : null}
+                {!xaiSourceVideoMode ? <SettingGroup title="尺寸" color={theme.node.muted}>
                     <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1.5">
                         <DimensionInput prefix="W" value={dimensions.width} disabled={size === "auto"} theme={theme} onChange={(value) => updateDimension("width", value)} />
                         <span className="text-xs opacity-45">×</span>
@@ -87,16 +91,22 @@ export function VideoSettingsPanel({ config, operation, onConfigChange, theme, s
                             );
                         })}
                     </div>
-                </SettingGroup>
-                <SettingGroup title="秒数" color={theme.node.muted}>
+                </SettingGroup> : (
+                    <div className="rounded-md border px-2.5 py-2 text-[10px] leading-4 opacity-70" style={{ borderColor: theme.node.stroke }}>
+                        {xaiEditMode
+                            ? "连接 1 段不超过 8.7 秒的 MP4 原片；编辑结果沿用原片时长和画幅，分辨率最高为 720P。"
+                            : "连接 1 段 2–15 秒的 MP4 原片；结果会包含原片，下面设置的秒数只表示新增部分，画幅沿用原片且最高为 720P。"}
+                    </div>
+                )}
+                {!xaiEditMode ? <SettingGroup title={xaiExtensionMode ? "新增时长" : "秒数"} color={theme.node.muted}>
                     {durationOptions.length ? <div className="grid grid-cols-4 gap-1.5">
                         {durationOptions.map((value) => (
                             <OptionPill key={value} selected={seconds === value} theme={theme} onClick={() => onConfigChange("videoSeconds", String(value))}>
                                 {value}s
                             </OptionPill>
                         ))}
-                    </div> : <DurationInput value={seconds} min={capability.duration.min || 1} max={capability.duration.max || 3600} step={capability.duration.step || 1} theme={theme} onChange={(value) => onConfigChange("videoSeconds", String(value))} />}
-                </SettingGroup>
+                    </div> : <DurationInput value={seconds} min={xaiExtensionMode ? 2 : capability.duration.min || 1} max={xaiExtensionMode ? 10 : capability.duration.max || 3600} step={capability.duration.step || 1} theme={theme} onChange={(value) => onConfigChange("videoSeconds", String(value))} />}
+                </SettingGroup> : null}
                 {capability.generateAudio.supported || capability.watermark.supported ? <SettingGroup title="输出" color={theme.node.muted}>
                     <div className="grid grid-cols-2 gap-3 rounded-md border px-2" style={{ borderColor: theme.node.stroke }}>
                         {capability.generateAudio.supported ? <SwitchRow label="生成声音" checked={boolConfig(config.videoGenerateAudio, capability.generateAudio.default)} theme={theme} onChange={(checked) => onConfigChange("videoGenerateAudio", String(checked))} /> : null}
@@ -121,7 +131,7 @@ function SeedanceVideoSettingsPanel({ config, capability, onConfigChange, theme,
 
     return (
         <ImageSettingsTheme theme={theme}>
-            <div className={className} style={{ color: theme.node.text }} onMouseDown={(event) => event.stopPropagation()}>
+            <div data-canvas-no-zoom className={className} style={{ color: theme.node.text }} onPointerDown={(event) => event.stopPropagation()} onMouseDown={(event) => event.stopPropagation()}>
                 {showTitle ? <div className="text-sm font-semibold">视频设置</div> : null}
                 <SettingGroup title="分辨率" color={theme.node.muted}>
                     <div className="grid grid-cols-3 gap-1.5">

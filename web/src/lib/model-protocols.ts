@@ -28,12 +28,12 @@ export const MODEL_PROTOCOLS: ModelProtocolDefinition[] = [
     { value: "openai-response", label: "OpenAI Responses", capability: "text", create: "POST /v1/responses", contentType: "application/json", media: "文本与多模态输入" },
     { value: "gemini-content", label: "Gemini GenerateContent", capability: "text", create: "POST /v1beta/models/{model}:streamGenerateContent?alt=sse", contentType: "application/json / SSE", media: "文本与图像输入" },
     { value: "openai-image", label: "OpenAI Images", capability: "image", create: "POST /v1/images/generations", contentType: "application/json / multipart", media: "生成、编辑与参考图" },
-    { value: "xai-image", label: "xAI Imagine Images", capability: "image", create: "POST /v1/images/generations", contentType: "application/json", media: "最多 3 张 URL/Base64 参考图" },
+    { value: "xai-image", label: "xAI Imagine Images", capability: "image", create: "POST /v1/images/generations · edits", contentType: "application/json", media: "最多 3 张 URL/Base64 参考图" },
     { value: "openai-audio", label: "OpenAI Audio", capability: "audio", create: "POST /v1/audio/speech", contentType: "application/json", media: "文本转语音" },
     { value: "newapi", label: "OpenAI Compatible Videos", capability: "video", create: "POST /v1/videos", poll: "GET /v1/videos/{task_id}", contentType: "multipart/form-data", media: "input_reference[] 参考图" },
     { value: "newapi-channel-1", label: "NewAPI 媒体任务", capability: "video", create: "POST /v1/videos", poll: "GET /v1/videos/{task_id}", contentType: "application/json", media: "图片、视频、音频公网 URL" },
     { value: "newapi-channel-2", label: "NewAPI Video Generations", capability: "video", create: "POST /v1/video/generations", poll: "GET /v1/video/generations/{task_id}", contentType: "application/json", media: "image_urls / video_urls / audio_urls" },
-    { value: "xai-video", label: "xAI 官方视频", capability: "video", create: "POST /v1/videos/generations", poll: "GET /v1/videos/{request_id}", contentType: "application/json", media: "单张起始图，或最多 7 张实验参考图" },
+    { value: "xai-video", label: "xAI 官方视频", capability: "video", create: "POST /v1/videos/generations · edits · extensions", poll: "GET /v1/videos/{request_id}", contentType: "application/json", media: "单张起始图、最多 7 张参考图，或 1 段 MP4 原片" },
     { value: "gemini-veo", label: "Gemini Veo", capability: "video", create: "POST /v1beta/models/{model}:predictLongRunning", poll: "GET /v1beta/{operation_name}", contentType: "application/json", media: "文本与单张起始图" },
 ];
 

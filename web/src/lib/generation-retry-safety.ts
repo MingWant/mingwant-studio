@@ -1,4 +1,5 @@
 import { isGenerationCostUncertainError } from "@/lib/canvas/canvas-generation-batch";
+import { hasRecoverableProviderResult } from "@/lib/generation-provider-recovery";
 import { queryGenerationTask, type GenerationTask } from "@/services/api/task-center";
 
 export type GenerationRetryInspection = {
@@ -23,13 +24,12 @@ export async function inspectGenerationRetry(sourceTaskId?: string): Promise<Gen
     if (sourceTask.status === "queued" || sourceTask.status === "running") {
         return { sourceTask, costUncertain: true, blockedReason: "原后台任务仍在排队或运行，请继续跟踪原任务，不要重复提交。" };
     }
+    if (hasRecoverableProviderResult(sourceTask)) {
+        return { sourceTask, costUncertain: true, blockedReason: "原任务已有可查询的上游结果，请先在任务详情手动查询；无法恢复时再创建新的请求。" };
+    }
     const billingPending = sourceTask.billing?.status === "reserved" || sourceTask.billing?.status === "running" || sourceTask.billing?.status === "uncertain";
     if (billingPending) {
-        const canRecoverVideo = Boolean(sourceTask.providerRequestId) && (sourceTask.type.startsWith("canvas_video") || sourceTask.type.startsWith("video_"));
-        if (canRecoverVideo) {
-            return { sourceTask, costUncertain: true, blockedReason: "原视频任务已有上游任务，请先在任务详情手动查询；无法恢复时再创建新的请求。" };
-        }
-        // 文本、图片和音频没有可查询的上游任务时，不再把用户锁死在管理员审核。
+        // 其余没有可查询上游结果的任务不再被永久锁死在管理员审核。
         // 调用方会弹出一次明确的重复计费确认，后端仍会再次校验确认事实。
         return { sourceTask, costUncertain: true };
     }

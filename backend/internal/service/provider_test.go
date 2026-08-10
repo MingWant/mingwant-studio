@@ -296,12 +296,79 @@ func TestXAIImageDataURLsDownloadsTemporaryResult(t *testing.T) {
 	}))
 	defer server.Close()
 
-	images, err := xaiImageDataURLs(context.Background(), imageResponse{Data: []map[string]interface{}{{"url": server.URL + "/temporary.jpeg"}}})
+	images, err := xaiImageDataURLs(context.Background(), providerConfig{}, imageResponse{Data: []map[string]interface{}{{"url": server.URL + "/temporary.jpeg"}}})
 	if err != nil {
 		t.Fatalf("xaiImageDataURLs() error = %v", err)
 	}
 	if len(images) != 1 || images[0]["dataUrl"] != "data:image/jpeg;base64,aW1hZ2U=" {
 		t.Fatalf("images = %#v", images)
+	}
+}
+
+func TestRunXAIImageTaskRecoversStoredResultAfterGatewayTimeout(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	createCalls := 0
+	storedFilename := ""
+	pngHeader := []byte{0x89, 'P', 'N', 'G', '\r', '\n', 0x1a, '\n'}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /v1/images/generations":
+			createCalls++
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			storage, ok := body["storage_options"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("storage_options = %#v", body["storage_options"])
+			}
+			storedFilename, _ = storage["filename"].(string)
+			if !strings.HasPrefix(storedFilename, "mingwant-image-") || storage["expires_after"] != float64(xaiImageStoredResultExpiresAfterSeconds) {
+				t.Fatalf("storage_options = %#v", storage)
+			}
+			http.Error(w, "origin timeout", 524)
+		case "GET /v1/files":
+			if got := r.URL.Query().Get("filter"); got != `name:"`+storedFilename+`"` {
+				t.Errorf("filter = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []map[string]interface{}{{"id": "file-1", "filename": storedFilename, "created_at": 10}}})
+		case "GET /v1/files/file-1/content":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(pngHeader)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.WithValue(context.Background(), providerAnalyticsKey{}, providerAnalyticsContext{
+		TaskID: "task-1", BillingOrderID: "billing-1", TaskAttempts: 1,
+	})
+	result, err := runXAIImageTask(ctx, canvasGenerationInput{
+		Prompt: "mountain landscape",
+		Config: providerConfig{BaseURL: server.URL + "/v1", APIKey: "test-key", Model: "grok-imagine-image-quality", InterfaceType: "xai-image"},
+	})
+	if err != nil {
+		t.Fatalf("runXAIImageTask() error = %v", err)
+	}
+	if createCalls != 1 {
+		t.Fatalf("supplier create calls = %d, want 1", createCalls)
+	}
+	images, ok := result["images"].([]map[string]string)
+	if !ok || len(images) != 1 || images[0]["dataUrl"] != "data:image/png;base64,iVBORw0KGgo=" {
+		t.Fatalf("images = %#v", result["images"])
+	}
+}
+
+func TestXAIImageGatewayTimeoutKeepsBillingReviewAndRejectsSSEAdvice(t *testing.T) {
+	err := xaiImageGatewayTimeoutError(providerHTTPError{StatusCode: 524})
+	if !billingFailureUncertain(err) {
+		t.Fatal("xAI image 524 must remain billing-uncertain")
+	}
+	message := taskFailureMessage(err)
+	if !strings.Contains(message, "手动查询任务") || !strings.Contains(message, "图片接口不使用 SSE") || strings.Contains(message, "改用能持续送出分片的 SSE") {
+		t.Fatalf("message = %q", message)
 	}
 }
 
@@ -641,6 +708,62 @@ func TestRunVideoTaskCorrectsLegacyGrokVideoConfigToXAIEndpoint(t *testing.T) {
 	}
 }
 
+func TestRunXAIVideoTaskRecoversStoredResultAfterCreateGatewayTimeout(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	createCalls := 0
+	storedFilename := ""
+	videoBytes := []byte{0, 0, 0, 24, 'f', 't', 'y', 'p', 'm', 'p', '4', '2'}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.Method + " " + r.URL.Path {
+		case "POST /v1/videos/generations":
+			createCalls++
+			var body map[string]interface{}
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				t.Fatalf("decode request: %v", err)
+			}
+			storage, ok := body["storage_options"].(map[string]interface{})
+			if !ok {
+				t.Fatalf("storage_options = %#v", body["storage_options"])
+			}
+			storedFilename, _ = storage["filename"].(string)
+			if !strings.HasPrefix(storedFilename, "mingwant-video-") || !strings.HasSuffix(storedFilename, ".mp4") || storage["expires_after"] != float64(xaiVideoStoredResultExpiresAfterSeconds) {
+				t.Fatalf("storage_options = %#v", storage)
+			}
+			http.Error(w, "origin timeout", 524)
+		case "GET /v1/files":
+			if got := r.URL.Query().Get("filter"); got != `name:"`+storedFilename+`"` {
+				t.Errorf("filter = %q", got)
+			}
+			w.Header().Set("Content-Type", "application/json")
+			_ = json.NewEncoder(w).Encode(map[string]interface{}{"data": []map[string]interface{}{{"id": "file-1", "filename": storedFilename, "created_at": 10}}})
+		case "GET /v1/files/file-1/content":
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(videoBytes)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	ctx := context.WithValue(context.Background(), providerAnalyticsKey{}, providerAnalyticsContext{
+		TaskID: "task-video-1", BillingOrderID: "billing-video-1", TaskAttempts: 1,
+	})
+	result, err := runVideoTask(ctx, canvasGenerationInput{
+		Prompt: "make it move",
+		Config: providerConfig{BaseURL: server.URL + "/v1", APIKey: "test-key", Model: "grok-imagine-video-1.5", InterfaceType: "xai-video", VideoSeconds: "6", Size: "16:9", VQuality: "720"},
+	})
+	if err != nil {
+		t.Fatalf("runVideoTask() error = %v", err)
+	}
+	if createCalls != 1 {
+		t.Fatalf("supplier create calls = %d, want 1", createCalls)
+	}
+	video, ok := result["video"].(map[string]interface{})
+	if !ok || video["mimeType"] != "video/mp4" || video["dataUrl"] != "data:video/mp4;base64,AAAAGGZ0eXBtcDQy" {
+		t.Fatalf("video = %#v", result["video"])
+	}
+}
+
 func TestRunVideoTaskDownloadsXAIStoredFileBeforeTemporaryURL(t *testing.T) {
 	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
 	paths := make([]string, 0, 3)
@@ -765,6 +888,81 @@ func TestXAIVideoBodyUsesOfficialImageShapeAndNormalizesSettings(t *testing.T) {
 		if _, exists := body[legacyField]; exists {
 			t.Fatalf("body includes legacy field %q: %#v", legacyField, body)
 		}
+	}
+}
+
+func TestXAIVideoRequestUsesOfficialEditEndpointAndFields(t *testing.T) {
+	path, body, err := xaiVideoRequest(canvasGenerationInput{
+		Prompt: "give the subject a silver necklace",
+		Config: providerConfig{
+			Model:         "grok-imagine-video",
+			InterfaceType: "xai-video",
+			VideoSeconds:  "8",
+			Size:          "16:9",
+			VQuality:      "1080",
+		},
+		ReferenceVideos: []providerMedia{{URL: "https://example.com/source.mp4", MimeType: "video/mp4", DurationMs: 8_000}},
+		Metadata:        map[string]interface{}{"videoEditOperation": "edit_video"},
+	})
+	if err != nil {
+		t.Fatalf("xaiVideoRequest() error = %v", err)
+	}
+	if path != "/videos/edits" {
+		t.Fatalf("path = %q", path)
+	}
+	video, ok := body["video"].(map[string]interface{})
+	if !ok || video["url"] != "https://example.com/source.mp4" {
+		t.Fatalf("video = %#v", body["video"])
+	}
+	for _, unsupported := range []string{"duration", "aspect_ratio", "resolution", "image", "reference_images"} {
+		if _, exists := body[unsupported]; exists {
+			t.Fatalf("edit body includes unsupported field %q: %#v", unsupported, body)
+		}
+	}
+}
+
+func TestXAIVideoRequestUsesOfficialExtensionEndpointAndDuration(t *testing.T) {
+	path, body, err := xaiVideoRequest(canvasGenerationInput{
+		Prompt: "continue with a slow camera pan",
+		Config: providerConfig{
+			Model:         "grok-imagine-video",
+			InterfaceType: "xai-video",
+			VideoSeconds:  "6",
+			Size:          "9:16",
+			VQuality:      "1080",
+		},
+		ReferenceVideos: []providerMedia{{DataURL: "data:video/mp4;base64,dmlkZW8=", MimeType: "video/mp4", DurationMs: 10_000}},
+		Metadata:        map[string]interface{}{"videoEditOperation": "extend"},
+	})
+	if err != nil {
+		t.Fatalf("xaiVideoRequest() error = %v", err)
+	}
+	if path != "/videos/extensions" || body["duration"] != 6 {
+		t.Fatalf("extension request = %q %#v", path, body)
+	}
+	for _, unsupported := range []string{"aspect_ratio", "resolution", "image", "reference_images"} {
+		if _, exists := body[unsupported]; exists {
+			t.Fatalf("extension body includes unsupported field %q: %#v", unsupported, body)
+		}
+	}
+}
+
+func TestXAIVideoRequestRejectsInvalidSourceModesBeforeProviderCall(t *testing.T) {
+	_, _, err := xaiVideoRequest(canvasGenerationInput{
+		Config:          providerConfig{Model: "grok-imagine-video", InterfaceType: "xai-video", VideoSeconds: "6"},
+		ReferenceVideos: []providerMedia{{URL: "https://example.com/source.webm", MimeType: "video/webm", DurationMs: 5_000}},
+		Metadata:        map[string]interface{}{"videoEditOperation": "edit_video"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "MP4") {
+		t.Fatalf("non-MP4 edit error = %v", err)
+	}
+	_, _, err = xaiVideoRequest(canvasGenerationInput{
+		Config:          providerConfig{Model: "grok-imagine-video", InterfaceType: "xai-video", VideoSeconds: "11"},
+		ReferenceVideos: []providerMedia{{URL: "https://example.com/source.mp4", MimeType: "video/mp4", DurationMs: 5_000}},
+		Metadata:        map[string]interface{}{"videoEditOperation": "extend"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "2-10 秒") {
+		t.Fatalf("invalid extension duration error = %v", err)
 	}
 }
 

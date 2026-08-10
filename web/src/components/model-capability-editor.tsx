@@ -1,6 +1,6 @@
 import { Divider, Input, InputNumber, Select, Space, Switch } from "antd";
 
-import { defaultModelCapabilityConfig, type ModelCapabilityConfig, type VideoCapabilityConfig } from "@/lib/model-capabilities";
+import { defaultModelCapabilityConfig, MODEL_CAPABILITY_CONFIG_VERSION, type ModelCapabilityConfig, type VideoCapabilityConfig } from "@/lib/model-capabilities";
 
 type Props = {
     protocol?: string;
@@ -10,7 +10,7 @@ type Props = {
 
 export function ModelCapabilityEditor({ protocol, value, onChange }: Props) {
     const video = value?.video || defaultModelCapabilityConfig(protocol).video!;
-    const update = (patch: Partial<VideoCapabilityConfig>) => onChange?.({ version: 1, video: { ...video, ...patch } });
+    const update = (patch: Partial<VideoCapabilityConfig>) => onChange?.({ version: MODEL_CAPABILITY_CONFIG_VERSION, video: { ...video, ...patch } });
     const updateReferences = (patch: Partial<VideoCapabilityConfig["references"]>) => update({ references: { ...video.references, ...patch } });
     const updateDuration = (patch: Partial<VideoCapabilityConfig["duration"]>) => update({ duration: { ...video.duration, ...patch } });
     const updateBoolean = (key: "generateAudio" | "watermark", patch: Partial<VideoCapabilityConfig["generateAudio"]>) => update({ [key]: { ...video[key], ...patch } } as Pick<VideoCapabilityConfig, "generateAudio" | "watermark">);

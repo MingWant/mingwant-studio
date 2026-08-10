@@ -304,8 +304,10 @@ export function buildVideoGenerationMetadata(
     const request = config ? resolveModelRequestConfig(config, config.model) : undefined;
     const operation = resolveVideoEditOperation(node, context, config);
     const referenceMode = operation === "reference_to_video";
-    const supportsEndFrame = !request || !isXAIVideoRequest(request.interfaceType, request.model);
-    const startFrame = metadata?.videoStartFrameNodeId && context?.referenceImages.some((image) => image.id === metadata.videoStartFrameNodeId) ? metadata.videoStartFrameNodeId : undefined;
+    const xai = Boolean(request && isXAIVideoRequest(request.interfaceType, request.model));
+    const supportsEndFrame = !xai;
+    const usesImageFrame = !xai || operation === "image_to_video" || referenceMode;
+    const startFrame = usesImageFrame && metadata?.videoStartFrameNodeId && context?.referenceImages.some((image) => image.id === metadata.videoStartFrameNodeId) ? metadata.videoStartFrameNodeId : undefined;
     const endFrame = (supportsEndFrame || referenceMode) && metadata?.videoEndFrameNodeId && context?.referenceImages.some((image) => image.id === metadata.videoEndFrameNodeId) ? metadata.videoEndFrameNodeId : undefined;
     return {
         videoEditOperation: operation,
@@ -316,9 +318,28 @@ export function buildVideoGenerationMetadata(
     };
 }
 
+// xAI 编辑按原片时长计费，续写的 duration 只表示新增部分；首次生成和付费重试必须共用同一规则。
+export function normalizeXAISourceVideoConfig(config: AiConfig, operation: CanvasVideoEditOperation | undefined, referenceVideos: ReferenceVideo[]) {
+    const request = resolveModelRequestConfig(config, config.model);
+    if (!isXAIVideoRequest(request.interfaceType, request.model)) return config;
+    if (operation === "extend") {
+        return { ...config, videoSeconds: String(Math.max(2, Math.min(10, Number(config.videoSeconds) || 6))) };
+    }
+    if (operation !== "edit_video" || referenceVideos.length !== 1) return config;
+    const sourceDuration = referenceVideos[0].durationMs || 0;
+    return sourceDuration > 0 ? { ...config, videoSeconds: String(Math.max(1, Math.ceil(sourceDuration / 1_000))) } : config;
+}
+
 export function normalizeVideoReferenceImages(config: AiConfig, metadata: CanvasNodeMetadata | undefined, referenceImages: ReferenceImage[]) {
     const request = resolveModelRequestConfig(config, config.model);
     if (!isXAIVideoRequest(request.interfaceType, request.model)) return referenceImages;
+
+    if (metadata?.videoEditOperation === "edit_video" || metadata?.videoEditOperation === "extend") {
+        if (referenceImages.length) {
+            throw new Error(`xAI ${metadata.videoEditOperation === "edit_video" ? "视频编辑" : "视频续写"}只接受 1 段 MP4 原片，不能混用图片。本次未调用供应商`);
+        }
+        return [];
+    }
 
     if (metadata?.videoEditOperation === "reference_to_video") {
         const channel = config.channels.find((item) => item.id === request.resolvedChannelId);
@@ -434,6 +455,9 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
             videoResolution = "720";
         }
         videoSeconds = String(normalizeCapabilityDuration(node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds, capability));
+        if (isXAIVideoRequest(requestConfig.interfaceType, requestConfig.model) && node?.metadata?.videoEditOperation === "extend") {
+            videoSeconds = String(Math.max(2, Math.min(10, Number(videoSeconds) || 6)));
+        }
         if (!capability.generateAudio.supported) videoGenerateAudio = "false";
         if (!capability.watermark.supported) videoWatermark = "false";
     }

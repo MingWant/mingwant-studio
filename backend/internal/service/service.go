@@ -522,6 +522,9 @@ func (s *Service) validateSourceTaskForNewRequest(userID string, prompt string, 
 		return nil, BadAuthRequest(contentModerationRetryMessage)
 	}
 	s.hydrateTaskProviderRequestID(source)
+	if recoverableProviderPollingTask(source) && strings.TrimSpace(source.BillingOrderID) == "" {
+		return nil, BadAuthRequest("原任务已有可查询的上游结果，请先使用“手动查询任务”；无法恢复时再联系管理员核对")
+	}
 	// 自定义渠道可能没有平台计费订单，但调用日志仍能证明供应商已经成功收到一次付费请求；
 	// 这种来源不能被“没有订单”误判为安全重试，先恢复或人工核对原调用。
 	hasSuccessfulCall, err := s.repo.TaskHasSuccessfulBillableCall(source.ID)
@@ -546,8 +549,8 @@ func (s *Service) validateSourceTaskForNewRequest(userID string, prompt string, 
 			return nil, BadAuthRequest("来源任务与计费订单归属不一致")
 		}
 		if order.Status == model.BillingStatusReserved || order.Status == model.BillingStatusRunning || order.Status == model.BillingStatusUncertain {
-			if source.ProviderRequestID != "" && (strings.HasPrefix(source.Type, "canvas_video") || strings.HasPrefix(source.Type, "video_")) {
-				return nil, BadAuthRequest("原视频任务已有上游任务，请先使用“手动查询任务”；无法恢复时再联系管理员核对")
+			if recoverableProviderPollingTask(source) {
+				return nil, BadAuthRequest("原任务已有可查询的上游结果，请先使用“手动查询任务”；无法恢复时再联系管理员核对")
 			}
 			if !req.ConfirmNewProviderRequest {
 				return nil, BadAuthRequest("原任务费用尚待核对；请在确认可能重复计费后再创建新的供应商请求")
@@ -759,6 +762,9 @@ func (s *Service) RetryTask(userID string, id string, confirmNewProviderRequest 
 		return nil, BadAuthRequest(contentModerationRetryMessage)
 	}
 	s.hydrateTaskProviderRequestID(task)
+	if recoverableProviderPollingTask(task) && strings.TrimSpace(task.BillingOrderID) == "" {
+		return nil, BadAuthRequest("该任务已有可查询的上游结果，请先使用“手动查询任务”；仍无法恢复时再联系管理员核对")
+	}
 	// 不能只看当前任务是否绑定平台订单：自定义渠道可能没有订单，但成功调用日志仍证明原请求已经发出。
 	hasSuccessfulCall, err := s.repo.TaskHasSuccessfulBillableCall(task.ID)
 	if err != nil {
@@ -780,8 +786,8 @@ func (s *Service) RetryTask(userID string, id string, confirmNewProviderRequest 
 			return nil, BadAuthRequest("任务与计费订单归属不一致")
 		}
 		if order.Status == model.BillingStatusReserved || order.Status == model.BillingStatusRunning || order.Status == model.BillingStatusUncertain {
-			if task.ProviderRequestID != "" && (strings.HasPrefix(task.Type, "canvas_video") || strings.HasPrefix(task.Type, "video_")) {
-				return nil, BadAuthRequest("该任务已有上游任务且上一笔计费尚未结清，请先使用“手动查询任务”；仍无法恢复时请联系管理员核对")
+			if recoverableProviderPollingTask(task) {
+				return nil, BadAuthRequest("该任务已有可查询的上游结果且上一笔计费尚未结清，请先使用“手动查询任务”；仍无法恢复时请联系管理员核对")
 			}
 			if !confirmNewProviderRequest {
 				return nil, BadAuthRequest("该任务上一笔计费尚未结清；点击重试并明确确认可能重复计费即可创建新的尝试，本次未创建新的供应商请求")

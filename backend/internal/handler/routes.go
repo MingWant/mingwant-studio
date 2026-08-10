@@ -106,7 +106,7 @@ func RegisterTaskRoutes(r *gin.RouterGroup, svc *service.Service) {
 			failService(c, err)
 			return
 		}
-		result, err := svc.QueryFailedVideoTask(c.Request.Context(), user.ID, c.Param("id"))
+		result, err := svc.QueryFailedProviderTask(c.Request.Context(), user.ID, c.Param("id"))
 		if err != nil {
 			failService(c, err)
 			return

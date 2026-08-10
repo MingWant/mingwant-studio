@@ -22,12 +22,12 @@ type ProviderTaskQueryResult struct {
 	BillingSettled bool        `json:"billingSettled"`
 }
 
-func (s *Service) QueryFailedVideoTask(ctx context.Context, userID string, taskID string) (*ProviderTaskQueryResult, error) {
+func (s *Service) QueryFailedProviderTask(ctx context.Context, userID string, taskID string) (*ProviderTaskQueryResult, error) {
 	task, err := s.repo.TaskForUser(strings.TrimSpace(userID), strings.TrimSpace(taskID))
 	if err != nil {
 		return nil, err
 	}
-	return s.queryFailedVideoTask(ctx, task, strings.TrimSpace(userID), nil, "")
+	return s.queryFailedProviderTask(ctx, task, strings.TrimSpace(userID), nil, "")
 }
 
 func (s *Service) AdminQueryFailedVideoTask(ctx context.Context, actor *model.User, logID string) (*ProviderTaskQueryResult, error) {
@@ -60,24 +60,25 @@ func (s *Service) AdminQueryFailedVideoTask(ctx context.Context, actor *model.Us
 		return nil, BadAuthRequest("请求日志中的供应商任务 ID 与当前任务不一致")
 	}
 	task.ProviderRequestID = providerRequestID
-	return s.queryFailedVideoTask(ctx, task, "", actor, log.ID)
+	return s.queryFailedProviderTask(ctx, task, "", actor, log.ID)
 }
 
-func (s *Service) queryFailedVideoTask(ctx context.Context, task *model.Task, claimUserID string, actor *model.User, apiCallLogID string) (*ProviderTaskQueryResult, error) {
+func (s *Service) queryFailedProviderTask(ctx context.Context, task *model.Task, claimUserID string, actor *model.User, apiCallLogID string) (*ProviderTaskQueryResult, error) {
 	if task == nil || task.ID == "" {
 		return nil, BadAuthRequest("任务不存在")
 	}
 	if task.Status != model.TaskStatusFailed && task.Status != model.TaskStatusCancelled {
 		return nil, BadAuthRequest("只能人工查询状态为失败或已取消的任务")
 	}
-	if !strings.HasPrefix(task.Type, "canvas_video") && !strings.HasPrefix(task.Type, "video_") {
-		return nil, BadAuthRequest("该任务不是视频生成任务")
-	}
 	if err := providerTaskRecoveryWaitError(task.NextPollAt); err != nil {
 		return nil, err
 	}
 
 	s.hydrateTaskProviderRequestID(task)
+	recoveryMode := providerTaskRecoveryMode(task)
+	if recoveryMode == "" {
+		return nil, BadAuthRequest("该任务没有可安全查询的上游结果")
+	}
 	providerRequestID := strings.TrimSpace(task.ProviderRequestID)
 	if providerRequestID == "" {
 		return nil, BadAuthRequest("该任务没有可恢复的上游任务 ID")
@@ -130,8 +131,11 @@ func (s *Service) queryFailedVideoTask(ctx context.Context, task *model.Task, cl
 	if err != nil {
 		return nil, markProviderPreparationFailure(err)
 	}
-	if err := validateGenerationInterface("video", config.InterfaceType); err != nil {
-		return nil, BadAuthRequest("该任务的供应商协议不支持视频恢复")
+	if err := validateGenerationInterface(recoveryMode, config.InterfaceType); err != nil {
+		return nil, BadAuthRequest("该任务的供应商协议不支持结果恢复")
+	}
+	if recoveryMode == "image" && !isXAIImageConfig(config) {
+		return nil, BadAuthRequest("该图片任务不再使用 xAI Imagine 协议，无法安全查询原结果")
 	}
 	input.Config = config
 	task.InputJSON = decryptedInput
@@ -168,10 +172,15 @@ func (s *Service) queryFailedVideoTask(ctx context.Context, task *model.Task, cl
 	defer close(leaseDone)
 
 	queryCtx := withProviderAnalytics(recoveryCtx, s, *task)
-	result, err := runVideoTask(queryCtx, input)
+	var result map[string]interface{}
+	if recoveryMode == "video" {
+		result, err = runVideoTask(queryCtx, input)
+	} else {
+		result, err = runImageTask(queryCtx, input)
+	}
 	providerStatus := ""
 	var deferredPoll *providerPollDeferredError
-	if err != nil && !errors.As(err, &deferredPoll) {
+	if recoveryMode == "video" && err != nil && !errors.As(err, &deferredPoll) {
 		if deferred := deferTransientProviderPoll(recoveryCtx, task.PollStage, err); deferred != nil {
 			err = deferred
 		}
@@ -182,8 +191,9 @@ func (s *Service) queryFailedVideoTask(ctx context.Context, task *model.Task, cl
 		err = nil
 	}
 	if err != nil {
-		s.logTaskEventBestEffort(task.UserID, task.ID, "error", "人工查询上游视频任务失败", taskFailureMessage(err))
-		return nil, err
+		message := taskFailureMessage(err)
+		s.logTaskEventBestEffort(task.UserID, task.ID, "error", "人工查询上游结果失败", message)
+		return nil, BadAuthRequest(message)
 	}
 	select {
 	case leaseErr := <-leaseLost:
@@ -201,7 +211,7 @@ func (s *Service) queryFailedVideoTask(ctx context.Context, task *model.Task, cl
 		}
 		level := "info"
 		message := "人工查询完成，上游任务仍在处理"
-		if strings.HasPrefix(task.PollStage, providerPollRetryStagePrefix) || strings.HasPrefix(task.PollStage, newAPIChannel2RetryStagePrefix) {
+		if strings.HasPrefix(task.PollStage, providerPollRetryStagePrefix) || strings.HasPrefix(task.PollStage, newAPIChannel2RetryStagePrefix) || strings.HasPrefix(task.PollStage, xaiImageRecoveryPollStagePrefix) || strings.HasPrefix(task.PollStage, xaiVideoRecoveryPollStagePrefix) {
 			level = "warn"
 			message = "人工查询暂时失败，已按退避时间限制下次查询"
 		}
@@ -225,10 +235,10 @@ func (s *Service) queryFailedVideoTask(ctx context.Context, task *model.Task, cl
 		}
 		billingErr := s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, "标记人工查询部分结果保存失败的费用待核对", s.MarkBillingUncertain(task.BillingOrderID, "人工查询确认上游成功，但本地媒体持久化尚未完成；请恢复已保存结果，不要重新生成"))
 		if checkpointErr != nil {
-			s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "人工查询已取得视频，但部分结果检查点保存失败", errors.Join(err, checkpointErr, billingErr))
+			s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "人工查询已取得结果，但部分结果检查点保存失败", errors.Join(err, checkpointErr, billingErr))
 			return nil, errors.Join(err, checkpointErr, billingErr)
 		}
-		s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "人工查询已取得视频，但媒体持久化尚未完成", errors.Join(err, billingErr))
+		s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "人工查询已取得结果，但媒体持久化尚未完成", errors.Join(err, billingErr))
 		s.logTaskEventBestEffort(task.UserID, task.ID, "warn", "人工查询已确认上游成功，部分结果已保存", "请使用“恢复已保存结果”继续本地交付，不要重新生成")
 		return nil, BadAuthRequest("上游任务已经成功，部分结果已保存在本地；请使用“恢复已保存结果”继续交付，本次没有重新创建供应商任务")
 	}
@@ -238,7 +248,7 @@ func (s *Service) queryFailedVideoTask(ctx context.Context, task *model.Task, cl
 	}
 	if err := s.checkpointRecoveringTaskResultWithinStorageQuota(task, resultJSON, []byte("null")); err != nil {
 		billingErr := s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, "标记人工恢复结果检查点失败的费用待核对", s.MarkBillingUncertain(task.BillingOrderID, "人工查询确认上游成功，但任务结果检查点未保存；请按任务与订单核对服务端日志"))
-		s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "人工查询已取得视频，但结果检查点保存失败", err)
+		s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "人工查询已取得结果，但结果检查点保存失败", err)
 		return nil, errors.Join(err, billingErr)
 	}
 	task.Error = ""
@@ -246,7 +256,7 @@ func (s *Service) queryFailedVideoTask(ctx context.Context, task *model.Task, cl
 	task.NextPollAt = nil
 	if err := s.saveTaskCompletionWithinStorageQuota(task, resultJSON, nil, false); err != nil {
 		billingErr := s.recordBillingTransitionFailure(task.UserID, task.ID, task.BillingOrderID, "标记人工恢复结果保存失败的费用待核对", s.MarkBillingUncertain(task.BillingOrderID, "人工查询确认上游成功，但任务结果未保存；请按任务与订单核对服务端日志"))
-		s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "人工查询已取得视频，但任务恢复失败", err)
+		s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "人工查询已取得结果，但任务恢复失败", err)
 		if errors.Is(err, repository.ErrTaskStateConflict) {
 			return nil, &AuthError{Status: 409, Message: "任务状态或恢复租约已变化，请刷新后再确认"}
 		}
@@ -268,6 +278,22 @@ func (s *Service) queryFailedVideoTask(ctx context.Context, task *model.Task, cl
 		s.logTaskEventBestEffort(task.UserID, task.ID, "info", "人工查询确认生成成功，任务已恢复并完成结算", providerStatus)
 	}
 	return &ProviderTaskQueryResult{Task: taskForOutput(*task), ProviderStatus: providerStatus, Recovered: true, BillingSettled: billingSettled}, nil
+}
+
+func providerTaskRecoveryMode(task *model.Task) string {
+	if task == nil {
+		return ""
+	}
+	if strings.HasPrefix(task.Type, "canvas_video") || strings.HasPrefix(task.Type, "video_") {
+		if strings.TrimSpace(task.ProviderRequestID) != "" {
+			return "video"
+		}
+		return ""
+	}
+	if isXAIImageRecoveryTask(task) {
+		return "image"
+	}
+	return ""
 }
 
 func providerTaskRecoveryWaitError(nextPollAt *time.Time) error {

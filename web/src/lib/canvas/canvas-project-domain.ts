@@ -362,10 +362,12 @@ function storyboardReferenceMentioned(prompt: string, reference: CanvasResourceR
 }
 
 export function getInputSummary(inputs: NodeGenerationInput[]) {
+    const videos = inputs.filter((input) => input.type === "video");
     return {
         textCount: inputs.filter((input) => input.type === "text").length,
         imageCount: inputs.filter((input) => input.type === "image").length,
-        videoCount: inputs.filter((input) => input.type === "video").length,
+        videoCount: videos.length,
+        videoDurationMs: videos.length === 1 ? videos[0].video?.durationMs || 0 : 0,
         audioCount: inputs.filter((input) => input.type === "audio").length,
     };
 }

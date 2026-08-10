@@ -60,6 +60,8 @@ type VideoBooleanConfig struct {
 	Default   bool `json:"default"`
 }
 
+const modelCapabilityConfigVersion = 2
+
 // DefaultModelCapabilityConfig 为协议提供可审计的初始模板。管理员可以在模型管理中
 // 调整模板，但没有显式配置的历史视频模型仍按其协议模板校验，不会退回无界请求。
 func DefaultModelCapabilityConfig(protocol string) *ModelCapabilityConfig {
@@ -91,16 +93,18 @@ func DefaultModelCapabilityConfig(protocol string) *ModelCapabilityConfig {
 	case model.ChannelInterfaceXAIVideo:
 		video.GenerateAudio = VideoBooleanConfig{Supported: false, Default: false}
 		video.References.MaxImages = 7
+		video.References.MaxVideos = 1
+		video.References.MaxVideoDuration = 15
 		video.Ratios = []string{"16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"}
 		video.Resolutions = []string{"480p", "720p", "1080p"}
 		video.DefaultResolution = "480p"
-		video.Operations = []string{"text_to_video", "image_to_video", "reference_to_video"}
+		video.Operations = []string{"text_to_video", "image_to_video", "reference_to_video", "edit_video", "extend"}
 	case model.ChannelInterfaceNewAPIVideo:
 		video.GenerateAudio = VideoBooleanConfig{Supported: false, Default: false}
 		video.References.MaxImages = 1
 		video.Ratios = []string{"16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"}
 	}
-	return &ModelCapabilityConfig{Version: 1, Video: video}
+	return &ModelCapabilityConfig{Version: modelCapabilityConfigVersion, Video: video}
 }
 
 func NormalizeModelCapabilityConfig(capability string, protocol string, input *ModelCapabilityConfig) (*ModelCapabilityConfig, error) {
@@ -111,6 +115,7 @@ func NormalizeModelCapabilityConfig(capability string, protocol string, input *M
 	if value == nil || value.Video == nil {
 		value = DefaultModelCapabilityConfig(protocol)
 	}
+	storedVersion := value.Version
 	video := *value.Video
 	video.Duration.Selection = strings.ToLower(strings.TrimSpace(video.Duration.Selection))
 	video.Duration.Values = append([]int(nil), video.Duration.Values...)
@@ -120,7 +125,14 @@ func NormalizeModelCapabilityConfig(capability string, protocol string, input *M
 	video.DefaultResolution = normalizeResolution(video.DefaultResolution)
 	video.Operations = normalizeCapabilityStringList(video.Operations, normalizeCapabilityOperation)
 	video.DefaultOperation = normalizeCapabilityOperation(video.DefaultOperation)
-	value = &ModelCapabilityConfig{Version: 1, Video: &video}
+	// v1 的 xAI 模板发布时尚未接入官方 edits/extensions。仅迁移完整历史默认值，
+	// 管理员自定义过的操作列表保持原样，避免把主动禁用的能力重新打开。
+	if model.ChannelInterfaceType(protocol) == model.ChannelInterfaceXAIVideo && storedVersion < modelCapabilityConfigVersion && isLegacyXAIVideoOperations(video.Operations) {
+		video.References.MaxVideos = 1
+		video.References.MaxVideoDuration = 15
+		video.Operations = []string{"text_to_video", "image_to_video", "reference_to_video", "edit_video", "extend"}
+	}
+	value = &ModelCapabilityConfig{Version: modelCapabilityConfigVersion, Video: &video}
 	if err := validateVideoCapabilityConfig(value.Video); err != nil {
 		return nil, err
 	}
@@ -195,7 +207,7 @@ func initializeChannelModelCapability(item *model.ChannelModel) error {
 		return err
 	}
 	item.CapabilityConfigJSON = string(encoded)
-	item.CapabilityVersion = 1
+	item.CapabilityVersion = modelCapabilityConfigVersion
 	item.CapabilityConfig = capabilityConfigMap(value)
 	return nil
 }
@@ -398,6 +410,21 @@ func normalizeCapabilityOperation(value string) string {
 	return strings.ToLower(strings.TrimSpace(value))
 }
 
+func isLegacyXAIVideoOperations(values []string) bool {
+	if len(values) != 3 {
+		return false
+	}
+	allowed := map[string]bool{"text_to_video": true, "image_to_video": true, "reference_to_video": true}
+	seen := make(map[string]bool, len(values))
+	for _, value := range values {
+		if !allowed[value] || seen[value] {
+			return false
+		}
+		seen[value] = true
+	}
+	return seen["text_to_video"] && seen["image_to_video"] && seen["reference_to_video"]
+}
+
 func validateVideoDuration(value VideoDurationConfig) error {
 	switch value.Selection {
 	case "range":
@@ -431,6 +458,9 @@ func validateVideoTask(profile *VideoCapabilityConfig, input canvasGenerationInp
 	if utf8.RuneCountInString(input.Prompt) > profile.References.PromptMaxChars {
 		return BadAuthRequest(fmt.Sprintf("提示词超过当前模型限制（最多 %d 字）", profile.References.PromptMaxChars))
 	}
+	if isXAIVideoConfig(input.Config) && len(input.ReferenceAudios) > 0 {
+		return BadAuthRequest("xAI 公共视频接口的 reference_audios 只接受预设 voice_id，不能直接连接画布音频文件")
+	}
 	if len(input.ReferenceImages) > profile.References.MaxImages || len(input.ReferenceVideos) > profile.References.MaxVideos || len(input.ReferenceAudios) > profile.References.MaxAudios {
 		return BadAuthRequest("参考素材数量超过当前模型限制")
 	}
@@ -455,14 +485,23 @@ func validateVideoTask(profile *VideoCapabilityConfig, input canvasGenerationInp
 			return BadAuthRequest("参考音频时长超过当前模型限制")
 		}
 	}
+	operation := metadataString(input.Metadata, "videoEditOperation")
+	if operation == "" {
+		operation = defaultVideoTaskOperation(profile, input)
+	}
+	if !containsCapabilityString(profile.Operations, operation) {
+		return BadAuthRequest("当前视频模型不支持该生成模式")
+	}
+	xaiSourceVideoMode := isXAIVideoConfig(input.Config) && (operation == "edit_video" || operation == "extend")
 	seconds, err := strconv.Atoi(strings.TrimSpace(input.Config.VideoSeconds))
-	if err != nil || !videoDurationAllowed(profile.Duration, seconds) {
+	if err != nil || (!xaiSourceVideoMode && !videoDurationAllowed(profile.Duration, seconds)) {
 		return BadAuthRequest("视频时长不在当前模型支持范围内")
 	}
-	if input.Config.Size != "" && !videoRatioAllowed(profile.Ratios, input.Config.Size) {
+	// edits/extensions 不接受画幅和分辨率，旧画布残留值既不会发送给 xAI，也不应阻断任务。
+	if !xaiSourceVideoMode && input.Config.Size != "" && !videoRatioAllowed(profile.Ratios, input.Config.Size) {
 		return BadAuthRequest("画面比例不在当前模型支持范围内")
 	}
-	if quality := strings.TrimSpace(input.Config.VQuality); quality != "" && !strings.EqualFold(quality, "auto") && !containsCapabilityString(profile.Resolutions, normalizeResolution(quality)) {
+	if quality := strings.TrimSpace(input.Config.VQuality); !xaiSourceVideoMode && quality != "" && !strings.EqualFold(quality, "auto") && !containsCapabilityString(profile.Resolutions, normalizeResolution(quality)) {
 		return BadAuthRequest("输出分辨率不在当前模型支持范围内")
 	}
 	if strings.EqualFold(strings.TrimSpace(input.Config.VideoGenerateAudio), "true") && !profile.GenerateAudio.Supported {
@@ -471,18 +510,18 @@ func validateVideoTask(profile *VideoCapabilityConfig, input canvasGenerationInp
 	if strings.EqualFold(strings.TrimSpace(input.Config.VideoWatermark), "true") && !profile.Watermark.Supported {
 		return BadAuthRequest("当前视频模型不支持水印参数")
 	}
-	operation := metadataString(input.Metadata, "videoEditOperation")
-	if operation == "" {
-		operation = defaultVideoTaskOperation(profile, input)
-	}
-	if !containsCapabilityString(profile.Operations, operation) {
-		return BadAuthRequest("当前视频模型不支持该生成模式")
-	}
 	if isXAIVideoConfig(input.Config) {
 		switch operation {
+		case "text_to_video":
+			if len(input.ReferenceImages) > 0 || len(input.ReferenceVideos) > 0 || len(input.ReferenceAudios) > 0 {
+				return BadAuthRequest("xAI 文生视频不能同时携带参考素材")
+			}
 		case "image_to_video":
 			if len(input.ReferenceImages) != 1 {
 				return BadAuthRequest("xAI 图生视频必须且只能提供 1 张起始图")
+			}
+			if len(input.ReferenceVideos) > 0 || len(input.ReferenceAudios) > 0 {
+				return BadAuthRequest("xAI 图生视频只接受 1 张起始图")
 			}
 			if metadataString(input.Metadata, "videoEndFrameNodeId") != "" {
 				return BadAuthRequest("xAI 图生视频不支持指定尾帧")
@@ -497,9 +536,53 @@ func validateVideoTask(profile *VideoCapabilityConfig, input canvasGenerationInp
 			if normalizeXAIVideoResolution(input.Config.VQuality) == "1080p" {
 				return BadAuthRequest("xAI 多参考图实验模式最高支持 720P")
 			}
+		case "edit_video":
+			if len(input.ReferenceVideos) != 1 || len(input.ReferenceImages) > 0 || len(input.ReferenceAudios) > 0 {
+				return BadAuthRequest("xAI 视频编辑必须且只能提供 1 段 MP4 原片")
+			}
+			if !xaiVideoReferenceIsMP4(input.ReferenceVideos[0]) {
+				return BadAuthRequest("xAI 视频编辑的原片必须是 MP4")
+			}
+			if duration := input.ReferenceVideos[0].DurationMs; duration > 8_700 {
+				return BadAuthRequest("xAI 视频编辑的原片最长为 8.7 秒")
+			} else if duration > 0 && seconds != int((duration+999)/1_000) {
+				return BadAuthRequest("xAI 视频编辑的计费时长必须与原片时长一致，请重新选择原片")
+			}
+		case "extend":
+			if len(input.ReferenceVideos) != 1 || len(input.ReferenceImages) > 0 || len(input.ReferenceAudios) > 0 {
+				return BadAuthRequest("xAI 视频续写必须且只能提供 1 段 MP4 原片")
+			}
+			if !xaiVideoReferenceIsMP4(input.ReferenceVideos[0]) {
+				return BadAuthRequest("xAI 视频续写的原片必须是 MP4")
+			}
+			if seconds < 2 || seconds > 10 {
+				return BadAuthRequest("xAI 视频续写的新增时长必须为 2-10 秒")
+			}
+			if duration := input.ReferenceVideos[0].DurationMs; duration > 0 && (duration < 2_000 || duration > 15_000) {
+				return BadAuthRequest("xAI 视频续写的原片时长必须为 2-15 秒")
+			}
 		}
 	}
 	return nil
+}
+
+func xaiVideoReferenceIsMP4(media providerMedia) bool {
+	if mimeType := strings.ToLower(strings.TrimSpace(strings.SplitN(media.MimeType, ";", 2)[0])); mimeType != "" {
+		return mimeType == "video/mp4"
+	}
+	for _, value := range []string{media.DataURL, media.URL} {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if strings.HasPrefix(value, "data:") {
+			return strings.HasPrefix(value, "data:video/mp4")
+		}
+		if index := strings.IndexAny(value, "?#"); index >= 0 {
+			value = value[:index]
+		}
+		if strings.HasSuffix(value, ".mp4") {
+			return true
+		}
+	}
+	return strings.HasSuffix(strings.ToLower(strings.TrimSpace(media.Name)), ".mp4")
 }
 
 func defaultVideoTaskOperation(profile *VideoCapabilityConfig, input canvasGenerationInput) string {

@@ -221,7 +221,7 @@ bun run dev
 | 视频 | OpenAI Compatible Videos | `POST /v1/videos` | 默认视频主路径，支持异步查询和参考图 |
 | 视频 | NewAPI 媒体任务 | `POST /v1/videos` JSON | 通过公网媒体 URL 传递输入的 NewAPI 渠道 |
 | 视频 | NewAPI Video Generations | `POST /v1/video/generations` | 使用 `image_urls`、`video_urls`、`audio_urls` 的渠道 |
-| 视频 | xAI 官方视频 | `POST /v1/videos/generations` | Grok Imagine 文本生视频与单张起始图图生视频；按 `request_id` 查询，优先从私有 Files 结果下载 |
+| 视频 | xAI 官方视频 | `POST /v1/videos/generations` / `edits` / `extensions` | Grok Imagine 文本、单起始图、多参考图、视频编辑与续写；按 `request_id` 查询，优先从私有 Files 结果下载 |
 | 视频 | Gemini Veo | `POST /v1beta/models/{model}:predictLongRunning` | Google Gemini Veo 长任务 |
 
 视频协议还决定查询路径、请求 Content-Type、参考素材字段以及轮询方式。协议选错时，常见表现是创建路径 404、字段校验失败，或任务创建成功后无法查询。

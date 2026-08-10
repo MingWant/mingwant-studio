@@ -54,8 +54,6 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const [expandedPromptOpen, setExpandedPromptOpen] = useState(false);
     const [promptContentHeight, setPromptContentHeight] = useState(0);
     const generationCount = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
-    const priceChannel = resolveModelChannel(config, config.model);
-    const credits = requestCreditCost({ channelMode: priceChannel.scope === "system" ? "remote" : "local", modelCosts: priceChannel.modelCosts, model: modelOptionName(config.model), count: mode === "image" ? generationCount : 1, seconds: mode === "video" ? config.videoSeconds : 1 });
     const activeReferenceCount = mentionReferences.filter((item) => item.active && item.kind !== "skill").length;
     const videoReferenceCounts = {
         images: mentionReferences.filter((item) => item.active && item.kind === "image").length,
@@ -65,8 +63,16 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
     const videoCapability = mode === "video" ? videoCapabilityForConfig(config) : undefined;
     const selectedVideoOperation = mode === "video" ? resolveVideoOperation(node.metadata?.videoEditOperation, videoReferenceCounts, videoCapability) : undefined;
     const videoRequest = mode === "video" ? resolveModelRequestConfig(config, config.model) : undefined;
-    const xaiReferenceMode = Boolean(videoRequest && isXAIVideoRequest(videoRequest.interfaceType, videoRequest.model) && selectedVideoOperation === "reference_to_video");
-    const videoEndFrameSupported = !videoRequest || !isXAIVideoRequest(videoRequest.interfaceType, videoRequest.model);
+    const xaiVideo = Boolean(videoRequest && isXAIVideoRequest(videoRequest.interfaceType, videoRequest.model));
+    const xaiReferenceMode = xaiVideo && selectedVideoOperation === "reference_to_video";
+    const xaiSourceVideoMode = xaiVideo && (selectedVideoOperation === "edit_video" || selectedVideoOperation === "extend");
+    const activeVideoReferences = mentionReferences.filter((item) => item.active && item.kind === "video");
+    const editBillingSeconds = xaiVideo && selectedVideoOperation === "edit_video" && activeVideoReferences.length === 1 && (activeVideoReferences[0].durationMs || 0) > 0
+        ? Math.ceil((activeVideoReferences[0].durationMs || 0) / 1_000)
+        : config.videoSeconds;
+    const priceChannel = resolveModelChannel(config, config.model);
+    const credits = requestCreditCost({ channelMode: priceChannel.scope === "system" ? "remote" : "local", modelCosts: priceChannel.modelCosts, model: modelOptionName(config.model), count: mode === "image" ? generationCount : 1, seconds: mode === "video" ? editBillingSeconds : 1 });
+    const videoEndFrameSupported = !xaiVideo;
     const videoEndFrameUnsupportedReason = videoEndFrameSupported ? undefined : "xAI 图生视频只支持 1 张首帧，官方接口不支持指定尾帧";
     const videoFrameOptions = mentionReferences
         .filter((item) => item.active && item.kind === "image")
@@ -143,15 +149,16 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                 className="canvas-compact-control canvas-control-select !h-7 !w-full"
                 onChange={(value) => onConfigChange(node.id, videoOperationPatch(config, node.metadata, value))}
             />
-            <CanvasVideoPromptTools
+            {!xaiSourceVideoMode ? <CanvasVideoPromptTools
                 metadata={node.metadata}
                 frameOptions={videoFrameOptions}
                 referenceMode={xaiReferenceMode}
                 endFrameSupported={videoEndFrameSupported}
                 endFrameUnsupportedReason={videoEndFrameUnsupportedReason}
                 onMetadataChange={(patch) => onConfigChange(node.id, patch)}
-            />
+            /> : null}
             {xaiReferenceMode ? <div className="px-1.5 text-[9px] leading-4" style={{ color: theme.node.muted }}>提示词可用 &lt;IMAGE_1&gt;… 指向参考图；开场和结尾只作软引导，不锁定精确首尾帧；最高 720P。</div> : null}
+            {xaiSourceVideoMode ? <div className="px-1.5 text-[9px] leading-4" style={{ color: theme.node.muted }}>{selectedVideoOperation === "edit_video" ? "连接 1 段不超过 8.7 秒的 MP4 原片；参数沿用原片。" : "连接 1 段 2–15 秒的 MP4 原片；设置的是新增 2–10 秒。"}</div> : null}
         </div>
     );
 
@@ -227,12 +234,14 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         const nextRequest = resolveModelRequestConfig({ ...config, model }, model);
                         const nextOperation = resolveVideoOperation(node.metadata?.videoEditOperation, videoReferenceCounts, nextCapability);
                         const nextIsXAI = isXAIVideoRequest(nextRequest.interfaceType, nextRequest.model);
+                        const nextUsesImageFrame = nextOperation === "image_to_video" || nextOperation === "reference_to_video";
                         onConfigChange(node.id, {
                             model,
                             videoEditOperation: nextOperation,
-                            videoStartFrameNodeId: nextIsXAI && nextOperation === "text_to_video" ? undefined : node.metadata?.videoStartFrameNodeId,
+                            videoStartFrameNodeId: nextIsXAI && !nextUsesImageFrame ? undefined : node.metadata?.videoStartFrameNodeId,
                             videoEndFrameNodeId: nextIsXAI && nextOperation !== "reference_to_video" ? undefined : node.metadata?.videoEndFrameNodeId,
                             vquality: nextIsXAI && nextOperation === "reference_to_video" && normalizeVideoResolution(config.vquality) === "1080" ? "720" : node.metadata?.vquality,
+                            seconds: nextIsXAI && nextOperation === "extend" ? String(Math.max(2, Math.min(10, Number(node.metadata?.seconds || config.videoSeconds) || 6))) : node.metadata?.seconds,
                         });
                     }}
                     capability={mode}
@@ -472,11 +481,13 @@ function audioConfigPatch(key: CanvasAudioSettingKey, value: string) {
 function videoOperationPatch(config: AiConfig, metadata: CanvasNodeMetadata | undefined, value: NonNullable<CanvasNodeMetadata["videoEditOperation"]>) {
     const request = resolveModelRequestConfig(config, config.model);
     const xai = isXAIVideoRequest(request.interfaceType, request.model);
+    const usesImageFrame = value === "image_to_video" || value === "reference_to_video";
     return {
         videoEditOperation: value,
-        videoStartFrameNodeId: xai && value === "text_to_video" ? undefined : metadata?.videoStartFrameNodeId,
+        videoStartFrameNodeId: xai && !usesImageFrame ? undefined : metadata?.videoStartFrameNodeId,
         videoEndFrameNodeId: xai && value !== "reference_to_video" ? undefined : metadata?.videoEndFrameNodeId,
         vquality: xai && value === "reference_to_video" && normalizeVideoResolution(config.vquality) === "1080" ? "720" : metadata?.vquality,
+        ...(xai && value === "extend" ? { seconds: String(Math.max(2, Math.min(10, Number(metadata?.seconds || config.videoSeconds) || 6))) } : {}),
     };
 }
 

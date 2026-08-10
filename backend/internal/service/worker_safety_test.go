@@ -93,6 +93,16 @@ func TestRecoveredReservedTaskAndVideoPollingRemainResumable(t *testing.T) {
 	if err != nil || !canContinue {
 		t.Fatalf("video polling recovery = (%v, %v)", canContinue, err)
 	}
+	imageTask := model.Task{ID: "task-image", Type: "canvas_image", ProviderRequestID: "xai-file:mingwant-image-0123456789abcdef0123456789abcdef.jpg", LeaseRecovered: true}
+	canContinue, _, err = svc.recoveredTaskCanContinue(&imageTask)
+	if err != nil || !canContinue {
+		t.Fatalf("xAI Files image recovery = (%v, %v)", canContinue, err)
+	}
+	invalidImageTask := model.Task{ID: "task-image-invalid", Type: "canvas_image", ProviderRequestID: "provider-image-1", LeaseRecovered: true}
+	canContinue, _, err = svc.recoveredTaskCanContinue(&invalidImageTask)
+	if err != nil || canContinue {
+		t.Fatalf("unsafe image recovery = (%v, %v)", canContinue, err)
+	}
 	pendingCustomTask := model.Task{ID: "task-custom-pending", Type: "canvas_text", LeaseRecovered: true, ProviderCallState: model.TaskProviderCallPending}
 	canContinue, _, err = svc.recoveredTaskCanContinue(&pendingCustomTask)
 	if err != nil || !canContinue {

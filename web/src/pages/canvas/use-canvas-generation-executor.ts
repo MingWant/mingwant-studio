@@ -3,7 +3,7 @@ import { App } from "antd";
 
 import { buildNodeGenerationContext, hydrateNodeGenerationContext } from "@/components/canvas/canvas-node-generation";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
-import { buildGenerationConfig, isGenerationCanceled, normalizeVideoReferenceImages, supportsVideoReferenceAudio } from "@/lib/canvas/canvas-project-generation";
+import { buildGenerationConfig, buildVideoGenerationMetadata, isGenerationCanceled, normalizeVideoReferenceImages, normalizeXAISourceVideoConfig, supportsVideoReferenceAudio } from "@/lib/canvas/canvas-project-generation";
 import { isGenerationTaskCapacityError } from "@/lib/canvas/canvas-generation-batch";
 import { hasPendingCanvasGenerationTask } from "@/lib/canvas/canvas-generation-task-state";
 import { expandSkillMentions } from "@/lib/canvas/canvas-skill-mentions";
@@ -162,6 +162,10 @@ export function useCanvasGenerationExecutor({
             const expandedPrompt = expandSkillMentions(rawGenerationContext.prompt, activatedSkills);
             const effectivePrompt = expandedPrompt.trim();
             const generationContext = { ...rawGenerationContext, prompt: effectivePrompt };
+            if (mode === "video") {
+                const operation = buildVideoGenerationMetadata(sourceNode, generationContext, generationConfig).videoEditOperation;
+                generationConfig = normalizeXAISourceVideoConfig(generationConfig, operation, generationContext.referenceVideos);
+            }
             if (mode === "audio" && generationContext.characterReferences.length) {
                 if (generationContext.characterReferences.length !== 1) {
                     reportPreflightFailure("角色配音一次只能引用一个角色卡");

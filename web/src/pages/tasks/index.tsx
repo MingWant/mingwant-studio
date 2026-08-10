@@ -6,17 +6,17 @@ import { useSearchParams } from "react-router";
 
 import { ListToolbar, PageHeader, TableSurface, WorkspacePage } from "@/components/layout/workspace-page";
 import { WorkspaceErrorState, WorkspaceState } from "@/components/layout/workspace-state";
-import { CONTENT_MODERATION_ERROR_CODE, generationErrorMessage, isContentModerationError } from "@/lib/generation-error";
-import { formatTaskKind, operationOptions, statusLabel } from "@/lib/generation-task-display";
-import { prefersShortCinematicDelivery, resolveChannelProbeReadiness } from "@/lib/channel-probe-readiness";
-
-import { cancelGenerationTask, createAgentSession, createGenerationTask, listGenerationTasks, listTaskLogs, queryFailedVideoProviderTask, queryGenerationTask, recoverGenerationTaskDelivery, retryGenerationTask, type CreateTaskInput, type GenerationTask, type TaskLog, type TaskStatus } from "@/services/api/task-center";
+import { formatCredits } from "@/constant/credits";
 import { isGenerationCostUncertainError } from "@/lib/canvas/canvas-generation-batch";
 import { syncGenerationTaskToCanvasStore } from "@/lib/canvas/canvas-generation-task-sync";
+import { prefersShortCinematicDelivery, resolveChannelProbeReadiness } from "@/lib/channel-probe-readiness";
+import { CONTENT_MODERATION_ERROR_CODE, generationErrorMessage, isContentModerationError } from "@/lib/generation-error";
+import { canQueryProviderTask, hasRecoverableProviderResult } from "@/lib/generation-provider-recovery";
+import { formatTaskKind, operationOptions, statusLabel } from "@/lib/generation-task-display";
+import { listProjects, type ProjectSummary } from "@/services/api/projects";
+import { cancelGenerationTask, createAgentSession, createGenerationTask, listGenerationTasks, listTaskLogs, queryFailedProviderTask, queryGenerationTask, recoverGenerationTaskDelivery, retryGenerationTask, type CreateTaskInput, type GenerationTask, type TaskLog, type TaskStatus } from "@/services/api/task-center";
 import { useCanvasStore } from "@/stores/canvas/use-canvas-store";
 import { hasSystemModelPrice, modelOptionName, resolveModelChannel, resolveModelRequestConfig, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
-import { formatCredits } from "@/constant/credits";
-import { listProjects, type ProjectSummary } from "@/services/api/projects";
 
 const taskTableClassName = "app-data-table";
 type TaskStatusFilter = "all" | "failed" | "active" | "succeeded";
@@ -138,7 +138,7 @@ export default function TasksPage() {
             setDetailLoading(true);
             setLogsLoading(true);
             try {
-                const [detail, logs] = await Promise.all([queryGenerationTask(task.id), listTaskLogs(task.id)]);
+                const [detail, logs] = await Promise.all([queryGenerationTask(task.id, { includeBilling: true }), listTaskLogs(task.id)]);
                 setDetailTask(detail);
                 setTaskLogs(logs);
                 if (await syncGenerationTaskToCanvasStore(detail)) message.success("已同步到画布");
@@ -214,11 +214,11 @@ export default function TasksPage() {
             message.warning("该任务已有可恢复的本地结果检查点，请先恢复已保存结果；恢复不会再次调用供应商");
             return;
         }
-        const billingPending = task.billing?.status === "reserved" || task.billing?.status === "running" || task.billing?.status === "uncertain";
-        if (billingPending && task.providerRequestId && canQueryProviderTask(task)) {
-            message.warning("上一笔视频任务仍有上游任务，请先打开详情并手动查询；无法恢复时再创建新的请求");
+        if (canQueryProviderTask(task)) {
+            message.warning("上一笔任务仍有可查询的上游结果，请先打开详情并手动查询；无法恢复时再创建新的请求");
             return;
         }
+        const billingPending = task.billing?.status === "reserved" || task.billing?.status === "running" || task.billing?.status === "uncertain";
         const uncertainProviderFailure = billingPending || isGenerationCostUncertainError(task.error);
         const mayUseStructureRepair = task.type === "agent_storyboard" || task.type === "agent_storyboard_rows";
         modal.confirm({
@@ -227,7 +227,7 @@ export default function TasksPage() {
                 ? `原任务的费用状态仍可能待核对。继续会提交新的生成尝试并可能重复计费${mayUseStructureRepair ? "；若分镜结构仍不合法，还可能按原任务授权再发起 1 次修复请求" : ""}。确认后系统保留旧记录，不再要求先找管理员处理。`
                 : mayUseStructureRepair
                     ? "重新生成会先发起 1 次文本请求；若分镜结构校验失败，将按原任务授权再发起最多 1 次修复请求。自定义 API Key 可能产生最多 2 次供应商调用费用。"
-                    : task.providerRequestId
+                    : hasRecoverableProviderResult(task)
                         ? "此任务已有上游任务 ID。继续会清除旧的恢复状态并创建新的供应商请求，可能产生新费用；如只想取回旧结果，请先使用“手动查询任务”。"
                         : "重新生成会创建一笔新的供应商请求并可能产生费用。请确认已经检查原任务失败原因和渠道配置。",
             okText: "重新生成",
@@ -292,7 +292,7 @@ export default function TasksPage() {
         }
         setActingId(task.id);
         try {
-            const result = await queryFailedVideoProviderTask(task.id);
+            const result = await queryFailedProviderTask(task.id);
             try {
                 setTaskLogs(await listTaskLogs(task.id));
             } catch (logError) {
@@ -302,7 +302,7 @@ export default function TasksPage() {
                 setDetailTask((current) => current?.id === task.id ? result.task : current);
                 setTasks((items) => items.map((item) => (item.id === task.id ? { ...item, ...result.task } : item)));
                 const nextQuery = providerQueryScheduleText(result.task.nextPollAt);
-                message.info(`上游任务仍在处理中${result.providerStatus ? `（${result.providerStatus}）` : ""}${nextQuery ? `；${nextQuery}` : ""}`);
+                message.info(`上游结果仍在准备中${result.providerStatus ? `（${result.providerStatus}）` : ""}${nextQuery ? `；${nextQuery}` : ""}`);
                 return;
             }
             setDetailTask(result.task);
@@ -314,11 +314,11 @@ export default function TasksPage() {
             } catch (syncError) {
                 const detail = syncError instanceof Error ? `：${syncError.message}` : "";
                 const billingNotice = result.billingSettled ? "" : "，且积分结算需要管理员核对";
-                message.warning(`上游视频已恢复${billingNotice}，但本地画布回填失败${detail}`);
+                message.warning(`上游结果已恢复${billingNotice}，但本地画布回填失败${detail}`);
                 return;
             }
-            if (result.billingSettled) message.success("已获取上游视频，任务已恢复并完成结算");
-            else message.warning("视频已恢复，但积分结算需要管理员核对");
+            if (result.billingSettled) message.success("已获取上游结果，任务已恢复并完成结算");
+            else message.warning("结果已恢复，但积分结算需要管理员核对");
         } catch (error) {
             await loadTasks(false);
             try {
@@ -672,10 +672,6 @@ function reconcileTaskSummaries(current: GenerationTask[], next: GenerationTask[
         return task;
     });
     return changed ? reconciled : current;
-}
-
-function canQueryProviderTask(task: GenerationTask) {
-    return (task.status === "failed" || task.status === "cancelled") && (task.type.startsWith("canvas_video") || task.type.startsWith("video_")) && Boolean(task.providerRequestId);
 }
 
 function TaskResultMedia({ value, taskType }: { value?: string; taskType: string }) {

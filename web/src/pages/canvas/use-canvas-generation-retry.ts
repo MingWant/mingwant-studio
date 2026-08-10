@@ -15,6 +15,7 @@ import {
     findRetrySourceNode,
     generationReferenceUrls,
     isGenerationCanceled,
+    normalizeVideoReferenceImages,
     resolveMetadataReferences,
     resolveStoredReferenceImages,
     runBackendCanvasGenerationTask,
@@ -117,10 +118,16 @@ export function useCanvasGenerationRetry({ projectId, domainProjectId, activated
             }));
             if (!confirmed) return;
             const retryRequest = { sourceTaskId: retryInspection.sourceTask?.id, confirmNewProviderRequest: true };
+            const retryVideoMetadata = retryMode === "video" ? { ...sourceNode.metadata, ...node.metadata } : undefined;
             let rawContext: Awaited<ReturnType<typeof hydrateNodeGenerationContext>> | null;
             try {
                 const baseContext = buildNodeGenerationContext(sourceNode.id, nodesRef.current, connectionsRef.current, retryPromptSource);
-                rawContext = hasSavedImageMetadata && !baseContext.characterReferences.length ? null : await hydrateNodeGenerationContext(baseContext, projectId, domainProjectId, retryMode, retryMode === "video" && supportsVideoReferenceAudio(generationConfig));
+                const preparedReferenceImages = retryMode === "video" && baseContext.referenceImages.length ? normalizeVideoReferenceImages(generationConfig, retryVideoMetadata, baseContext.referenceImages) : baseContext.referenceImages;
+                rawContext = hasSavedImageMetadata && !baseContext.characterReferences.length ? null : await hydrateNodeGenerationContext({ ...baseContext, referenceImages: preparedReferenceImages, imageCount: preparedReferenceImages.length }, projectId, domainProjectId, retryMode, retryMode === "video" && supportsVideoReferenceAudio(generationConfig));
+                if (retryMode === "video" && rawContext) {
+                    const referenceImages = normalizeVideoReferenceImages(generationConfig, retryVideoMetadata, rawContext.referenceImages);
+                    rawContext = { ...rawContext, referenceImages, imageCount: referenceImages.length };
+                }
             } catch (error) {
                 const failure = generationFailureMetadata(error, retryPromptSource);
                 message.error(failure.errorDetails);
@@ -165,7 +172,24 @@ export function useCanvasGenerationRetry({ projectId, domainProjectId, activated
                 message.error("参考图片已丢失，无法继续重试");
                 return;
             }
-            const videoReferenceImages = context?.referenceImages.length ? context.referenceImages : storedVideoImages;
+            const contextVideoImages = context?.referenceImages || [];
+            const usesStoredVideoImages = !contextVideoImages.length;
+            let videoReferenceImages = usesStoredVideoImages ? storedVideoImages : contextVideoImages;
+            if (node.type === CanvasNodeType.Video) {
+                try {
+                    // 仅剩结果节点保存的 URL 时，已失去原画布节点 ID。单首帧可以安全映射；
+                    // 多参考图的软边界不能靠数组位置猜测，保留图片与提示词但移除边界引导。
+                    const normalizedMetadata = usesStoredVideoImages && retryVideoMetadata?.videoEditOperation === "reference_to_video"
+                        ? { ...retryVideoMetadata, videoStartFrameNodeId: undefined, videoEndFrameNodeId: undefined }
+                        : usesStoredVideoImages && videoReferenceImages.length === 1 && retryVideoMetadata?.videoStartFrameNodeId
+                          ? { ...retryVideoMetadata, videoStartFrameNodeId: videoReferenceImages[0].id }
+                          : retryVideoMetadata;
+                    videoReferenceImages = normalizeVideoReferenceImages(generationConfig, normalizedMetadata, videoReferenceImages);
+                } catch (error) {
+                    message.error(error instanceof Error ? error.message : "视频参考图参数异常，本次未调用供应商");
+                    return;
+                }
+            }
             const videoContext = node.type === CanvasNodeType.Video ? { prompt, referenceImages: videoReferenceImages, referenceVideos: context?.referenceVideos || [], referenceAudios: context?.referenceAudios || [], characterReferences: context?.characterReferences || [], resolvedCharacterVersions: context?.resolvedCharacterVersions || [], resolvedCharacterVoices: context?.resolvedCharacterVoices || [], textCount: context?.textCount || 0, imageCount: videoReferenceImages.length, videoCount: context?.referenceVideos.length || 0, audioCount: context?.referenceAudios.length || 0 } : undefined;
             setRunningNode(node.id);
             setNodes((current) => current.map((item) => (item.id === node.id ? { ...item, metadata: { ...item.metadata, status: NODE_STATUS_LOADING, errorDetails: undefined, generationErrorCode: undefined, failedPromptFingerprint: undefined, ...(retryMode === "video" ? { taskId: undefined, taskStatus: undefined, taskUpdatedAt: undefined, taskStage: undefined, taskProgress: undefined, taskCreatedAt: undefined } : {}) } } : item)));

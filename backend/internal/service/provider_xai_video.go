@@ -49,6 +49,12 @@ func xaiVideoBody(input canvasGenerationInput) (map[string]interface{}, error) {
 		},
 	}
 	operation := metadataString(input.Metadata, "videoEditOperation")
+	if operation == "reference_to_video" {
+		return xaiReferenceVideoBody(body, input)
+	}
+	if metadataString(input.Metadata, "videoEndFrameNodeId") != "" {
+		return nil, errors.New("xAI 图生视频不支持指定尾帧，本次未调用供应商")
+	}
 	if operation == "image_to_video" && len(input.ReferenceImages) == 0 {
 		return nil, errors.New("xAI 图生视频必须提供 1 张起始图，本次未调用供应商")
 	}
@@ -70,6 +76,64 @@ func xaiVideoBody(input canvasGenerationInput) (map[string]interface{}, error) {
 		body["aspect_ratio"] = normalizeXAIVideoAspectRatio(input.Config.Size)
 	}
 	return body, nil
+}
+
+func xaiReferenceVideoBody(body map[string]interface{}, input canvasGenerationInput) (map[string]interface{}, error) {
+	if len(input.ReferenceImages) < 1 || len(input.ReferenceImages) > 7 {
+		return nil, fmt.Errorf("xAI 多参考图实验模式必须提供 1-7 张参考图，当前连接了 %d 张，本次未调用供应商", len(input.ReferenceImages))
+	}
+	if normalizeXAIVideoResolution(input.Config.VQuality) == "1080p" {
+		return nil, errors.New("xAI 多参考图实验模式最高支持 720P，本次未调用供应商")
+	}
+	references := make([]map[string]interface{}, 0, len(input.ReferenceImages))
+	for index, image := range input.ReferenceImages {
+		imageURL, err := openAIImageInputURL(image)
+		if err != nil {
+			return nil, fmt.Errorf("xAI 第 %d 张参考图无效，本次未调用供应商：%w", index+1, err)
+		}
+		references = append(references, map[string]interface{}{"url": imageURL})
+	}
+	prompt, err := xaiReferenceVideoPrompt(input)
+	if err != nil {
+		return nil, err
+	}
+	body["prompt"] = prompt
+	body["reference_images"] = references
+	body["aspect_ratio"] = normalizeXAIVideoAspectRatio(input.Config.Size)
+	return body, nil
+}
+
+func xaiReferenceVideoPrompt(input canvasGenerationInput) (string, error) {
+	prompt := strings.TrimSpace(input.Prompt)
+	// 画布 @ 引用会编译成“图片N”；xAI 参考视频协议只识别与数组顺序对应的 <IMAGE_N>。
+	for index := len(input.ReferenceImages); index >= 1; index-- {
+		tag := fmt.Sprintf("<IMAGE_%d>", index)
+		prompt = strings.ReplaceAll(prompt, fmt.Sprintf("@图片%d", index), tag)
+		prompt = strings.ReplaceAll(prompt, fmt.Sprintf("图片%d", index), tag)
+		prompt = strings.ReplaceAll(prompt, fmt.Sprintf("参考图%d", index), tag)
+	}
+	appendGuidance := func(metadataKey, label, instruction string) error {
+		imageID := metadataString(input.Metadata, metadataKey)
+		if imageID == "" {
+			return nil
+		}
+		for index, image := range input.ReferenceImages {
+			if image.ID != imageID {
+				continue
+			}
+			tag := fmt.Sprintf("<IMAGE_%d>", index+1)
+			prompt = strings.TrimSpace(prompt + "\n\n" + fmt.Sprintf(instruction, tag))
+			return nil
+		}
+		return fmt.Errorf("已选择的 xAI %s未包含在当前参考图中，本次未调用供应商", label)
+	}
+	if err := appendGuidance("videoStartFrameNodeId", "开场参考", "开场画面尽量采用 %s 的主体、构图和氛围作为视觉引导，但不要求锁定为精确首帧。"); err != nil {
+		return "", err
+	}
+	if err := appendGuidance("videoEndFrameNodeId", "结尾参考", "在最后 1-2 秒尽量向 %s 的主体状态、构图和氛围过渡，但不要求锁定为精确尾帧。"); err != nil {
+		return "", err
+	}
+	return prompt, nil
 }
 
 func downloadXAIVideoResult(ctx context.Context, config providerConfig, state map[string]interface{}) (map[string]interface{}, error) {

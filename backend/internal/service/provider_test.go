@@ -782,6 +782,20 @@ func TestXAIVideoBodyRejectsMultipleStartImages(t *testing.T) {
 	}
 }
 
+func TestXAIVideoBodyRejectsEndFrame(t *testing.T) {
+	_, err := xaiVideoBody(canvasGenerationInput{
+		Config:          providerConfig{Model: "grok-imagine-video-1.5", InterfaceType: "xai-video"},
+		ReferenceImages: []providerMedia{{ID: "image-1", DataURL: testReferenceImageDataURL}},
+		Metadata: map[string]interface{}{
+			"videoEditOperation":  "image_to_video",
+			"videoEndFrameNodeId": "image-1",
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "不支持指定尾帧") {
+		t.Fatalf("xaiVideoBody() error = %v", err)
+	}
+}
+
 func TestXAIVideoBodyKeepsSourceRatioForAutomaticImageToVideo(t *testing.T) {
 	body, err := xaiVideoBody(canvasGenerationInput{
 		Prompt:          "make it move",
@@ -804,6 +818,63 @@ func TestXAIVideoBodyRejectsImageToVideoWithoutStartImage(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "必须提供 1 张起始图") {
 		t.Fatalf("xaiVideoBody() error = %v", err)
+	}
+}
+
+func TestXAIVideoBodyUsesOfficialReferenceImagesAndSoftBoundaryGuidance(t *testing.T) {
+	body, err := xaiVideoBody(canvasGenerationInput{
+		Prompt: "图片1 保持人物一致，参考图2 作为结尾画面参考",
+		Config: providerConfig{
+			Model:         "grok-imagine-video-1.5",
+			InterfaceType: "xai-video",
+			VideoSeconds:  "10",
+			Size:          "16:9",
+			VQuality:      "720",
+		},
+		ReferenceImages: []providerMedia{
+			{ID: "image-1", DataURL: testReferenceImageDataURL},
+			{ID: "image-2", DataURL: testReferenceImageDataURL},
+		},
+		Metadata: map[string]interface{}{
+			"videoEditOperation":   "reference_to_video",
+			"videoStartFrameNodeId": "image-1",
+			"videoEndFrameNodeId":   "image-2",
+		},
+	})
+	if err != nil {
+		t.Fatalf("xaiVideoBody() error = %v", err)
+	}
+	references, ok := body["reference_images"].([]map[string]interface{})
+	if !ok || len(references) != 2 || references[0]["url"] != testReferenceImageDataURL || references[1]["url"] != testReferenceImageDataURL {
+		t.Fatalf("reference_images = %#v", body["reference_images"])
+	}
+	if _, exists := body["image"]; exists {
+		t.Fatalf("reference-to-video body includes image: %#v", body)
+	}
+	prompt := body["prompt"].(string)
+	if !strings.Contains(prompt, "<IMAGE_1>") || !strings.Contains(prompt, "<IMAGE_2>") || !strings.Contains(prompt, "最后 1-2 秒") {
+		t.Fatalf("prompt = %q", prompt)
+	}
+	if body["resolution"] != "720p" || body["aspect_ratio"] != "16:9" {
+		t.Fatalf("xAI reference settings = %#v", body)
+	}
+}
+
+func TestXAIVideoBodyRejectsUnsupportedReferenceModeInputs(t *testing.T) {
+	_, err := xaiVideoBody(canvasGenerationInput{
+		Config:   providerConfig{Model: "grok-imagine-video-1.5", InterfaceType: "xai-video", VQuality: "720"},
+		Metadata: map[string]interface{}{"videoEditOperation": "reference_to_video"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "1-7 张参考图") {
+		t.Fatalf("missing reference error = %v", err)
+	}
+	_, err = xaiVideoBody(canvasGenerationInput{
+		Config:          providerConfig{Model: "grok-imagine-video-1.5", InterfaceType: "xai-video", VQuality: "1080"},
+		ReferenceImages: []providerMedia{{ID: "image-1", DataURL: testReferenceImageDataURL}},
+		Metadata:        map[string]interface{}{"videoEditOperation": "reference_to_video"},
+	})
+	if err == nil || !strings.Contains(err.Error(), "最高支持 720P") {
+		t.Fatalf("1080p reference error = %v", err)
 	}
 }
 

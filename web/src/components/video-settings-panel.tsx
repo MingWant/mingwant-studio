@@ -6,7 +6,9 @@ import { boolConfig, isSeedanceFastModel, isSeedanceVideoConfig, normalizeSeedan
 import { type CanvasTheme } from "@/lib/canvas-theme";
 import { durationValues, formatCapabilityRatio, normalizeCapabilityRatio, normalizeCapabilityResolution, ratioFromSize, sizeForCapabilityRatio, videoCapabilityFromConfig } from "@/lib/model-capabilities";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
+import { isXAIVideoRequest } from "@/lib/model-protocols";
 import { modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import type { CanvasVideoEditOperation } from "@/types/canvas";
 
 const sizeOptions = [
     { value: "1280x720", label: "横屏", width: 1280, height: 720 },
@@ -19,13 +21,14 @@ const sizeOptions = [
 
 type VideoSettingsPanelProps = {
     config: AiConfig;
+    operation?: CanvasVideoEditOperation;
     onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark", value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
 };
 
-export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = true, className = "w-[292px] space-y-3" }: VideoSettingsPanelProps) {
+export function VideoSettingsPanel({ config, operation, onConfigChange, theme, showTitle = true, className = "w-[292px] space-y-3" }: VideoSettingsPanelProps) {
     const capability = videoCapabilityForConfig(config);
     if (isSeedanceVideoConfig(config)) {
         return <SeedanceVideoSettingsPanel config={config} capability={capability} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} />;
@@ -36,7 +39,9 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
     const size = normalizeVideoSizeValue(config.size);
     const dimensions = readSizeDimensions(size);
     const resolution = normalizeCapabilityResolution(config.vquality);
-    const resolutionOptions = uniqueResolutionOptions(capability.resolutions);
+    const request = resolveModelRequestConfig(config, config.model || config.videoModel);
+    const xaiReferenceMode = operation === "reference_to_video" && isXAIVideoRequest(request.interfaceType, request.model);
+    const resolutionOptions = uniqueResolutionOptions(capability.resolutions).filter((item) => !xaiReferenceMode || normalizeCapabilityResolution(item.value) !== "1080p");
     const ratio = ratioFromSize(size, capability.ratios);
     const updateDimension = (key: "width" | "height", value: number | null) => {
         const next = Math.max(1, Math.floor(value || dimensions[key] || 720));
@@ -55,6 +60,7 @@ export function VideoSettingsPanel({ config, onConfigChange, theme, showTitle = 
                             </OptionPill>
                         ))}
                     </div>
+                    {xaiReferenceMode ? <div className="text-[10px] leading-4 opacity-55">多参考图实验模式最高支持 720P</div> : null}
                 </SettingGroup>
                 <SettingGroup title="尺寸" color={theme.node.muted}>
                     <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1.5">
@@ -187,7 +193,8 @@ export function videoSizeLabel(value: string) {
 }
 
 export function videoSecondsLabel(value: string) {
-    return `${normalizeVideoDuration(value)}s`;
+    const seconds = Math.max(1, Math.floor(Number(value) || Number(normalizeVideoDuration(value))));
+    return `${seconds}s`;
 }
 
 export function normalizeVideoSizeValue(value: string) {

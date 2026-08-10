@@ -17,6 +17,9 @@ type CanvasConfigComposerProps = {
     skillReferences?: CanvasResourceReference[];
     generationMode?: CanvasGenerationMode;
     metadata?: CanvasNodeMetadata;
+    videoReferenceMode?: boolean;
+    videoEndFrameSupported?: boolean;
+    videoEndFrameUnsupportedReason?: string;
     onChange: (value: string) => void;
     onMetadataChange?: (patch: Partial<CanvasNodeMetadata>) => void;
     onClose: () => void;
@@ -43,7 +46,7 @@ type ComposerCandidate =
 
 export const CONFIG_REFERENCE_PATTERN = /@\[node:([^\]]+)\]/g;
 
-export function CanvasConfigComposer({ value, inputs, skillReferences = [], generationMode, metadata, onChange, onMetadataChange, onClose, workspaceMode = "professional" }: CanvasConfigComposerProps) {
+export function CanvasConfigComposer({ value, inputs, skillReferences = [], generationMode, metadata, videoReferenceMode = false, videoEndFrameSupported = true, videoEndFrameUnsupportedReason, onChange, onMetadataChange, onClose, workspaceMode = "professional" }: CanvasConfigComposerProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const editorRef = useRef<HTMLDivElement>(null);
     const composingRef = useRef(false);
@@ -177,7 +180,8 @@ export function CanvasConfigComposer({ value, inputs, skillReferences = [], gene
             </div>
             {generationMode === "video" && onMetadataChange && !simpleMode ? (
                 <div className="mb-2 border-y px-1 py-1.5" style={{ borderColor: theme.node.stroke }}>
-                    <CanvasVideoPromptTools metadata={metadata} frameOptions={videoFrameOptions} onMetadataChange={onMetadataChange} />
+                    <CanvasVideoPromptTools metadata={metadata} frameOptions={videoFrameOptions} referenceMode={videoReferenceMode} endFrameSupported={videoEndFrameSupported} endFrameUnsupportedReason={videoEndFrameUnsupportedReason} onMetadataChange={onMetadataChange} />
+                    {videoReferenceMode ? <div className="mt-1 px-1 text-[9px] leading-4 opacity-55">提示词可用 &lt;IMAGE_1&gt;… 指向参考图；开场和结尾选择不锁定精确首尾帧。</div> : null}
                 </div>
             ) : null}
             <div className="relative rounded-lg border" style={{ background: theme.node.fill, borderColor: theme.node.stroke }}>

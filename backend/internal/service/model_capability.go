@@ -90,10 +90,11 @@ func DefaultModelCapabilityConfig(protocol string) *ModelCapabilityConfig {
 		video.DefaultOperation = "text_to_video"
 	case model.ChannelInterfaceXAIVideo:
 		video.GenerateAudio = VideoBooleanConfig{Supported: false, Default: false}
-		video.References.MaxImages = 1
+		video.References.MaxImages = 7
 		video.Ratios = []string{"16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"}
 		video.Resolutions = []string{"480p", "720p", "1080p"}
 		video.DefaultResolution = "480p"
+		video.Operations = []string{"text_to_video", "image_to_video", "reference_to_video"}
 	case model.ChannelInterfaceNewAPIVideo:
 		video.GenerateAudio = VideoBooleanConfig{Supported: false, Default: false}
 		video.References.MaxImages = 1
@@ -476,6 +477,27 @@ func validateVideoTask(profile *VideoCapabilityConfig, input canvasGenerationInp
 	}
 	if !containsCapabilityString(profile.Operations, operation) {
 		return BadAuthRequest("当前视频模型不支持该生成模式")
+	}
+	if isXAIVideoConfig(input.Config) {
+		switch operation {
+		case "image_to_video":
+			if len(input.ReferenceImages) != 1 {
+				return BadAuthRequest("xAI 图生视频必须且只能提供 1 张起始图")
+			}
+			if metadataString(input.Metadata, "videoEndFrameNodeId") != "" {
+				return BadAuthRequest("xAI 图生视频不支持指定尾帧")
+			}
+		case "reference_to_video":
+			if len(input.ReferenceImages) < 1 || len(input.ReferenceImages) > 7 {
+				return BadAuthRequest("xAI 多参考图实验模式必须提供 1-7 张参考图")
+			}
+			if len(input.ReferenceVideos) > 0 || len(input.ReferenceAudios) > 0 {
+				return BadAuthRequest("xAI 多参考图实验模式只接受图片参考")
+			}
+			if normalizeXAIVideoResolution(input.Config.VQuality) == "1080p" {
+				return BadAuthRequest("xAI 多参考图实验模式最高支持 720P")
+			}
+		}
 	}
 	return nil
 }

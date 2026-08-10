@@ -3,7 +3,7 @@ import { App } from "antd";
 
 import { buildNodeGenerationContext, hydrateNodeGenerationContext } from "@/components/canvas/canvas-node-generation";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
-import { buildGenerationConfig, isGenerationCanceled, supportsVideoReferenceAudio } from "@/lib/canvas/canvas-project-generation";
+import { buildGenerationConfig, isGenerationCanceled, normalizeVideoReferenceImages, supportsVideoReferenceAudio } from "@/lib/canvas/canvas-project-generation";
 import { isGenerationTaskCapacityError } from "@/lib/canvas/canvas-generation-batch";
 import { hasPendingCanvasGenerationTask } from "@/lib/canvas/canvas-generation-task-state";
 import { expandSkillMentions } from "@/lib/canvas/canvas-skill-mentions";
@@ -134,13 +134,19 @@ export function useCanvasGenerationExecutor({
 
             let rawGenerationContext: Awaited<ReturnType<typeof hydrateNodeGenerationContext>>;
             try {
+                const builtGenerationContext = buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, editingTextNode ? `请根据要求修改以下文本。\n\n原文：\n${sourceTextContent}\n\n修改要求：\n${prompt}` : prompt);
+                const preparedReferenceImages = mode === "video" && builtGenerationContext.referenceImages.length ? normalizeVideoReferenceImages(generationConfig, sourceNode?.metadata, builtGenerationContext.referenceImages) : builtGenerationContext.referenceImages;
                 rawGenerationContext = await hydrateNodeGenerationContext(
-                    buildNodeGenerationContext(nodeId, nodesRef.current, connectionsRef.current, editingTextNode ? `请根据要求修改以下文本。\n\n原文：\n${sourceTextContent}\n\n修改要求：\n${prompt}` : prompt),
+                    { ...builtGenerationContext, referenceImages: preparedReferenceImages, imageCount: preparedReferenceImages.length },
                     projectId,
                     domainProjectId,
                     mode,
                     mode === "video" && supportsVideoReferenceAudio(generationConfig),
                 );
+                if (mode === "video") {
+                    const referenceImages = normalizeVideoReferenceImages(generationConfig, sourceNode?.metadata, rawGenerationContext.referenceImages);
+                    rawGenerationContext = { ...rawGenerationContext, referenceImages, imageCount: referenceImages.length };
+                }
             } catch (error) {
                 const errorDetails = error instanceof Error ? error.message : "生成任务准备失败";
                 reportPreflightFailure(errorDetails);

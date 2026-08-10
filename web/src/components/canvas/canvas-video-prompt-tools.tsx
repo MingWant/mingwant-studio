@@ -22,6 +22,9 @@ type CompactMenuItem = {
 type CanvasVideoPromptToolsProps = {
     metadata?: CanvasNodeMetadata;
     frameOptions: VideoFrameOption[];
+    referenceMode?: boolean;
+    endFrameSupported?: boolean;
+    endFrameUnsupportedReason?: string;
     onMetadataChange: (patch: Partial<CanvasNodeMetadata>) => void;
 };
 
@@ -31,10 +34,15 @@ const MENU_MARGIN = 8;
 const MENU_ITEM_HEIGHT = 28;
 const CONTROL_TEXT_STYLE: CSSProperties = { fontFamily: "inherit", fontSize: 11, fontWeight: 400, letterSpacing: 0, lineHeight: 1 };
 
-export function CanvasVideoPromptTools({ metadata, frameOptions, onMetadataChange }: CanvasVideoPromptToolsProps) {
+export function CanvasVideoPromptTools({ metadata, frameOptions, referenceMode = false, endFrameSupported = true, endFrameUnsupportedReason, onMetadataChange }: CanvasVideoPromptToolsProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const startFrame = metadata?.videoStartFrameNodeId || EMPTY_FRAME_VALUE;
     const endFrame = metadata?.videoEndFrameNodeId || EMPTY_FRAME_VALUE;
+
+    useEffect(() => {
+        if (referenceMode || endFrameSupported || !metadata?.videoEndFrameNodeId) return;
+        onMetadataChange({ videoEndFrameNodeId: undefined });
+    }, [endFrameSupported, metadata?.videoEndFrameNodeId, onMetadataChange, referenceMode]);
 
     const setFrame = (key: "videoStartFrameNodeId" | "videoEndFrameNodeId", value: string) => {
         const next = value === EMPTY_FRAME_VALUE ? undefined : value;
@@ -50,8 +58,17 @@ export function CanvasVideoPromptTools({ metadata, frameOptions, onMetadataChang
             onMouseDown={(event) => event.stopPropagation()}
             onPointerDown={(event) => event.stopPropagation()}
         >
-            <FrameMenu label="首帧" value={startFrame} options={frameOptions} theme={theme} onChange={(value) => setFrame("videoStartFrameNodeId", value)} />
-            <FrameMenu label="尾帧" value={endFrame} options={frameOptions} theme={theme} onChange={(value) => setFrame("videoEndFrameNodeId", value)} />
+            <FrameMenu label={referenceMode ? "开场参考" : "首帧"} value={startFrame} options={frameOptions} theme={theme} onChange={(value) => setFrame("videoStartFrameNodeId", value)} />
+            {referenceMode || endFrameSupported ? <FrameMenu label={referenceMode ? "结尾参考" : "尾帧"} value={endFrame} options={frameOptions} theme={theme} onChange={(value) => setFrame("videoEndFrameNodeId", value)} /> : <UnavailableFrame label="尾帧不支持" reason={endFrameUnsupportedReason} theme={theme} />}
+        </div>
+    );
+}
+
+function UnavailableFrame({ label, reason, theme }: { label: string; reason?: string; theme: CanvasTheme }) {
+    return (
+        <div className="inline-flex h-6 w-full min-w-0 cursor-not-allowed items-center gap-1 rounded-[10px] px-1.5 opacity-45" style={{ ...CONTROL_TEXT_STYLE, color: theme.node.text }} title={reason || label}>
+            <ImageIcon className="size-3.5 shrink-0" />
+            <span className="min-w-0 flex-1 truncate">{label}</span>
         </div>
     );
 }

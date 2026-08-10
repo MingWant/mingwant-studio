@@ -2,7 +2,8 @@ import { lazy, Suspense, useCallback, useEffect, useLayoutEffect, useMemo, useRe
 import type { MouseEvent as ReactMouseEvent } from "react";
 import { useQuery } from "@tanstack/react-query";
 import { useParams, useSearchParams } from "react-router";
-import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { configuredModelMatchesCapability, defaultConfig, resolveModelRequestConfig, useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
+import { isXAIVideoRequest } from "@/lib/model-protocols";
 import { uploadMediaFile } from "@/services/file-storage";
 import { resourceFileUrl, resourceIdFromStorageKey } from "@/services/api/resources";
 import copyToClipboard from "copy-to-clipboard";
@@ -1415,6 +1416,14 @@ function InfiniteCanvasPage() {
     const renderCanvasNodePanel = useCallback(
         (panelNode: CanvasNodeData) => {
             if (panelNode.type === CanvasNodeType.Script || panelNode.type === CanvasNodeType.Drawing) return null;
+            const storedVideoModel = panelNode.metadata?.model;
+            const panelVideoModel = storedVideoModel && configuredModelMatchesCapability(effectiveConfig, storedVideoModel, "video")
+                ? storedVideoModel
+                : effectiveConfig.videoModel && configuredModelMatchesCapability(effectiveConfig, effectiveConfig.videoModel, "video")
+                  ? effectiveConfig.videoModel
+                  : defaultConfig.videoModel;
+            const panelVideoRequest = resolveModelRequestConfig({ ...effectiveConfig, model: panelVideoModel }, panelVideoModel);
+            const panelVideoEndFrameSupported = !isXAIVideoRequest(panelVideoRequest.interfaceType, panelVideoRequest.model);
             return panelNode.type === CanvasNodeType.Config ? (
                 <CanvasConfigComposer
                     value={panelNode.metadata?.composerContent ?? panelNode.metadata?.prompt ?? ""}
@@ -1422,6 +1431,9 @@ function InfiniteCanvasPage() {
                     skillReferences={skillMentionReferences}
                     generationMode={panelNode.metadata?.generationMode}
                     metadata={panelNode.metadata}
+                    videoReferenceMode={!panelVideoEndFrameSupported && panelNode.metadata?.videoEditOperation === "reference_to_video"}
+                    videoEndFrameSupported={panelVideoEndFrameSupported}
+                    videoEndFrameUnsupportedReason={panelVideoEndFrameSupported ? undefined : "xAI 图生视频只支持 1 张首帧，官方接口不支持指定尾帧"}
                     workspaceMode={workspaceMode}
                     onChange={(composerContent) => handleConfigNodeChange(panelNode.id, { composerContent })}
                     onMetadataChange={(patch) => handleConfigNodeChange(panelNode.id, patch)}
@@ -1444,7 +1456,7 @@ function InfiniteCanvasPage() {
                 />
             );
         },
-        [configInputsById, confirmStopGeneration, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, mentionReferencesByNodeId, runningNodeIds, skillMentionReferences, workspaceMode],
+        [configInputsById, confirmStopGeneration, effectiveConfig, handleConfigNodeChange, handleGenerateNode, handleNodePromptChange, mentionReferencesByNodeId, runningNodeIds, skillMentionReferences, workspaceMode],
     );
 
     const renderCanvasNodeContent = useCallback((contentNode: CanvasNodeData) => {

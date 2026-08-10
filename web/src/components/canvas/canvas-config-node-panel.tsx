@@ -1,20 +1,22 @@
 import type { CSSProperties } from "react";
 import { Image as ImageIcon, LoaderCircle, MessageSquare, Music2, Play, Settings2, Square, Video } from "lucide-react";
-import { Button, Segmented, Select } from "antd";
+import { Button, Segmented } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
 import { configuredModelMatchesCapability, defaultConfig, modelOptionName, resolveModelChannel, resolveModelRequestConfig, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
-import { resolveVideoOperation, videoCapabilityFromConfig } from "@/lib/model-capabilities";
+import { normalizeCapabilityDuration, resolveVideoOperation, videoCapabilityFromConfig } from "@/lib/model-capabilities";
+import { isXAIVideoRequest } from "@/lib/model-protocols";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
 import { navigateToSettings } from "@/lib/settings-navigation";
 import { hasPendingCanvasGenerationTask } from "@/lib/canvas/canvas-generation-task-state";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { CanvasImageSettingsPopover } from "./canvas-image-settings-popover";
 import { CanvasAudioSettingsPopover, type CanvasAudioSettingKey } from "./canvas-audio-settings-popover";
+import { CanvasVideoOperationSelect } from "./canvas-video-operation-select";
 import { CanvasVideoSettingsPopover } from "./canvas-video-settings-popover";
-import type { CanvasGenerationMode, CanvasNodeData, CanvasNodeMetadata, CanvasVideoEditOperation, CanvasWorkspaceMode } from "@/types/canvas";
+import type { CanvasGenerationMode, CanvasNodeData, CanvasNodeMetadata, CanvasWorkspaceMode } from "@/types/canvas";
 
 type CanvasConfigNodePanelProps = {
     node: CanvasNodeData;
@@ -27,18 +29,6 @@ type CanvasConfigNodePanelProps = {
     workspaceMode?: CanvasWorkspaceMode;
 };
 
-const videoOperationOptions: Array<{ label: string; value: CanvasVideoEditOperation }> = [
-    { label: "文生视频", value: "text_to_video" },
-    { label: "图生视频", value: "image_to_video" },
-    { label: "视频续写", value: "extend" },
-    { label: "局部修改", value: "inpaint" },
-    { label: "元素替换", value: "replace_element" },
-    { label: "运镜调整", value: "camera_motion" },
-    { label: "风格迁移", value: "style_transfer" },
-    { label: "音频生视频", value: "audio_to_video" },
-    { label: "版本对比", value: "compare_versions" },
-];
-
 export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigChange, onGenerate, onStop, onComposerToggle, workspaceMode = "professional" }: CanvasConfigNodePanelProps) {
     const globalConfig = useEffectiveConfig();
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
@@ -46,9 +36,10 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
     const simpleMode = workspaceMode === "simple";
     const config = buildNodeConfig(globalConfig, node, mode);
     const videoCapability = mode === "video" ? videoCapabilityForConfig(config) : undefined;
-    const operationOptions = mode === "video" ? videoOperationOptionsForCapability(videoCapability?.operations, node.metadata?.videoEditOperation) : [];
     const videoReferenceCounts = { images: inputSummary.imageCount, videos: inputSummary.videoCount, audios: inputSummary.audioCount };
     const selectedOperation = mode === "video" ? resolveVideoOperation(node.metadata?.videoEditOperation, videoReferenceCounts, videoCapability) : undefined;
+    const videoRequest = mode === "video" ? resolveModelRequestConfig(config, config.model) : undefined;
+    const xaiReferenceMode = Boolean(videoRequest && isXAIVideoRequest(videoRequest.interfaceType, videoRequest.model) && selectedOperation === "reference_to_video");
     const count = Math.max(1, Math.min(15, Math.floor(Math.abs(Number(config.count)) || 1)));
     const priceChannel = resolveModelChannel(config, config.model);
     const credits = requestCreditCost({ channelMode: priceChannel.scope === "system" ? "remote" : "local", modelCosts: priceChannel.modelCosts, model: modelOptionName(config.model), count: mode === "image" ? count : 1, seconds: mode === "video" ? config.videoSeconds : 1 });
@@ -123,21 +114,12 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
 
             {mode === "video" && !simpleMode ? (
                 <div className="mb-2 min-w-0 cursor-default" data-canvas-no-zoom onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-                    <Select
-                        size="small"
-                        className="canvas-compact-control canvas-control-select !h-9 !w-full"
+                    <CanvasVideoOperationSelect
                         value={selectedOperation}
-                        options={operationOptions}
-                        placement="bottomLeft"
-                        popupMatchSelectWidth={false}
-                        styles={{ popup: { root: { minWidth: 180, maxWidth: 260 } } }}
-                        popupRender={(menu) => (
-                            <div data-canvas-no-zoom onMouseDown={(event) => event.stopPropagation()} onPointerDown={(event) => event.stopPropagation()}>
-                                {menu}
-                            </div>
-                        )}
-                        onChange={(value) => onConfigChange(node.id, { videoEditOperation: value })}
+                        operations={videoCapability?.operations}
+                        onChange={(value) => onConfigChange(node.id, videoOperationPatch(config, node.metadata, value))}
                     />
+                    {xaiReferenceMode ? <div className="mt-1 px-1 text-[9px] leading-4" style={{ color: theme.node.muted }}>提示词可用 &lt;IMAGE_1&gt;… 指向参考图；开场和结尾选择仅作软引导，最高 720P。</div> : null}
                 </div>
             ) : null}
 
@@ -155,9 +137,15 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                                 return;
                             }
                             const nextCapability = videoCapabilityForConfig({ ...config, model });
+                            const nextRequest = resolveModelRequestConfig({ ...config, model }, model);
+                            const nextOperation = resolveVideoOperation(node.metadata?.videoEditOperation, videoReferenceCounts, nextCapability);
+                            const nextIsXAI = isXAIVideoRequest(nextRequest.interfaceType, nextRequest.model);
                             onConfigChange(node.id, {
                                 model,
-                                videoEditOperation: resolveVideoOperation(node.metadata?.videoEditOperation, videoReferenceCounts, nextCapability),
+                                videoEditOperation: nextOperation,
+                                videoStartFrameNodeId: nextIsXAI && nextOperation === "text_to_video" ? undefined : node.metadata?.videoStartFrameNodeId,
+                                videoEndFrameNodeId: nextIsXAI && nextOperation !== "reference_to_video" ? undefined : node.metadata?.videoEndFrameNodeId,
+                                vquality: nextIsXAI && nextOperation === "reference_to_video" && normalizeVideoResolution(config.vquality) === "1080" ? "720" : node.metadata?.vquality,
                             });
                         }}
                         capability={mode}
@@ -165,7 +153,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                         fullWidth
                     />
                     {mode === "video" ? (
-                        <CanvasVideoSettingsPopover config={config} placement="topRight" buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
+                        <CanvasVideoSettingsPopover config={config} operation={selectedOperation} placement="topRight" buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
                     ) : mode === "image" ? (
                         <CanvasImageSettingsPopover config={config} placement="topRight" autoAdjustOverflow={false} buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })} />
                     ) : mode === "audio" ? (
@@ -223,20 +211,6 @@ function videoCapabilityForConfig(config: AiConfig) {
     return videoCapabilityFromConfig(modelCost?.capabilityConfig, request.interfaceType);
 }
 
-function videoOperationOptionsForCapability(operations: string[] | undefined, current?: CanvasVideoEditOperation) {
-    const configured = operations?.length ? operations : videoOperationOptions.map((item) => item.value);
-    const options = configured.map((value) => ({ label: videoOperationLabel(value), value: value as CanvasVideoEditOperation }));
-    if (current === "concat") return [...options, { label: "合并成片", value: "concat" as const }];
-    if (current && !configured.some((value) => value.toLowerCase() === current.toLowerCase())) {
-        return [{ label: `${videoOperationLabel(current)}（当前模型不支持）`, value: current, disabled: true }, ...options];
-    }
-    return options;
-}
-
-function videoOperationLabel(value: string) {
-    return videoOperationOptions.find((item) => item.value === value)?.label || value;
-}
-
 function InputChip({ label, value, style }: { label: string; value: string; style: CSSProperties }) {
     return (
         <div className="inline-flex h-7 items-center gap-1 rounded-md border px-2 text-[11px]" style={style}>
@@ -251,13 +225,15 @@ function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: Can
     const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
     const storedModel = node.metadata?.model;
     const model = storedModel && configuredModelMatchesCapability(globalConfig, storedModel, mode) ? storedModel : defaultModel && configuredModelMatchesCapability(globalConfig, defaultModel, mode) ? defaultModel : fallbackModel;
+    const rawVideoSeconds = node.metadata?.seconds || globalConfig.videoSeconds || defaultConfig.videoSeconds;
+    const videoCapability = mode === "video" ? videoCapabilityForConfig({ ...globalConfig, model }) : undefined;
     return {
         ...globalConfig,
         model,
         quality: node.metadata?.quality || globalConfig.quality || defaultConfig.quality,
         size: node.metadata?.size || globalConfig.size || defaultConfig.size,
         transparentBackground: (node.metadata?.transparentBackground || globalConfig.transparentBackground) === "true" ? "true" : "false",
-        videoSeconds: normalizeVideoDuration(node.metadata?.seconds || globalConfig.videoSeconds || defaultConfig.videoSeconds),
+        videoSeconds: videoCapability ? String(normalizeCapabilityDuration(rawVideoSeconds, videoCapability)) : normalizeVideoDuration(rawVideoSeconds),
         vquality: normalizeVideoResolution(node.metadata?.vquality || globalConfig.vquality || defaultConfig.vquality),
         videoGenerateAudio: node.metadata?.generateAudio || globalConfig.videoGenerateAudio || defaultConfig.videoGenerateAudio,
         videoWatermark: node.metadata?.watermark || globalConfig.videoWatermark || defaultConfig.videoWatermark,
@@ -274,6 +250,17 @@ function videoConfigPatch(key: keyof AiConfig, value: string) {
     if (key === "videoGenerateAudio") return { generateAudio: value };
     if (key === "videoWatermark") return { watermark: value };
     return { [key]: value };
+}
+
+function videoOperationPatch(config: AiConfig, metadata: CanvasNodeMetadata | undefined, value: NonNullable<CanvasNodeMetadata["videoEditOperation"]>) {
+    const request = resolveModelRequestConfig(config, config.model);
+    const xai = isXAIVideoRequest(request.interfaceType, request.model);
+    return {
+        videoEditOperation: value,
+        videoStartFrameNodeId: xai && value === "text_to_video" ? undefined : metadata?.videoStartFrameNodeId,
+        videoEndFrameNodeId: xai && value !== "reference_to_video" ? undefined : metadata?.videoEndFrameNodeId,
+        vquality: xai && value === "reference_to_video" && normalizeVideoResolution(config.vquality) === "1080" ? "720" : metadata?.vquality,
+    };
 }
 
 function audioConfigPatch(key: CanvasAudioSettingKey, value: string) {

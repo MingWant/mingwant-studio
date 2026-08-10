@@ -17,7 +17,7 @@ func TestDefaultModelCapabilityConfigUsesProtocolLimits(t *testing.T) {
 		t.Fatalf("NewAPI media default capability = %#v", media)
 	}
 	xai := DefaultModelCapabilityConfig(string(model.ChannelInterfaceXAIVideo)).Video
-	if xai == nil || xai.DefaultResolution != "480p" || xai.References.MaxImages != 1 || !containsString(xai.Resolutions, "1080p") || containsString(xai.Resolutions, "2160p") {
+	if xai == nil || xai.DefaultResolution != "480p" || xai.References.MaxImages != 7 || !containsString(xai.Resolutions, "1080p") || containsString(xai.Resolutions, "2160p") || !containsString(xai.Operations, "reference_to_video") {
 		t.Fatalf("xAI video default capability = %#v", xai)
 	}
 }
@@ -58,6 +58,30 @@ func TestVideoCapabilityNormalizesPixelRatioAndResolution(t *testing.T) {
 	input.Config.Size = "2:1"
 	if err := validateVideoTask(profile, input); err == nil {
 		t.Fatal("unsupported aspect ratio was accepted")
+	}
+}
+
+func TestValidateXAIVideoReferenceModeLimits(t *testing.T) {
+	profile := DefaultModelCapabilityConfig(string(model.ChannelInterfaceXAIVideo)).Video
+	input := canvasGenerationInput{
+		Mode:            "video",
+		Prompt:          "test",
+		Config:          providerConfig{InterfaceType: string(model.ChannelInterfaceXAIVideo), VideoSeconds: "6", Size: "16:9", VQuality: "720"},
+		ReferenceImages: []providerMedia{{ID: "image-1", Bytes: 1}},
+		Metadata:        map[string]interface{}{"videoEditOperation": "reference_to_video"},
+	}
+	if err := validateVideoTask(profile, input); err != nil {
+		t.Fatalf("valid xAI reference-to-video task rejected: %v", err)
+	}
+	withoutImage := input
+	withoutImage.ReferenceImages = nil
+	if err := validateVideoTask(profile, withoutImage); err == nil || !strings.Contains(err.Error(), "1-7 张参考图") {
+		t.Fatalf("missing xAI references error = %v", err)
+	}
+	highResolution := input
+	highResolution.Config.VQuality = "1080"
+	if err := validateVideoTask(profile, highResolution); err == nil || !strings.Contains(err.Error(), "最高支持 720P") {
+		t.Fatalf("xAI reference resolution error = %v", err)
 	}
 }
 

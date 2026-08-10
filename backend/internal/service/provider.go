@@ -802,7 +802,7 @@ func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]
 	isXAIVideo := isXAIVideoConfig(input.Config)
 	if len(input.ReferenceVideos) > 0 || len(input.ReferenceAudios) > 0 {
 		if isXAIVideo {
-			return nil, errors.New("当前 xAI 官方视频接入只支持文本生视频和单张起始图图生视频，本次未调用供应商")
+			return nil, errors.New("当前 xAI 官方视频接入不支持参考视频或参考音频；多参考图实验模式只接受图片，本次未调用供应商")
 		}
 		return nil, errors.New("OpenAI Compatible 视频接口不支持参考视频或参考音频，请切换到 Seedance / Agent Plan 渠道")
 	}

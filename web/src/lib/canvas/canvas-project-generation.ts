@@ -7,6 +7,7 @@ import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
 import { isSeedanceVideoConfig } from "@/lib/seedance-video";
 import { defaultModelCapabilityConfig, normalizeCapabilityDuration, normalizeCapabilityRatio, normalizeCapabilityResolution, ratioFromSize, resolveVideoOperation, sizeForCapabilityRatio, videoCapabilityFromConfig } from "@/lib/model-capabilities";
+import { isXAIVideoRequest } from "@/lib/model-protocols";
 import { imageMetadata, parseBackendGenerationResult } from "@/lib/canvas/canvas-generation-task-sync";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
 import { CanvasNodeType, type CanvasAssistantSession, type CanvasConnection, type CanvasImageGenerationType, type CanvasNodeData, type CanvasNodeMetadata, type CanvasVideoEditOperation } from "@/types/canvas";
@@ -300,15 +301,59 @@ export function buildVideoGenerationMetadata(
     config?: AiConfig,
 ): CanvasNodeMetadata {
     const metadata = node?.metadata;
+    const request = config ? resolveModelRequestConfig(config, config.model) : undefined;
+    const operation = resolveVideoEditOperation(node, context, config);
+    const referenceMode = operation === "reference_to_video";
+    const supportsEndFrame = !request || !isXAIVideoRequest(request.interfaceType, request.model);
     const startFrame = metadata?.videoStartFrameNodeId && context?.referenceImages.some((image) => image.id === metadata.videoStartFrameNodeId) ? metadata.videoStartFrameNodeId : undefined;
-    const endFrame = metadata?.videoEndFrameNodeId && context?.referenceImages.some((image) => image.id === metadata.videoEndFrameNodeId) ? metadata.videoEndFrameNodeId : undefined;
+    const endFrame = (supportsEndFrame || referenceMode) && metadata?.videoEndFrameNodeId && context?.referenceImages.some((image) => image.id === metadata.videoEndFrameNodeId) ? metadata.videoEndFrameNodeId : undefined;
     return {
-        videoEditOperation: resolveVideoEditOperation(node, context, config),
+        videoEditOperation: operation,
         videoCameraMoveId: metadata?.videoCameraMoveId,
         videoCameraMovePrompt: metadata?.videoCameraMovePrompt,
         videoStartFrameNodeId: startFrame,
         videoEndFrameNodeId: endFrame,
     };
+}
+
+export function normalizeVideoReferenceImages(config: AiConfig, metadata: CanvasNodeMetadata | undefined, referenceImages: ReferenceImage[]) {
+    const request = resolveModelRequestConfig(config, config.model);
+    if (!isXAIVideoRequest(request.interfaceType, request.model)) return referenceImages;
+
+    if (metadata?.videoEditOperation === "reference_to_video") {
+        const channel = config.channels.find((item) => item.id === request.resolvedChannelId);
+        const modelCost = channel?.modelCosts?.find((item) => item.model === request.model);
+        const capability = videoCapabilityFromConfig(modelCost?.capabilityConfig, request.interfaceType);
+        const maxImages = Math.min(7, Math.max(1, capability.references.maxImages || 7));
+        if (referenceImages.length < 1 || referenceImages.length > maxImages) {
+            throw new Error(`xAI 多参考图实验模式需要 1-${maxImages} 张图片，当前连接了 ${referenceImages.length} 张。本次未调用供应商`);
+        }
+        for (const [id, label] of [
+            [metadata.videoStartFrameNodeId, "开场参考"],
+            [metadata.videoEndFrameNodeId, "结尾参考"],
+        ] as const) {
+            if (id && !referenceImages.some((image) => image.id === id)) {
+                throw new Error(`已选择的 xAI ${label}未包含在当前连接图片中，本次未调用供应商`);
+            }
+        }
+        return referenceImages;
+    }
+
+    const startFrameId = metadata?.videoStartFrameNodeId;
+    const endFrameId = metadata?.videoEndFrameNodeId;
+    if (!startFrameId && endFrameId) {
+        throw new Error("xAI 图生视频不支持尾帧；请把这张图片设为首帧，或切换到支持首尾帧的模型。本次未调用供应商");
+    }
+    if (startFrameId) {
+        const startFrame = referenceImages.find((image) => image.id === startFrameId);
+        if (!startFrame) throw new Error("已选择的 xAI 首帧未包含在当前连接图片中，本次未调用供应商");
+        // xAI 的 image 字段只接受一张起始图；明确首帧后，其余连接图片不进入供应商请求。
+        return [startFrame];
+    }
+    if (referenceImages.length > 1) {
+        throw new Error(`xAI 图生视频只支持 1 张首帧，当前连接了 ${referenceImages.length} 张；请在视频提示词下方选择其中一张作为首帧。本次未调用供应商`);
+    }
+    return referenceImages;
 }
 
 export async function resolveMetadataReferences(metadata: CanvasNodeMetadata) {
@@ -385,6 +430,9 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         const normalizedResolution = normalizeCapabilityResolution(node?.metadata?.vquality || config.vquality || defaultConfig.vquality);
         const supportedResolutions = capability.resolutions.map(normalizeCapabilityResolution);
         videoResolution = supportedResolutions.includes(normalizedResolution) ? normalizedResolution.replace(/p$/, "") : normalizeCapabilityResolution(capability.defaultResolution).replace(/p$/i, "");
+        if (isXAIVideoRequest(requestConfig.interfaceType, requestConfig.model) && node?.metadata?.videoEditOperation === "reference_to_video" && normalizeCapabilityResolution(videoResolution) === "1080p") {
+            videoResolution = "720";
+        }
         videoSeconds = String(normalizeCapabilityDuration(node?.metadata?.seconds || config.videoSeconds || defaultConfig.videoSeconds, capability));
         if (!capability.generateAudio.supported) videoGenerateAudio = "false";
         if (!capability.watermark.supported) videoWatermark = "false";

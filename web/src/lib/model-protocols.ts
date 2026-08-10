@@ -33,7 +33,7 @@ export const MODEL_PROTOCOLS: ModelProtocolDefinition[] = [
     { value: "newapi", label: "OpenAI Compatible Videos", capability: "video", create: "POST /v1/videos", poll: "GET /v1/videos/{task_id}", contentType: "multipart/form-data", media: "input_reference[] 参考图" },
     { value: "newapi-channel-1", label: "NewAPI 媒体任务", capability: "video", create: "POST /v1/videos", poll: "GET /v1/videos/{task_id}", contentType: "application/json", media: "图片、视频、音频公网 URL" },
     { value: "newapi-channel-2", label: "NewAPI Video Generations", capability: "video", create: "POST /v1/video/generations", poll: "GET /v1/video/generations/{task_id}", contentType: "application/json", media: "image_urls / video_urls / audio_urls" },
-    { value: "xai-video", label: "xAI 官方视频", capability: "video", create: "POST /v1/videos/generations", poll: "GET /v1/videos/{request_id}", contentType: "application/json", media: "单张起始图" },
+    { value: "xai-video", label: "xAI 官方视频", capability: "video", create: "POST /v1/videos/generations", poll: "GET /v1/videos/{request_id}", contentType: "application/json", media: "单张起始图，或最多 7 张实验参考图" },
     { value: "gemini-veo", label: "Gemini Veo", capability: "video", create: "POST /v1beta/models/{model}:predictLongRunning", poll: "GET /v1beta/{operation_name}", contentType: "application/json", media: "文本与单张起始图" },
 ];
 
@@ -68,6 +68,13 @@ export function isXAIImageModel(value?: string) {
 export function isXAIVideoModel(value?: string) {
     const model = String(value || "").trim().toLowerCase().split("::").pop()?.replace(/^models\//, "") || "";
     return model.startsWith("grok-imagine-video");
+}
+
+// 与后端协议纠正规则保持一致：旧配置可能仍把官方 Grok 视频标成通用 newapi。
+export function isXAIVideoRequest(interfaceType?: string, model?: string) {
+    if (interfaceType === "xai-video") return true;
+    if (interfaceType && interfaceType !== "newapi") return false;
+    return isXAIVideoModel(model);
 }
 
 export function supportsImageReferenceProtocol(value?: string) {

@@ -61,14 +61,16 @@ func xaiImageRequest(input canvasGenerationInput) (string, map[string]interface{
 		return "", nil, fmt.Errorf("xAI Imagine 图片编辑最多支持 3 张参考图，当前连接了 %d 张，本次未调用供应商", len(input.ReferenceImages))
 	}
 
+	// 编辑接口默认给短期 imgen.x.ai URL；部署网络无法直连 CDN 时，上游已计费却无法落盘。
+	// 生成与编辑都强制内联结果，URL 仅保留为兼容上游忽略该字段时的兜底。
 	body := map[string]interface{}{
-		"model":  input.Config.Model,
-		"prompt": withSystemPrompt(input.Config, input.Prompt),
+		"model":           input.Config.Model,
+		"prompt":          withSystemPrompt(input.Config, input.Prompt),
+		"response_format": "b64_json",
 	}
 	aspectRatio := normalizeXAIImageAspectRatio(input.Config.Size)
 	if len(input.ReferenceImages) == 0 {
 		body["n"] = 1
-		body["response_format"] = "b64_json"
 		body["aspect_ratio"] = aspectRatio
 		body["resolution"] = normalizeXAIImageResolution(input.Config.Size, input.Config.Quality)
 		return "/images/generations", body, nil
@@ -118,7 +120,7 @@ func xaiImageDataURLs(ctx context.Context, payload imageResponse) ([]map[string]
 		if url == "" {
 			continue
 		}
-		raw, mimeType, err := getExternalBinary(ctx, url)
+		raw, mimeType, err := getExternalBinary(withProviderRequestKind(ctx, "download"), url)
 		if err != nil {
 			return nil, xaiImageResultError(err)
 		}

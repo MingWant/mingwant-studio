@@ -226,7 +226,10 @@ func TestRunImageTaskUsesXAIJSONForLegacyGrokImageConfig(t *testing.T) {
 		if !ok || image["type"] != "image_url" || image["url"] != testReferenceImageDataURL {
 			t.Errorf("image = %#v", body["image"])
 		}
-		for _, unsupported := range []string{"images", "n", "response_format", "output_format", "quality", "resolution", "size"} {
+		if body["response_format"] != "b64_json" {
+			t.Errorf("response_format = %#v, want b64_json", body["response_format"])
+		}
+		for _, unsupported := range []string{"images", "n", "output_format", "quality", "resolution", "size"} {
 			if _, exists := body[unsupported]; exists {
 				t.Errorf("request body includes unsupported edit field %q: %#v", unsupported, body)
 			}
@@ -315,7 +318,7 @@ func TestXAIImageMultiEditUsesImagesAndExplicitRatio(t *testing.T) {
 		t.Fatalf("xaiImageRequest() error = %v", err)
 	}
 	images, ok := body["images"].([]map[string]interface{})
-	if path != "/images/edits" || !ok || len(images) != 2 || body["aspect_ratio"] != "20:9" {
+	if path != "/images/edits" || !ok || len(images) != 2 || body["aspect_ratio"] != "20:9" || body["response_format"] != "b64_json" {
 		t.Fatalf("path = %q, body = %#v", path, body)
 	}
 	if _, exists := body["image"]; exists {

@@ -880,6 +880,9 @@ func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]
 	}
 	status := strings.ToLower(stringField(state, "status"))
 	if status == "completed" || status == "succeeded" || status == "success" || status == "done" {
+		if isXAIVideo {
+			return downloadXAIVideoResult(ctx, input.Config, state)
+		}
 		if videoURL := newAPIVideoResultURL(state); videoURL != "" {
 			data, mimeType, err := getExternalBinary(withProviderRequestKind(ctx, "download"), videoURL)
 			if err != nil {

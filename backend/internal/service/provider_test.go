@@ -590,6 +590,10 @@ func TestRunVideoTaskCorrectsLegacyGrokVideoConfigToXAIEndpoint(t *testing.T) {
 			if body["duration"] != float64(10) || body["aspect_ratio"] != "1:1" || body["resolution"] != "720p" {
 				t.Errorf("xAI settings = %#v", body)
 			}
+			storage, ok := body["storage_options"].(map[string]interface{})
+			if !ok || storage["filename"] != "mingwant-video.mp4" || storage["expires_after"] != float64(xaiVideoStoredResultExpiresAfterSeconds) {
+				t.Errorf("storage_options = %#v", body["storage_options"])
+			}
 			for _, legacyField := range []string{"seconds", "size", "images"} {
 				if _, exists := body[legacyField]; exists {
 					t.Errorf("request body includes legacy field %q: %#v", legacyField, body)
@@ -637,6 +641,99 @@ func TestRunVideoTaskCorrectsLegacyGrokVideoConfigToXAIEndpoint(t *testing.T) {
 	}
 }
 
+func TestRunVideoTaskDownloadsXAIStoredFileBeforeTemporaryURL(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	paths := make([]string, 0, 3)
+	videoBytes := []byte{0, 0, 0, 24, 'f', 't', 'y', 'p', 'm', 'p', '4', '2'}
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch r.Method + " " + r.URL.Path {
+		case "POST /v1/videos/generations":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"request_id":"video-1"}`))
+		case "GET /v1/videos/video-1":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"status":"done","video":{"url":"` + server.URL + `/temporary/video.mp4","file_output":{"file_id":"file-1"}}}`))
+		case "GET /v1/files/file-1/content":
+			if authorization := r.Header.Get("Authorization"); authorization != "Bearer test-key" {
+				t.Errorf("file Authorization = %q", authorization)
+			}
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(videoBytes)
+		case "GET /temporary/video.mp4":
+			t.Error("temporary vidgen URL should not be requested when file_output is available")
+			http.Error(w, "unexpected", http.StatusInternalServerError)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := runVideoTask(context.Background(), canvasGenerationInput{
+		Prompt: "make it move",
+		Config: providerConfig{
+			BaseURL:       server.URL + "/v1",
+			APIKey:        "test-key",
+			Model:         "grok-imagine-video-1.5",
+			InterfaceType: "xai-video",
+		},
+	})
+	if err != nil {
+		t.Fatalf("runVideoTask() error = %v", err)
+	}
+	video, ok := result["video"].(map[string]interface{})
+	if !ok || video["mimeType"] != "video/mp4" || video["dataUrl"] != "data:video/mp4;base64,AAAAGGZ0eXBtcDQy" {
+		t.Fatalf("video = %#v", result["video"])
+	}
+	want := "POST /v1/videos/generations,GET /v1/videos/video-1,GET /v1/files/file-1/content"
+	if got := strings.Join(paths, ","); got != want {
+		t.Fatalf("paths = %q, want %q", got, want)
+	}
+}
+
+func TestDownloadXAIVideoResultFallsBackWhenFilesEndpointIsUnavailable(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	paths := make([]string, 0, 2)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch r.URL.Path {
+		case "/v1/files/file-1/content":
+			http.Error(w, "not supported", http.StatusNotFound)
+		case "/temporary/video.mp4":
+			if authorization := r.Header.Get("Authorization"); authorization != "" {
+				t.Errorf("temporary URL Authorization = %q, want empty", authorization)
+			}
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write([]byte("video"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, err := downloadXAIVideoResult(context.Background(), providerConfig{
+		BaseURL: server.URL + "/v1",
+		APIKey:  "test-key",
+	}, map[string]interface{}{
+		"video": map[string]interface{}{
+			"url":         server.URL + "/temporary/video.mp4",
+			"file_output": map[string]interface{}{"file_id": "file-1"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("downloadXAIVideoResult() error = %v", err)
+	}
+	video, ok := result["video"].(map[string]interface{})
+	if !ok || video["dataUrl"] != "data:video/mp4;base64,dmlkZW8=" {
+		t.Fatalf("video = %#v", result["video"])
+	}
+	want := "GET /v1/files/file-1/content,GET /temporary/video.mp4"
+	if got := strings.Join(paths, ","); got != want {
+		t.Fatalf("paths = %q, want %q", got, want)
+	}
+}
+
 func TestXAIVideoBodyUsesOfficialImageShapeAndNormalizesSettings(t *testing.T) {
 	body, err := xaiVideoBody(canvasGenerationInput{
 		Prompt: "make it move",
@@ -655,6 +752,10 @@ func TestXAIVideoBodyUsesOfficialImageShapeAndNormalizesSettings(t *testing.T) {
 	}
 	if body["duration"] != 15 || body["aspect_ratio"] != "9:16" || body["resolution"] != "1080p" {
 		t.Fatalf("xAI settings = %#v", body)
+	}
+	storage, ok := body["storage_options"].(map[string]interface{})
+	if !ok || storage["filename"] != "mingwant-video.mp4" || storage["expires_after"] != xaiVideoStoredResultExpiresAfterSeconds {
+		t.Fatalf("storage_options = %#v", body["storage_options"])
 	}
 	image, ok := body["image"].(map[string]interface{})
 	if !ok || image["url"] != testReferenceImageDataURL {

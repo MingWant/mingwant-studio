@@ -1,13 +1,17 @@
 package service
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strconv"
 	"strings"
 
 	"infinite-canvas/backend/internal/model"
 )
+
+const xaiVideoStoredResultExpiresAfterSeconds = 7 * 24 * 60 * 60
 
 // 官方 Grok Imagine 视频必须走 /videos/generations JSON。历史配置只有在误选
 // 通用 OpenAI Compatible Videos 时才按模型名纠正，其他显式视频协议保持原契约。
@@ -38,6 +42,11 @@ func xaiVideoBody(input canvasGenerationInput) (map[string]interface{}, error) {
 		"prompt":     strings.TrimSpace(input.Prompt),
 		"duration":   normalizeXAIVideoDuration(input.Config.VideoSeconds),
 		"resolution": normalizeXAIVideoResolution(input.Config.VQuality),
+		// 视频没有 base64 返回模式。保存一份短期私有 Files 结果，避免部署网络必须直连 vidgen.x.ai。
+		"storage_options": map[string]interface{}{
+			"filename":      "mingwant-video.mp4",
+			"expires_after": xaiVideoStoredResultExpiresAfterSeconds,
+		},
 	}
 	operation := metadataString(input.Metadata, "videoEditOperation")
 	if operation == "image_to_video" && len(input.ReferenceImages) == 0 {
@@ -61,6 +70,80 @@ func xaiVideoBody(input canvasGenerationInput) (map[string]interface{}, error) {
 		body["aspect_ratio"] = normalizeXAIVideoAspectRatio(input.Config.Size)
 	}
 	return body, nil
+}
+
+func downloadXAIVideoResult(ctx context.Context, config providerConfig, state map[string]interface{}) (map[string]interface{}, error) {
+	var storedFileErr error
+	if fileID := xaiVideoFileID(state); fileID != "" {
+		data, mimeType, err := getBinary(withProviderRequestKind(ctx, "download"), config, "/files/"+url.PathEscape(fileID)+"/content")
+		if err == nil {
+			result, payloadErr := xaiVideoResultPayload(data, mimeType)
+			if payloadErr == nil {
+				return result, nil
+			}
+			storedFileErr = fmt.Errorf("xAI Files 视频内容无效：%w", payloadErr)
+		} else {
+			storedFileErr = fmt.Errorf("xAI Files 视频读取失败：%w", err)
+		}
+	}
+
+	// 历史任务和部分兼容中转不会回传 file_output，仍可尝试官方临时 URL；这只是下载，不会重新生成视频。
+	if videoURL := newAPIVideoResultURL(state); videoURL != "" {
+		data, mimeType, err := getExternalBinary(withProviderRequestKind(ctx, "download"), videoURL)
+		if err == nil {
+			result, payloadErr := xaiVideoResultPayload(data, mimeType)
+			if payloadErr == nil {
+				return result, nil
+			}
+			err = payloadErr
+		}
+		if storedFileErr != nil {
+			err = errors.Join(storedFileErr, err)
+		}
+		return nil, xaiVideoResultError(err)
+	}
+	if storedFileErr != nil {
+		return nil, xaiVideoResultError(storedFileErr)
+	}
+	return nil, xaiVideoResultError(errors.New("完成响应没有 file_id 或视频 URL"))
+}
+
+func xaiVideoFileID(state map[string]interface{}) string {
+	return nestedXAIVideoFileID(state, 0)
+}
+
+func nestedXAIVideoFileID(value map[string]interface{}, depth int) string {
+	if output, ok := value["file_output"].(map[string]interface{}); ok {
+		if fileID := strings.TrimSpace(stringField(output, "file_id")); fileID != "" {
+			return fileID
+		}
+	}
+	if depth >= 3 {
+		return ""
+	}
+	for _, key := range []string{"video", "result", "data"} {
+		if nested, ok := value[key].(map[string]interface{}); ok {
+			if fileID := nestedXAIVideoFileID(nested, depth+1); fileID != "" {
+				return fileID
+			}
+		}
+	}
+	return ""
+}
+
+func xaiVideoResultPayload(data []byte, mimeType string) (map[string]interface{}, error) {
+	mimeType = normalizedMediaMimeType(mimeType, data)
+	if !strings.HasPrefix(mimeType, "video/") {
+		return nil, errors.New("结果内容不是视频")
+	}
+	return map[string]interface{}{"mode": "video", "video": map[string]interface{}{"dataUrl": dataURL(mimeType, data), "mimeType": mimeType}}, nil
+}
+
+func xaiVideoResultError(cause error) error {
+	return publicTaskError{
+		message: "xAI Imagine 视频已生成，但结果读取失败；请从任务详情查询原任务恢复，勿重新生成",
+		cause:   cause,
+	}
 }
 
 func isXAIVideoAutomaticAspectRatio(value string) bool {

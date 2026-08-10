@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -142,6 +144,38 @@ func TestHydrateNewAPIChannel1ResourceRejectsLocalStorage(t *testing.T) {
 	err := svc.hydrateProviderMedia(context.Background(), "user-1", &providerMedia{StorageKey: "resource:resource-local"}, true)
 	if err == nil || !strings.Contains(err.Error(), "启用 OSS") {
 		t.Fatalf("hydrateProviderMedia() error = %v", err)
+	}
+}
+
+func TestHydrateNewAPIChannel2LocalImageUsesInlineData(t *testing.T) {
+	svc := newResourceTestService(t)
+	objectKey := "users/user-1/image/reference.png"
+	filePath := filepath.Join(svc.dataDir, "resources", filepath.FromSlash(objectKey))
+	if err := os.MkdirAll(filepath.Dir(filePath), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filePath, []byte("image"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	resource := model.Resource{
+		ID: "resource-local-image", UserID: "user-1", Kind: "image", Status: model.ResourceStatusReady,
+		Provider: "local", ObjectKey: objectKey, MimeType: "image/png", Size: 5,
+	}
+	if err := svc.repo.CreateResource(&resource); err != nil {
+		t.Fatal(err)
+	}
+	input := canvasGenerationInput{ReferenceImages: []providerMedia{{StorageKey: "resource:resource-local-image"}}}
+	if err := svc.hydrateGenerationMedia(context.Background(), "user-1", &input, string(model.ChannelInterfaceNewAPIChannel2)); err != nil {
+		t.Fatalf("hydrateGenerationMedia() error = %v", err)
+	}
+	if input.ReferenceImages[0].DataURL != "data:image/png;base64,aW1hZ2U=" || input.ReferenceImages[0].URL != "" {
+		t.Fatalf("reference image = %#v", input.ReferenceImages[0])
+	}
+
+	largeMedia := canvasGenerationInput{ReferenceVideos: []providerMedia{{DataURL: "data:video/mp4;base64,dmlkZW8="}}}
+	err := svc.hydrateGenerationMedia(context.Background(), "user-1", &largeMedia, string(model.ChannelInterfaceNewAPIChannel2))
+	if err == nil || !strings.Contains(err.Error(), "不能使用内嵌数据") {
+		t.Fatalf("hydrateGenerationMedia() video error = %v", err)
 	}
 }
 

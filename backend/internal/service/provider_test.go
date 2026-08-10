@@ -1330,6 +1330,23 @@ func TestRunNewAPIChannel2VideoTaskDownloadsTemporaryResult(t *testing.T) {
 	}
 }
 
+func TestNewAPIChannel2GrokCreate404ExplainsRelayAdapterRequirement(t *testing.T) {
+	err := newAPIChannel2CreateError("grok-imagine-video-1.5", providerHTTPError{StatusCode: http.StatusNotFound, Body: "404 page not found"})
+	message := taskFailureMessage(err)
+	if !strings.Contains(message, "/v1/video/generations") || !strings.Contains(message, "/v1/videos/generations") || !strings.Contains(message, "中转") {
+		t.Fatalf("taskFailureMessage() = %q", message)
+	}
+	var httpErr providerHTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
+		t.Fatalf("newAPIChannel2CreateError() lost provider rejection: %v", err)
+	}
+
+	other := newAPIChannel2CreateError("other-video-model", providerHTTPError{StatusCode: http.StatusNotFound})
+	if strings.Contains(taskFailureMessage(other), "/v1/videos/generations") {
+		t.Fatalf("non-Grok 404 received xAI-specific guidance: %q", taskFailureMessage(other))
+	}
+}
+
 func TestQueryNewAPIChannel2VideoTaskSupportsStandardNewAPIResult(t *testing.T) {
 	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
 	paths := make([]string, 0, 2)

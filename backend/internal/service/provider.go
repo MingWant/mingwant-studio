@@ -218,8 +218,7 @@ func (s *Service) processCanvasGenerationTask(ctx context.Context, userID string
 		return nil, markProviderPreparationFailure(err)
 	}
 	if resumedProviderRequestID(ctx) == "" {
-		requirePublicURL := input.Config.InterfaceType == "newapi-channel-1" || input.Config.InterfaceType == "newapi-channel-2"
-		if err := s.hydrateGenerationMedia(ctx, userID, &input, requirePublicURL); err != nil {
+		if err := s.hydrateGenerationMedia(ctx, userID, &input, input.Config.InterfaceType); err != nil {
 			return nil, markProviderPreparationFailure(err)
 		}
 	}
@@ -240,17 +239,29 @@ func (s *Service) processCanvasGenerationTask(ctx context.Context, userID string
 	}
 }
 
-func (s *Service) hydrateGenerationMedia(ctx context.Context, userID string, input *canvasGenerationInput, requirePublicURL bool) error {
-	groups := [][]providerMedia{input.ReferenceImages, input.ReferenceVideos, input.ReferenceAudios}
-	for _, group := range groups {
-		for index := range group {
-			if err := s.hydrateProviderMedia(ctx, userID, &group[index], requirePublicURL); err != nil {
-				return err
-			}
+func (s *Service) hydrateGenerationMedia(ctx context.Context, userID string, input *canvasGenerationInput, interfaceType string) error {
+	interfaceType = strings.TrimSpace(interfaceType)
+	requireAllPublic := interfaceType == string(model.ChannelInterfaceNewAPIChannel1)
+	// NewAPI Video Generations 接受图片 URL/Base64，但参考视频和音频可能很大，
+	// 仍只允许公网 URL，避免把本地大文件无界扩张后塞入 JSON 请求体。
+	requireLargeMediaPublic := requireAllPublic || interfaceType == string(model.ChannelInterfaceNewAPIChannel2)
+	for index := range input.ReferenceImages {
+		if err := s.hydrateProviderMedia(ctx, userID, &input.ReferenceImages[index], requireAllPublic); err != nil {
+			return err
+		}
+	}
+	for index := range input.ReferenceVideos {
+		if err := s.hydrateProviderMedia(ctx, userID, &input.ReferenceVideos[index], requireLargeMediaPublic); err != nil {
+			return err
+		}
+	}
+	for index := range input.ReferenceAudios {
+		if err := s.hydrateProviderMedia(ctx, userID, &input.ReferenceAudios[index], requireLargeMediaPublic); err != nil {
+			return err
 		}
 	}
 	if input.Mask != nil {
-		return s.hydrateProviderMedia(ctx, userID, input.Mask, requirePublicURL)
+		return s.hydrateProviderMedia(ctx, userID, input.Mask, requireAllPublic)
 	}
 	return nil
 }
@@ -991,7 +1002,7 @@ func runNewAPIChannel2VideoTask(ctx context.Context, input canvasGenerationInput
 			return nil, err
 		}
 		if err := postJSON(ctx, input.Config, "/video/generations", body, &created); err != nil {
-			return nil, err
+			return nil, newAPIChannel2CreateError(input.Config.Model, err)
 		}
 		id = firstNonEmptyString(stringField(created, "task_id"), stringField(created, "id"))
 	}
@@ -1024,6 +1035,17 @@ func runNewAPIChannel2VideoTask(ctx context.Context, input canvasGenerationInput
 		return result, nil
 	}
 	return nil, deferProviderPoll(ctx, providerStatus, providerStatus, newAPIChannel2VideoPollInterval)
+}
+
+func newAPIChannel2CreateError(modelName string, err error) error {
+	var httpErr providerHTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound || !isXAIVideoModelName(modelName) {
+		return err
+	}
+	return publicTaskError{
+		message: "NewAPI Video Generations 创建请求已到达中转，但当前 Grok 上游返回 HTTP 404；中转需要把 /v1/video/generations 转换为 xAI 的 /v1/videos/generations。单独修改本系统 Base URL 无法补上中转端缺失的适配，本次请求已被明确拒绝",
+		cause:   err,
+	}
 }
 
 // 单次查询只读取既有上游任务，不创建新任务；自动轮询和人工恢复共用这条安全边界。

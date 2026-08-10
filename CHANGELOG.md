@@ -3,7 +3,7 @@
 ## Unreleased
 
 - 修复删除或下架系统渠道模型后的画布配置引导：节点与默认模型会保留原渠道绑定并明确显示“需重新选择”，不会静默切换到其他渠道；生成、重试、分镜、Agent 和图片编辑入口会留在画布提示重选，不再自动跳到“自定义渠道”。无法保留旧绑定或确实没有选择模型时，只进入“模型选择”页。
-- 修复 Grok 视频中转协议被模型名覆盖：显式选择 OpenAI Compatible Videos、NewAPI 媒体任务或 NewAPI Video Generations 后，前后端都会严格使用对应的创建与轮询路径；只有明确选择“xAI 官方视频”或旧配置完全缺少协议时才使用 xAI 原生 `/v1/videos/generations`，避免 New API 中转在本地路由层返回 404。NewAPI Video Generations 的查询同时兼容标准 `completed + url` 和既有 `SUCCESS + result_url`，不会因返回格式差异把已完成任务误判失败。
+- 修复 Grok 视频中转协议被模型名覆盖：显式选择 OpenAI Compatible Videos、NewAPI 媒体任务或 NewAPI Video Generations 后，前后端都会严格使用对应的创建与轮询路径；只有明确选择“xAI 官方视频”或旧配置完全缺少协议时才使用 xAI 原生 `/v1/videos/generations`，避免 New API 中转在本地路由层返回 404。NewAPI Video Generations 允许把后端本地图片安全读取为 Base64 参考图，不再强制启用 OSS；参考视频和音频仍要求公网 URL。查询同时兼容标准 `completed + url` 和既有 `SUCCESS + result_url`，不会因返回格式差异把已完成任务误判失败；Grok 创建返回 404 时会明确指出中转缺少从 NewAPI 路由到 xAI 原生路由的适配，不再误导用户继续修改正确的 Base URL。
 - 修复 Grok Imagine 图片在创建响应或结果读取中断后丢失已付费结果：每次生成/编辑会按当前任务与计费尝试保存一份 7 天自动过期的私有 xAI Files 副本；遇到 408/499、除 501 外的 5xx、连接中断、成功响应解析失败或媒体读取失败时，只查询并下载该副本，不会再次发起生图，未就绪时由任务调度继续安全查询，失败任务也可从详情手动查询原结果。图片类 524 不再提示改用 SSE；普通 524 文案会区分文本流式接口与不适用 SSE 的媒体接口。
 - 修复画布“生成配置”节点的生成类型与视频参数交互：生图、文本、视频和音频 Tab，以及视频秒数、画幅和清晰度按钮不再被节点拖拽或画布缩放提前接管，点击后会立即更新配置并展示对应模型与参数。
 - 修复 Grok Imagine 图片编辑协议：新增独立的 xAI Images JSON 请求方式，单图使用 `image` 并沿用输入比例，多图使用 `images` 且仅多图发送画幅覆盖，不再把参考图错误发送为 multipart；既有误标为 OpenAI Images 的 Grok 图片模型也会直接按模型名走正确报文，生成参数映射为 xAI 的画幅与 1k/2k 分辨率。生成与编辑统一请求 `b64_json`，避免后端无法直连 `imgen.x.ai` 时在上游已计费后丢失结果；临时 URL 仅作为兼容兜底并立即进入现有资源落盘流程。

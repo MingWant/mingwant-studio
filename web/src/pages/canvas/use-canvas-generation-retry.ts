@@ -26,7 +26,7 @@ import {
 import { expandSkillMentions } from "@/lib/canvas/canvas-skill-mentions";
 import { generationFailureMetadata, unchangedModeratedPrompt } from "@/lib/generation-error";
 import { inspectGenerationRetry } from "@/lib/generation-retry-safety";
-import { navigateToSettings } from "@/lib/settings-navigation";
+import { handleUnavailableCanvasModel } from "@/lib/settings-navigation";
 import { storeGeneratedAudio } from "@/services/api/audio";
 import { storeGeneratedVideo } from "@/services/api/video";
 import type { UpdreamSkill } from "@/services/api/skills";
@@ -81,7 +81,7 @@ export function useCanvasGenerationRetry({ projectId, domainProjectId, activated
                 return;
             }
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
-                navigateToSettings({ continueCreation: true });
+                handleUnavailableCanvasModel(generationConfig, generationConfig.model, (content) => message.warning(content));
                 return;
             }
 

@@ -13,7 +13,7 @@ import { useAssetStore } from "@/stores/use-asset-store";
 import { useThemeStore } from "@/stores/use-theme-store";
 import { useUserStore } from "@/stores/use-user-store";
 import { imageReferenceLabel } from "@/lib/image-reference-prompt";
-import { navigateToSettings } from "@/lib/settings-navigation";
+import { handleUnavailableCanvasModel, navigateToSettings } from "@/lib/settings-navigation";
 import { ChannelProbeButton, channelProbeModels } from "@/components/channel-probe-button";
 import { onlineAgentChatOmitsToolChoice, onlineAgentToolChoiceReason, resolveOnlineAgentToolChoice } from "@/lib/agent-tool-response";
 import { onlineAgentFailureMessage } from "@/lib/agent-error";
@@ -824,7 +824,7 @@ export function CanvasAssistantPanel({ nodes, selectedNodeIds, snapshot, project
     const sendMessage = async (text: string, history: CanvasAssistantMessage[], savedReferences?: CanvasAssistantReference[], forcedToolIntent?: OnlineAgentToolIntent) => {
         const requestConfig = { ...effectiveConfig, model: effectiveConfig.textModel || effectiveConfig.model };
         if (!isAiConfigReady(requestConfig, requestConfig.model)) {
-            navigateToSettings({ continueCreation: true });
+            handleUnavailableCanvasModel(requestConfig, requestConfig.model, (content) => message.warning(content));
             return false;
         }
         const resolvedRequestConfig = resolveModelRequestConfig(effectiveConfig, requestConfig.model);
@@ -1309,7 +1309,7 @@ export function CanvasAssistantPanel({ nodes, selectedNodeIds, snapshot, project
         }
         const requestConfig = { ...effectiveConfig, model: effectiveConfig.textModel || effectiveConfig.model };
         if (!isAiConfigReady(requestConfig, requestConfig.model)) {
-            navigateToSettings({ continueCreation: true });
+            handleUnavailableCanvasModel(requestConfig, requestConfig.model, (content) => message.warning(content));
             return;
         }
         const resolvedRequestConfig = resolveModelRequestConfig(effectiveConfig, requestConfig.model);
@@ -1562,7 +1562,7 @@ export function CanvasAssistantPanel({ nodes, selectedNodeIds, snapshot, project
             />
 
             {view === "setup" ? (
-                <OnlineAgentSetupView theme={theme} activeModel={activeModel} disabled={agentBusy} onOpenConfig={() => navigateToSettings({ continueCreation: true })} />
+                <OnlineAgentSetupView theme={theme} activeModel={activeModel} disabled={agentBusy} onOpenConfig={() => navigateToSettings({ section: "models", continueCreation: true })} />
             ) : (
                 <div ref={chatListRef} className="thin-scrollbar min-h-0 flex-1 space-y-4 overflow-y-auto px-4 py-4">
                     {view === "history" ? (

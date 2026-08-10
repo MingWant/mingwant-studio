@@ -70,10 +70,11 @@ export function isXAIVideoModel(value?: string) {
     return model.startsWith("grok-imagine-video");
 }
 
-// 与后端协议纠正规则保持一致：旧配置可能仍把官方 Grok 视频标成通用 newapi。
+// 与后端保持一致：显式协议描述的是网关真实路由，不能再被 Grok 模型名覆盖。
+// 只有完全缺失协议的旧配置才按官方模型名兜底。
 export function isXAIVideoRequest(interfaceType?: string, model?: string) {
     if (interfaceType === "xai-video") return true;
-    if (interfaceType && interfaceType !== "newapi") return false;
+    if (interfaceType) return false;
     return isXAIVideoModel(model);
 }
 

@@ -23,7 +23,7 @@ export function ChannelModelSettings({ channel, onChange }: { channel: ModelChan
     return (
         <div className="mt-3 border-t border-border/70 pt-3">
             <div className="mb-2 flex items-center justify-between gap-3">
-                <div><div className="text-xs font-medium">模型请求协议</div><div className="mt-0.5 text-[10px] text-foreground/42">每个模型独立决定请求路径和报文；视频价格仅用于成本记录</div></div>
+                <div><div className="text-xs font-medium">模型请求协议</div><div className="mt-0.5 text-[10px] text-foreground/42">每个模型独立决定请求路径和报文；中转渠道应按实际开放路由选择，模型名不会覆盖协议</div></div>
                 <span className="text-[10px] text-foreground/35">{channel.models.length} 个模型</span>
             </div>
             <div className="divide-y divide-border/60 rounded-md border border-border/70">
@@ -54,7 +54,7 @@ export function ChannelModelSettings({ channel, onChange }: { channel: ModelChan
 
 function defaultProtocolForModel(channel: ModelChannel, model: string): ModelProtocol {
     if (isXAIImageModel(model) && (!channel.interfaceType || channel.interfaceType === "openai-image" || channel.interfaceType === "xai-image" || channel.interfaceType === "xai-video")) return "xai-image";
-    if (isXAIVideoModel(model) && (!channel.interfaceType || channel.interfaceType === "newapi" || channel.interfaceType === "xai-image" || channel.interfaceType === "xai-video")) return "xai-video";
+    if (isXAIVideoModel(model) && (!channel.interfaceType || channel.interfaceType === "xai-image" || channel.interfaceType === "xai-video")) return "xai-video";
     if (channel.interfaceType) return channel.interfaceType;
     if (channel.apiFormat === "gemini" && modelMatchesCapability(model, "video")) return "gemini-veo";
     if (channel.apiFormat === "gemini") return "gemini-content";

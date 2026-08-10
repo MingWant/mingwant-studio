@@ -606,7 +606,7 @@ func TestRunVideoTaskUsesNestedURLBeforeResultURL(t *testing.T) {
 	}
 }
 
-func TestIsXAIVideoConfigOnlyCorrectsOfficialModelFamily(t *testing.T) {
+func TestIsXAIVideoConfigRespectsExplicitProtocol(t *testing.T) {
 	for name, tc := range map[string]struct {
 		config providerConfig
 		want   bool
@@ -615,9 +615,13 @@ func TestIsXAIVideoConfigOnlyCorrectsOfficialModelFamily(t *testing.T) {
 			config: providerConfig{InterfaceType: "xai-video", Model: "custom-model"},
 			want:   true,
 		},
-		"legacy official model": {
-			config: providerConfig{InterfaceType: "newapi", Model: "channel::grok-imagine-video-1.5"},
+		"missing protocol official model fallback": {
+			config: providerConfig{Model: "channel::grok-imagine-video-1.5"},
 			want:   true,
+		},
+		"explicit newapi relay": {
+			config: providerConfig{InterfaceType: "newapi", Model: "channel::grok-imagine-video-1.5"},
+			want:   false,
 		},
 		"third party alias": {
 			config: providerConfig{InterfaceType: "newapi", Model: "grok-video-1.5"},
@@ -636,41 +640,31 @@ func TestIsXAIVideoConfigOnlyCorrectsOfficialModelFamily(t *testing.T) {
 	}
 }
 
-func TestRunVideoTaskCorrectsLegacyGrokVideoConfigToXAIEndpoint(t *testing.T) {
+func TestRunVideoTaskKeepsExplicitNewAPIProtocolForGrokModel(t *testing.T) {
 	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
 	paths := make([]string, 0, 3)
 	var server *httptest.Server
 	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		paths = append(paths, r.Method+" "+r.URL.Path)
 		switch r.Method + " " + r.URL.Path {
-		case "POST /v1/videos/generations":
-			if contentType := r.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "application/json") {
-				t.Errorf("Content-Type = %q, want application/json", contentType)
+		case "POST /v1/videos":
+			if contentType := r.Header.Get("Content-Type"); !strings.HasPrefix(contentType, "multipart/form-data") {
+				t.Errorf("Content-Type = %q, want multipart/form-data", contentType)
 			}
-			var body map[string]interface{}
-			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-				t.Fatalf("decode request: %v", err)
+			if err := r.ParseMultipartForm(1 << 20); err != nil {
+				t.Fatalf("parse multipart request: %v", err)
 			}
-			if body["model"] != "grok-imagine-video-1.5" || body["prompt"] != "make it move" {
-				t.Errorf("request body = %#v", body)
+			if r.FormValue("model") != "grok-imagine-video-1.5" || r.FormValue("prompt") != "make it move" {
+				t.Errorf("request form = %#v", r.MultipartForm.Value)
 			}
-			if body["duration"] != float64(10) || body["aspect_ratio"] != "1:1" || body["resolution"] != "720p" {
-				t.Errorf("xAI settings = %#v", body)
-			}
-			storage, ok := body["storage_options"].(map[string]interface{})
-			if !ok || storage["filename"] != "mingwant-video.mp4" || storage["expires_after"] != float64(xaiVideoStoredResultExpiresAfterSeconds) {
-				t.Errorf("storage_options = %#v", body["storage_options"])
-			}
-			for _, legacyField := range []string{"seconds", "size", "images"} {
-				if _, exists := body[legacyField]; exists {
-					t.Errorf("request body includes legacy field %q: %#v", legacyField, body)
-				}
+			if r.FormValue("seconds") != "10" || r.FormValue("size") != "1:1" || r.FormValue("resolution_name") != "720p" {
+				t.Errorf("NewAPI settings = %#v", r.MultipartForm.Value)
 			}
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"request_id":"video-1"}`))
+			_, _ = w.Write([]byte(`{"id":"video-1"}`))
 		case "GET /v1/videos/video-1":
 			w.Header().Set("Content-Type", "application/json")
-			_, _ = w.Write([]byte(`{"status":"done","video":{"url":"` + server.URL + `/files/video.mp4"}}`))
+			_, _ = w.Write([]byte(`{"status":"completed","video":{"url":"` + server.URL + `/files/video.mp4"}}`))
 		case "GET /files/video.mp4":
 			if authorization := r.Header.Get("Authorization"); authorization != "" {
 				t.Errorf("file Authorization = %q, want empty", authorization)
@@ -702,7 +696,7 @@ func TestRunVideoTaskCorrectsLegacyGrokVideoConfigToXAIEndpoint(t *testing.T) {
 	if !ok || video["dataUrl"] != "data:video/mp4;base64,dmlkZW8=" {
 		t.Fatalf("video = %#v", result["video"])
 	}
-	want := "POST /v1/videos/generations,GET /v1/videos/video-1,GET /files/video.mp4"
+	want := "POST /v1/videos,GET /v1/videos/video-1,GET /files/video.mp4"
 	if got := strings.Join(paths, ","); got != want {
 		t.Fatalf("paths = %q, want %q", got, want)
 	}
@@ -1331,6 +1325,44 @@ func TestRunNewAPIChannel2VideoTaskDownloadsTemporaryResult(t *testing.T) {
 		t.Fatalf("video = %#v", video)
 	}
 	want := "POST /v1/video/generations,GET /v1/video/generations/grok-task,GET /video.mp4"
+	if got := strings.Join(paths, ","); got != want {
+		t.Fatalf("paths = %q, want %q", got, want)
+	}
+}
+
+func TestQueryNewAPIChannel2VideoTaskSupportsStandardNewAPIResult(t *testing.T) {
+	t.Setenv("CANVAS_ALLOW_PRIVATE_UPSTREAMS", "true")
+	paths := make([]string, 0, 2)
+	var server *httptest.Server
+	server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		paths = append(paths, r.Method+" "+r.URL.Path)
+		switch r.Method + " " + r.URL.Path {
+		case "GET /v1/video/generations/grok-task":
+			w.Header().Set("Content-Type", "application/json")
+			_, _ = w.Write([]byte(`{"task_id":"grok-task","status":"completed","url":"` + server.URL + `/video.mp4"}`))
+		case "GET /video.mp4":
+			w.Header().Set("Content-Type", "video/mp4")
+			_, _ = w.Write([]byte("video"))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	result, status, err := queryNewAPIChannel2VideoTask(context.Background(), canvasGenerationInput{
+		Config: providerConfig{BaseURL: server.URL, APIKey: "test-key", Model: "grok-imagine-video-1.5", InterfaceType: "newapi-channel-2"},
+	}, "grok-task")
+	if err != nil {
+		t.Fatalf("queryNewAPIChannel2VideoTask() error = %v", err)
+	}
+	if status != "COMPLETED" {
+		t.Fatalf("status = %q, want COMPLETED", status)
+	}
+	video := result["video"].(map[string]interface{})
+	if video["dataUrl"] != "data:video/mp4;base64,dmlkZW8=" {
+		t.Fatalf("video = %#v", video)
+	}
+	want := "GET /v1/video/generations/grok-task,GET /video.mp4"
 	if got := strings.Join(paths, ","); got != want {
 		t.Fatalf("paths = %q, want %q", got, want)
 	}

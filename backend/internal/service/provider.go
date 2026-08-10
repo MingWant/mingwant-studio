@@ -1041,8 +1041,10 @@ func queryNewAPIChannel2VideoTask(ctx context.Context, input canvasGenerationInp
 	}
 	status := strings.ToUpper(strings.TrimSpace(stringField(state, "status")))
 	switch status {
-	case "SUCCESS":
-		videoURL := strings.TrimSpace(stringField(state, "result_url"))
+	case "SUCCESS", "SUCCEEDED", "COMPLETED", "DONE":
+		// New API 标准响应使用 completed + url，部分中转使用 SUCCESS + result_url；
+		// 两种格式对应同一条已创建任务的查询结果，兼容解析不会产生第二次创建调用。
+		videoURL := firstNonEmptyString(stringField(state, "result_url"), stringField(state, "url"), stringField(state, "video_url"), newAPIVideoResultURL(state))
 		if videoURL == "" {
 			return nil, status, fmt.Errorf("NewAPI Video Generations 任务 %s 已成功但没有返回视频地址", id)
 		}
@@ -1052,10 +1054,15 @@ func queryNewAPIChannel2VideoTask(ctx context.Context, input canvasGenerationInp
 		}
 		mimeType = normalizedMediaMimeType(mimeType, data)
 		return map[string]interface{}{"mode": "video", "video": map[string]interface{}{"dataUrl": dataURL(mimeType, data), "mimeType": mimeType}}, status, nil
-	case "FAILURE":
+	case "FAILURE", "FAILED", "CANCELLED", "CANCELED", "EXPIRED":
 		reason := strings.TrimSpace(stringField(state, "fail_reason"))
+		if reason == "" {
+			if taskError, ok := state["error"].(map[string]interface{}); ok {
+				reason = firstNonEmptyString(stringField(taskError, "message"), stringField(taskError, "code"))
+			}
+		}
 		return nil, status, fmt.Errorf("NewAPI Video Generations 视频生成失败（任务 %s）：%s", id, defaultString(reason, "上游返回失败"))
-	case "SUBMITTED", "QUEUED", "IN_PROGRESS", "NOT_START", "":
+	case "SUBMITTED", "QUEUED", "IN_PROGRESS", "PROCESSING", "PENDING", "NOT_START", "":
 		return nil, status, nil
 	default:
 		return nil, status, fmt.Errorf("NewAPI Video Generations 任务 %s 返回未知状态：%s", id, status)

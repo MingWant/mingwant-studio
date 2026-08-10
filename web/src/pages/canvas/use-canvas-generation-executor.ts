@@ -8,7 +8,7 @@ import { isGenerationTaskCapacityError } from "@/lib/canvas/canvas-generation-ba
 import { hasPendingCanvasGenerationTask } from "@/lib/canvas/canvas-generation-task-state";
 import { expandSkillMentions } from "@/lib/canvas/canvas-skill-mentions";
 import { generationFailureMetadata } from "@/lib/generation-error";
-import { navigateToSettings } from "@/lib/settings-navigation";
+import { CANVAS_MODEL_RESELECTION_REQUIRED_MESSAGE, handleUnavailableCanvasModel } from "@/lib/settings-navigation";
 import type { UpdreamSkill } from "@/services/api/skills";
 import type { GenerationTask } from "@/services/api/task-center";
 import { useConfigStore, useEffectiveConfig } from "@/stores/use-config-store";
@@ -99,8 +99,8 @@ export function useCanvasGenerationExecutor({
                 return;
             }
             if (!isAiConfigReady(generationConfig, generationConfig.model)) {
-                reportPreflightFailure("生成模型配置已变化，请重新确认模型后再提交");
-                navigateToSettings({ continueCreation: true });
+                const action = handleUnavailableCanvasModel(generationConfig, generationConfig.model, (content) => message.warning(content));
+                reportPreflightFailure(action === "reselect" ? CANVAS_MODEL_RESELECTION_REQUIRED_MESSAGE : "生成模型配置已变化，请在模型选择中重新确认后再提交");
                 return;
             }
 

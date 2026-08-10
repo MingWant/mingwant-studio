@@ -3,7 +3,7 @@ import { Coins, Cpu } from "lucide-react";
 import { Select } from "antd";
 
 import { cn } from "@/lib/utils";
-import { modelDisplayName, modelOptionLabel, modelOptionName, resolveModelChannel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
+import { modelDisplayName, modelOptionLabel, modelOptionName, modelSelectionNeedsReselection, resolveModelChannel, selectableModelsByCapability, type AiConfig, type ModelCapability } from "@/stores/use-config-store";
 
 type ModelPickerProps = {
     config: AiConfig;
@@ -20,28 +20,36 @@ type ModelPickerProps = {
 export function ModelPicker({ config, value, onChange, capability, className, fullWidth = false, placeholder = "选择模型", onMissingConfig, showSelectedPrice = true }: ModelPickerProps) {
     const pickerId = useId();
     const [open, setOpen] = useState(false);
+    const current = value || "";
+    const currentNeedsReselection = modelSelectionNeedsReselection(config, current);
+    const availableOptions = useMemo(() => selectableModelsByCapability(config, capability), [capability, config]);
     const options = useMemo(
-        () => Array.from(new Set([...(config.channelMode === "local" && !capability ? [value] : []), ...selectableModelsByCapability(config, capability)].filter((model): model is string => Boolean(model)))),
-        [capability, config, value],
+        () => Array.from(new Set([...(currentNeedsReselection || (config.channelMode === "local" && !capability) ? [current] : []), ...availableOptions].filter(Boolean))),
+        [availableOptions, capability, config.channelMode, current, currentNeedsReselection],
     );
     const optionGroups = useMemo(() => {
+        const unresolvedModels = options.filter((model) => modelSelectionNeedsReselection(config, model));
+        const resolvedOptions = options.filter((model) => !unresolvedModels.includes(model));
         const channelGroups = config.channels
             .map((channel) => ({
                 key: channel.id,
                 label: channel.name || "未命名渠道",
                 scope: channel.scope === "system" ? "系统渠道" : "自定义渠道",
-                models: options.filter((model) => resolveModelChannel(config, model).id === channel.id),
+                models: resolvedOptions.filter((model) => resolveModelChannel(config, model).id === channel.id),
             }))
             .filter((group) => group.models.length);
         const groupedModels = new Set(channelGroups.flatMap((group) => group.models));
-        const ungroupedModels = options.filter((model) => !groupedModels.has(model));
-        return ungroupedModels.length ? [...channelGroups, { key: "ungrouped", label: "其他模型", scope: "未指定渠道", models: ungroupedModels }] : channelGroups;
+        const ungroupedModels = resolvedOptions.filter((model) => !groupedModels.has(model));
+        return [
+            ...(unresolvedModels.length ? [{ key: "unresolved", label: "原选择已失效", scope: "需重新选择", models: unresolvedModels }] : []),
+            ...channelGroups,
+            ...(ungroupedModels.length ? [{ key: "ungrouped", label: "其他模型", scope: "未指定渠道", models: ungroupedModels }] : []),
+        ];
     }, [config, options]);
-    const current = value || "";
     const currentPrice = modelMenuPrice(config, current);
     const selectOptions = useMemo(() => optionGroups.map((group) => ({
         label: <span className="flex min-w-0 items-center gap-1.5"><span className="truncate">{group.label}</span><span className="shrink-0 text-[10px] font-normal text-foreground/38">{group.scope}</span></span>,
-        options: group.models.map((model) => ({ value: model, label: modelOptionLabel(config, model) })),
+        options: group.models.map((model) => ({ value: model, label: modelOptionLabel(config, model), disabled: modelSelectionNeedsReselection(config, model) })),
     })), [config, optionGroups]);
 
     useEffect(() => {
@@ -71,7 +79,7 @@ export function ModelPicker({ config, value, onChange, capability, className, fu
                 className={cn("canvas-composer-model-picker", fullWidth ? "w-full" : "min-w-36 max-w-full")}
                 classNames={{ popup: { root: "canvas-model-picker-popup" } }}
                 onOpenChange={(nextOpen) => {
-                    if (nextOpen && !options.length && config.channelMode === "local") onMissingConfig?.();
+                    if (nextOpen && !availableOptions.length && !currentNeedsReselection && config.channelMode === "local") onMissingConfig?.();
                     if (nextOpen) window.dispatchEvent(new CustomEvent("model-picker-open", { detail: pickerId }));
                     setOpen(nextOpen);
                 }}
@@ -98,14 +106,15 @@ function emptyModelLabel(config: AiConfig, capability?: ModelCapability) {
 }
 
 function ModelLabel({ config, model, capability }: { config: AiConfig; model: string; capability?: ModelCapability }) {
-    const meta = modelMenuMeta(model, capability);
+    const needsReselection = modelSelectionNeedsReselection(config, model);
+    const meta: { description: string; time?: string } = needsReselection ? { description: "原渠道或模型已不可用" } : modelMenuMeta(model, capability);
     return (
         <span className="flex min-w-0 items-center gap-1.5 py-0">
             <span className="grid size-6 shrink-0 place-items-center rounded-md bg-black/5 dark:bg-white/10">
                 <ModelIcon model={model} />
             </span>
             <span className="min-w-0 flex-1">
-                <span className="block min-w-0 truncate text-[11px] font-medium leading-none">{modelDisplayName(config, model)}</span>
+                <span className="block min-w-0 truncate text-[11px] font-medium leading-none">{needsReselection ? modelOptionLabel(config, model) : modelDisplayName(config, model)}</span>
                 <span className="mt-0.5 block truncate text-[10px] opacity-55">{modelOptionName(model)} · {meta.description}</span>
             </span>
             <ModelPrice price={modelMenuPrice(config, model)} />

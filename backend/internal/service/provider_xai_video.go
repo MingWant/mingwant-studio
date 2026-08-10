@@ -22,14 +22,14 @@ const (
 	xaiVideoRecoveryPollInterval            = 15 * time.Second
 )
 
-// 官方 Grok Imagine 视频必须走 /videos/* JSON。历史配置只有在误选通用
-// OpenAI Compatible Videos 时才按模型名纠正，其他显式视频协议保持原契约。
+// 视频模型名不能决定中转网关实际开放的路由；只要配置显式声明了协议就必须尊重。
+// 仅对完全缺失协议的旧配置按官方模型名兜底，避免把 NewAPI 中转误发到 xAI 原生路径。
 func isXAIVideoConfig(config providerConfig) bool {
 	interfaceType := strings.TrimSpace(config.InterfaceType)
 	if interfaceType == string(model.ChannelInterfaceXAIVideo) {
 		return true
 	}
-	if interfaceType != "" && interfaceType != string(model.ChannelInterfaceNewAPIVideo) {
+	if interfaceType != "" {
 		return false
 	}
 	return isXAIVideoModelName(config.Model)

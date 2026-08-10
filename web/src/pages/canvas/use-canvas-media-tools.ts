@@ -26,7 +26,7 @@ import { placeCanvasNodeGroup, placeCanvasNodeInContext } from "@/lib/canvas/can
 import { compositeEmotionImage, emotionGenerationSize } from "@/lib/canvas/canvas-emotion";
 import { captureVideoLastFrame } from "@/lib/canvas/canvas-video-frame";
 import { mergeVideos, type MergeVideoProgress } from "@/lib/canvas/canvas-video-merge";
-import { navigateToSettings } from "@/lib/settings-navigation";
+import { handleUnavailableCanvasModel } from "@/lib/settings-navigation";
 import { storeGeneratedVideo } from "@/services/api/video";
 import { getMediaBlob } from "@/services/file-storage";
 import { imageToDataUrl, uploadImage } from "@/services/image-storage";
@@ -343,7 +343,7 @@ export function useCanvasMediaTools({
         if (!node.metadata?.content) return;
         const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1", size: node.metadata?.size || "auto" };
         if (!isAiConfigReady(generationConfig, generationConfig.model)) {
-            navigateToSettings({ continueCreation: true });
+            handleUnavailableCanvasModel(generationConfig, generationConfig.model, (content) => message.warning(content));
             return;
         }
         const userPrompt = payload.prompt.trim();
@@ -424,7 +424,7 @@ export function useCanvasMediaTools({
         if (!node.metadata?.content) return;
         const generationConfig = { ...buildGenerationConfig(effectiveConfig, node, "image"), count: "1" };
         if (!isAiConfigReady(generationConfig, generationConfig.model)) {
-            navigateToSettings({ continueCreation: true });
+            handleUnavailableCanvasModel(generationConfig, generationConfig.model, (content) => message.warning(content));
             return;
         }
         const childId = nanoid();
@@ -457,14 +457,17 @@ export function useCanvasMediaTools({
             finishGenerationRequest(childId, controller);
         clearRunningNode(childId);
         }
-    }, [bindGenerationTask, clearRunningNode, effectiveConfig, finishGenerationRequest, isAiConfigReady, nodesRef, projectId, setConnections, setDialogNodeId, setNodes, setRunningNode, setSelectedNodeIds, startGenerationRequest]);
+    }, [bindGenerationTask, clearRunningNode, effectiveConfig, finishGenerationRequest, isAiConfigReady, message, nodesRef, projectId, setConnections, setDialogNodeId, setNodes, setRunningNode, setSelectedNodeIds, startGenerationRequest]);
 
     const generateEmotionNode = useCallback(async (node: CanvasNodeData, payload: CanvasImageEmotionPayload) => {
         if (!node.metadata?.content) return;
         const baseConfig = buildGenerationConfig(effectiveConfig, node, "image");
         const providerSize = emotionGenerationSize(payload.editRegion);
         const generationConfig = { ...baseConfig, count: "1", size: providerSize, quality: !baseConfig.quality || baseConfig.quality === "auto" ? "high" : baseConfig.quality };
-        if (!isAiConfigReady(generationConfig, generationConfig.model)) { navigateToSettings({ continueCreation: true }); return; }
+        if (!isAiConfigReady(generationConfig, generationConfig.model)) {
+            handleUnavailableCanvasModel(generationConfig, generationConfig.model, (content) => message.warning(content));
+            return;
+        }
         if (resolveModelRequestConfig(generationConfig, generationConfig.model).interfaceType !== "openai-image") {
             message.error("表情编辑需要支持蒙版的 OpenAI Images 渠道，当前渠道已拒绝整图重绘");
             return;

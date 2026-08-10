@@ -177,7 +177,7 @@ export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionR
                     onToggle={(referenceNodeId, enabled) => onReferenceChange(undefined, referenceNodeId, enabled)}
                     onAddProjectAsset={onAddReferenceAsset ? () => onAddReferenceAsset() : undefined}
                     onUploadImage={() => onUploadReferenceImage()}
-                    onOpenSettings={() => navigateToSettings({ continueCreation: true })}
+                    onOpenSettings={() => navigateToSettings({ section: "models", continueCreation: true })}
                 />
                 <span className="text-xs font-medium" style={{ color: theme.node.muted }}>{rows.length} 镜 · {totalDuration}s</span>
                 <Tooltip title={nextStageLabel}>
@@ -244,7 +244,7 @@ export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionR
                                 onToggle={(referenceNodeId, enabled) => onReferenceChange(row.id, referenceNodeId, enabled)}
                                 onAddProjectAsset={onAddReferenceAsset ? () => onAddReferenceAsset(row.id) : undefined}
                                 onUploadImage={() => onUploadReferenceImage(row.id)}
-                                onOpenSettings={() => navigateToSettings({ continueCreation: true })}
+                                onOpenSettings={() => navigateToSettings({ section: "models", continueCreation: true })}
                             />
                             <button type="button" disabled={rows.length <= 1} className="grid size-6 place-items-center rounded outline-none opacity-55 transition enabled:hover:bg-red-500/10 enabled:hover:opacity-100 focus-visible:ring-2 disabled:cursor-not-allowed disabled:opacity-20" style={{ color: theme.accent.danger, "--tw-ring-color": theme.accent.danger } as CSSProperties} title={rows.length <= 1 ? "至少保留一个镜头" : "删除镜头"} aria-label={`删除镜头 ${row.shotNumber}`} onMouseDown={(event) => event.stopPropagation()} onClick={(event) => { event.stopPropagation(); onRemoveRow(row.id); }}><Trash2 className="size-3.5" /></button>
                         </div>
@@ -290,7 +290,7 @@ export function CanvasScriptNodeContent({ node, batch, pipeline, scale, mentionR
                             placeholder="选择文本模型"
                             showSelectedPrice={false}
                             onChange={onModelChange}
-                            onMissingConfig={() => navigateToSettings({ continueCreation: true })}
+                            onMissingConfig={() => navigateToSettings({ section: "models", continueCreation: true })}
                         />
                     </div>
                     {simpleMode ? <span className="mr-auto text-[11px]" style={{ color: theme.node.muted }}>自动拆分镜头 · 默认时长</span> : <Select<StoryboardShotCount>

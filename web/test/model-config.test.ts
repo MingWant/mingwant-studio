@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 
-import { buildApiUrl, defaultConfig, isSystemProxyBaseUrl, modelOptionLabel, normalizeConfigSnapshot, resolveModelRequestConfig, type AiConfig } from "../src/stores/use-config-store";
+import { isXAIVideoRequest } from "../src/lib/model-protocols";
+import { buildApiUrl, defaultConfig, isSystemProxyBaseUrl, modelOptionLabel, modelSelectionNeedsReselection, normalizeConfigSnapshot, resolveModelRequestConfig, resolveModelSelectionForCapability, type AiConfig } from "../src/stores/use-config-store";
 
 function configWithChannel(patch: Partial<AiConfig["channels"][number]>): AiConfig {
     const channel = { ...defaultConfig.channels[0], apiKey: "test-key", models: ["kimi-k3-ls"], ...patch };
@@ -15,6 +16,13 @@ function configWithChannel(patch: Partial<AiConfig["channels"][number]>): AiConf
 }
 
 describe("model request protocol resolution", () => {
+    test("explicit relay video protocol is not overwritten by a Grok model name", () => {
+        expect(isXAIVideoRequest("xai-video", "grok-imagine-video-1.5")).toBe(true);
+        expect(isXAIVideoRequest("newapi", "grok-imagine-video-1.5")).toBe(false);
+        expect(isXAIVideoRequest("newapi-channel-2", "grok-imagine-video-1.5")).toBe(false);
+        expect(isXAIVideoRequest(undefined, "grok-imagine-video-1.5")).toBe(true);
+    });
+
     test("preserves explicit OpenAI-compatible version roots", () => {
         expect(buildApiUrl("https://provider.example/v1", "/chat/completions")).toBe("https://provider.example/v1/chat/completions");
         expect(buildApiUrl("https://provider.example/v1beta", "/responses")).toBe("https://provider.example/v1beta/responses");
@@ -78,7 +86,31 @@ describe("model request protocol resolution", () => {
         expect(removed.resolvedChannelId).toBe("__unresolved_model__");
         expect(modelOptionLabel(config, "removed::shared-model")).toContain("需重新选择");
         const normalized = normalizeConfigSnapshot({ config: { ...config, textModel: "removed::shared-model", model: "removed::shared-model" } }).config;
+        expect(normalized.textModel).toBe("removed::shared-model");
+        expect(normalized.model).toBe("removed::shared-model");
+        expect(modelSelectionNeedsReselection(normalized, normalized.textModel)).toBe(true);
+        expect(resolveModelSelectionForCapability(normalized, "text", normalized.textModel)).toBe("removed::shared-model");
+    });
+
+    test("built-in placeholders are not mistaken for a deleted channel on an unconfigured account", () => {
+        const normalized = normalizeConfigSnapshot({ config: { ...defaultConfig, channels: [] } }).config;
+        expect(normalized.imageModel).toBe("");
+        expect(normalized.videoModel).toBe("");
+        expect(modelSelectionNeedsReselection(normalized, defaultConfig.imageModel)).toBe(false);
+        expect(resolveModelSelectionForCapability(normalized, "image", normalized.imageModel, defaultConfig.imageModel)).toBe("");
+    });
+
+    test("an existing model that changed capability is not retained as another domain default", () => {
+        const channel = {
+            ...defaultConfig.channels[0],
+            id: "system-image",
+            scope: "system" as const,
+            apiKey: "system",
+            models: ["visual-model"],
+            modelCosts: [{ model: "visual-model", capability: "image" as const, billingMode: "fixed_request" as const, unitPriceMicrocredits: 1 }],
+        };
+        const normalized = normalizeConfigSnapshot({ config: { ...defaultConfig, channels: [channel], model: "system-image::visual-model", textModel: "system-image::visual-model" } }).config;
         expect(normalized.textModel).toBe("");
-        expect(normalized.model).toBe("");
+        expect(resolveModelSelectionForCapability(normalized, "text", "system-image::visual-model")).toBe("");
     });
 });

@@ -79,6 +79,7 @@ export type AiConfig = {
 export const CONFIG_STORE_KEY = "open_ai_canvas:ai_config_store";
 export type ModelCapability = "image" | "video" | "text" | "audio";
 const CHANNEL_MODEL_SEPARATOR = "::";
+const UNRESOLVED_MODEL_CHANNEL_ID = "__unresolved_model__";
 const OPENAI_BASE_URL = "https://api.openai.com";
 const GEMINI_BASE_URL = "https://generativelanguage.googleapis.com";
 
@@ -199,6 +200,18 @@ export function configuredModelMatchesCapability(config: AiConfig, model: string
     return capability ? selectableModelsByCapability(config, capability).includes(normalized) : true;
 }
 
+export function resolveModelSelectionForCapability(config: AiConfig, capability: ModelCapability, ...candidates: Array<string | undefined>) {
+    for (const candidate of candidates) {
+        const model = candidate?.trim() || "";
+        if (!model) continue;
+        const normalizedModel = normalizeModelOptionValue(model, config.channels);
+        if (configuredModelMatchesCapability(config, model, capability)) return normalizedModel;
+        // 已明确绑定但后来失效的值要原样留给选择器展示；仅能力不匹配时才继续找下一个候选。
+        if (modelSelectionNeedsReselection(config, model)) return model;
+    }
+    return "";
+}
+
 function isAiConfigReady(config: AiConfig, model: string) {
     // 不能只检查渠道有密钥；旧画布或已删模型的裸名称会被 resolveModelChannel 误投到第一条渠道。
     const normalizedModel = normalizeModelOptionValue(model, config.channels);
@@ -300,10 +313,27 @@ function normalizeSelectedModel(value: string, channels: ModelChannel[], options
     const raw = typeof value === "string" ? value.trim() : "";
     // 带前缀的旧值曾经明确绑定过某个渠道；渠道被删除后不能把它当成裸模型名，
     // 否则刷新系统渠道会把用户静默切到 options[0]，测活和实际请求就会漂移。
-    if (raw && isChannelModelValue(raw)) return "";
+    if (raw && isChannelModelValue(raw)) {
+        if (!model) return isMissingBuiltInModelPlaceholder(raw, channels) ? "" : raw;
+        const decoded = decodeChannelModel(model);
+        const channel = decoded ? channels.find((item) => item.id === decoded.channelId) : undefined;
+        // 渠道与模型仍存在但能力已经变化时清空该领域默认项，不能把图片/视频模型误送进文本等接口。
+        // 系统模型仅因未定价而暂时不可选时仍保留绑定，让画布明确提示管理员处理或用户重选。
+        return channel?.scope === "system" && !hasSystemModelPrice(channel, decoded?.model || "") ? raw : "";
+    }
     // 旧配置只保存裸模型名且该名称跨渠道重复时，宁可要求重新选择，也不静默绑定第一条渠道。
     if (raw && !isChannelModelValue(raw) && channels.filter((channel) => channel.models.includes(raw)).length > 1) return "";
     return options[0] || "";
+}
+
+function isMissingBuiltInModelPlaceholder(value: string, channels: ModelChannel[]) {
+    const decoded = decodeChannelModel(value);
+    return Boolean(
+        decoded
+        && decoded.channelId === "default"
+        && !channels.some((channel) => channel.id === decoded.channelId)
+        && defaultConfig.channels[0]?.models.includes(decoded.model),
+    );
 }
 
 export function useEffectiveConfig() {
@@ -360,7 +390,7 @@ export function modelOptionLabel(config: AiConfig, value: string) {
     const decoded = decodeChannelModel(value);
     const channel = resolveModelChannel(config, value);
     const displayName = modelDisplayName(config, value);
-    if (channel.id === "__unresolved_model__") return `需重新选择：${displayName}`;
+    if (modelSelectionNeedsReselection(config, value)) return `需重新选择：${displayName}`;
     if (!decoded) return displayName;
     return `${displayName}（${channel.name}）`;
 }
@@ -401,7 +431,8 @@ export function resolveModelChannel(config: AiConfig, value: string) {
     if (decoded) {
         // 带渠道前缀的模型已经是一次明确绑定；渠道被删除或模型被下架时，
         // 不能回退到第一条渠道，否则测活通过的配置会被静默换成另一条 Base URL。
-        return config.channels.find((channel) => channel.id === decoded.channelId) || unresolvedModelChannel(config);
+        const channel = config.channels.find((item) => item.id === decoded.channelId);
+        return channel?.models.includes(decoded.model) ? channel : unresolvedModelChannel(config);
     }
     const model = value.trim();
     const matches = config.channels.filter((channel) => channel.models.includes(model));
@@ -417,9 +448,18 @@ export function resolveModelChannel(config: AiConfig, value: string) {
     return config.channels[0] || createModelChannel({ id: "default", name: "默认渠道", baseUrl: config.baseUrl, apiKey: config.apiKey, apiFormat: config.apiFormat, models: config.models.map(modelOptionName) });
 }
 
+export function modelSelectionNeedsReselection(config: AiConfig, value: string) {
+    const model = typeof value === "string" ? value.trim() : "";
+    if (!model || isMissingBuiltInModelPlaceholder(model, config.channels)) return false;
+    const normalizedModel = normalizeModelOptionValue(model, config.channels);
+    const channel = resolveModelChannel(config, model);
+    return channel.id === UNRESOLVED_MODEL_CHANNEL_ID
+        || (channel.scope === "system" && (!normalizedModel || !config.models.includes(normalizedModel)));
+}
+
 function unresolvedModelChannel(config: AiConfig): ModelChannel {
     return {
-        id: "__unresolved_model__",
+        id: UNRESOLVED_MODEL_CHANNEL_ID,
         name: "模型需重新选择",
         baseUrl: "",
         apiKey: "",

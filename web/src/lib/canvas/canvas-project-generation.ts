@@ -1,5 +1,5 @@
 import { createGenerationTask, waitForGenerationTask, type GenerationTask } from "@/services/api/task-center";
-import { configuredModelMatchesCapability, defaultConfig, normalizeModelOptionValue, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, normalizeModelOptionValue, resolveModelRequestConfig, resolveModelSelectionForCapability, type AiConfig } from "@/stores/use-config-store";
 import { getImageBlob, resolveImageUrl, uploadImage } from "@/services/image-storage";
 import { getMediaBlob, resolveMediaUrl } from "@/services/file-storage";
 import { resourceIdFromStorageKey, resourceStorageKey, uploadResourceFile } from "@/services/api/resources";
@@ -425,10 +425,10 @@ export function getGenerationCount(count: string) {
 
 export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | undefined, mode: CanvasNodeGenerationMode): AiConfig {
     const defaultModel = mode === "image" ? config.imageModel : mode === "video" ? config.videoModel : mode === "audio" ? config.audioModel : config.textModel;
-    const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
     const storedModel = node?.metadata?.model;
-    // 节点已经绑定过渠道模型时，渠道被删除或能力被撤销必须明确失败，不能静默落到另一条同名默认渠道。
-    const selectedModel = storedModel || (defaultModel && configuredModelMatchesCapability(config, defaultModel, mode) ? defaultModel : fallbackModel);
+    // 节点或默认项已经绑定过渠道模型时，渠道被删除或能力被撤销必须保留原值并明确失败，
+    // 不能静默落到另一条同名渠道，也不能用内置占位模型遮住真正失效的系统选择。
+    const selectedModel = resolveModelSelectionForCapability(config, mode, storedModel, defaultModel);
     // 旧画布节点可能只保存了裸模型名；生成前必须补回渠道前缀，否则同名模型会被解析到第一条渠道，测活结论与实际请求就会错配。
     const model = normalizeModelOptionValue(selectedModel, config.channels) || selectedModel;
     const modelConfig = { ...config, model };

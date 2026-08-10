@@ -3,7 +3,7 @@ import { ArrowUp, AtSign, Boxes, FileText, ImageIcon, ImagePlus, LoaderCircle, M
 import { Button, Modal, Tooltip } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
-import { configuredModelMatchesCapability, defaultConfig, modelOptionName, resolveModelChannel, resolveModelRequestConfig, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelSelectionForCapability, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
@@ -245,7 +245,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         });
                     }}
                     capability={mode}
-                    onMissingConfig={() => navigateToSettings({ continueCreation: true })}
+                    onMissingConfig={() => navigateToSettings({ section: "models", continueCreation: true })}
                     showSelectedPrice={false}
                 />
             </div>
@@ -256,7 +256,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         placement={expanded ? "topRight" : "topLeft"}
                         buttonClassName="!h-7 !w-[138px] !justify-start !rounded-md !border-0 !bg-transparent !px-1.5 !text-[10px] !font-normal !shadow-none [&>span]:min-w-0 [&_.lucide]:!size-3"
                         onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })}
-                        onMissingConfig={() => navigateToSettings({ continueCreation: true })}
+                        onMissingConfig={() => navigateToSettings({ section: "models", continueCreation: true })}
                         onOpenChange={expanded ? undefined : onImageSettingsOpenChange}
                     />
                 ) : mode === "video" ? (
@@ -434,9 +434,8 @@ function defaultMode(type: CanvasNodeData["type"]): CanvasNodeGenerationMode {
 
 function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasNodeGenerationMode): AiConfig {
     const defaultModel = mode === "image" ? globalConfig.imageModel : mode === "video" ? globalConfig.videoModel : mode === "audio" ? globalConfig.audioModel : globalConfig.textModel;
-    const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
     const storedModel = node.metadata?.model;
-    const model = storedModel && configuredModelMatchesCapability(globalConfig, storedModel, mode) ? storedModel : defaultModel && configuredModelMatchesCapability(globalConfig, defaultModel, mode) ? defaultModel : fallbackModel;
+    const model = resolveModelSelectionForCapability(globalConfig, mode, storedModel, defaultModel);
     const rawVideoSeconds = node.metadata?.seconds || globalConfig.videoSeconds || defaultConfig.videoSeconds;
     const videoCapability = mode === "video" ? videoCapabilityForConfig({ ...globalConfig, model }) : undefined;
     return {

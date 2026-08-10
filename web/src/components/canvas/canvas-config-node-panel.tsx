@@ -3,7 +3,7 @@ import { Image as ImageIcon, LoaderCircle, MessageSquare, Music2, Play, Settings
 import { Button, Segmented } from "antd";
 
 import { ModelPicker } from "@/components/model-picker";
-import { configuredModelMatchesCapability, defaultConfig, modelOptionName, resolveModelChannel, resolveModelRequestConfig, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
+import { defaultConfig, modelOptionName, resolveModelChannel, resolveModelRequestConfig, resolveModelSelectionForCapability, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import { CreditSymbol, requestCreditCost } from "@/constant/credits";
 import { canvasThemes } from "@/lib/canvas-theme";
 import { normalizeCapabilityDuration, resolveVideoOperation, videoCapabilityFromConfig } from "@/lib/model-capabilities";
@@ -157,7 +157,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                             });
                         }}
                         capability={mode}
-                        onMissingConfig={() => navigateToSettings({ continueCreation: true })}
+                        onMissingConfig={() => navigateToSettings({ section: "models", continueCreation: true })}
                         fullWidth
                     />
                     {mode === "video" ? (
@@ -230,9 +230,8 @@ function InputChip({ label, value, style }: { label: string; value: string; styl
 
 function buildNodeConfig(globalConfig: AiConfig, node: CanvasNodeData, mode: CanvasGenerationMode): AiConfig {
     const defaultModel = mode === "image" ? globalConfig.imageModel : mode === "video" ? globalConfig.videoModel : mode === "audio" ? globalConfig.audioModel : globalConfig.textModel;
-    const fallbackModel = mode === "image" ? defaultConfig.imageModel : mode === "video" ? defaultConfig.videoModel : mode === "audio" ? defaultConfig.audioModel : defaultConfig.textModel;
     const storedModel = node.metadata?.model;
-    const model = storedModel && configuredModelMatchesCapability(globalConfig, storedModel, mode) ? storedModel : defaultModel && configuredModelMatchesCapability(globalConfig, defaultModel, mode) ? defaultModel : fallbackModel;
+    const model = resolveModelSelectionForCapability(globalConfig, mode, storedModel, defaultModel);
     const rawVideoSeconds = node.metadata?.seconds || globalConfig.videoSeconds || defaultConfig.videoSeconds;
     const videoCapability = mode === "video" ? videoCapabilityForConfig({ ...globalConfig, model }) : undefined;
     return {

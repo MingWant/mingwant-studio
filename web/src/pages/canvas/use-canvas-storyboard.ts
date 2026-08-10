@@ -23,7 +23,7 @@ import { placeCanvasNodeGroup } from "@/lib/canvas/canvas-layout";
 import { inspectGenerationRetry } from "@/lib/generation-retry-safety";
 import { resolveChannelProbeReadiness, type ChannelProbeReadiness } from "@/lib/channel-probe-readiness";
 import { supportsImageReferenceProtocol } from "@/lib/model-protocols";
-import { navigateToSettings } from "@/lib/settings-navigation";
+import { handleUnavailableCanvasModel } from "@/lib/settings-navigation";
 import { createGenerationTask, waitForGenerationTask } from "@/services/api/task-center";
 import { configuredModelMatchesCapability, modelOptionName, resolveModelChannel, resolveModelRequestConfig, useConfigStore, useEffectiveConfig, type AiConfig } from "@/stores/use-config-store";
 import {
@@ -307,7 +307,7 @@ export function useCanvasStoryboard({
         const expandedPrompt = buildStoryboardPromptWithContext(prompt, buildNodeMentionReferences(scriptNode, nodesRef.current, connectionsRef.current));
         const generationConfig = buildGenerationConfig(effectiveConfig, scriptNode, "text");
         if (!isAiConfigReady(generationConfig, generationConfig.model)) {
-            navigateToSettings({ continueCreation: true });
+            handleUnavailableCanvasModel(generationConfig, generationConfig.model, (content) => message.warning(content));
             return;
         }
         let sourceTaskId: string | undefined;
@@ -488,7 +488,7 @@ export function useCanvasStoryboard({
             return;
         }
         if (!isAiConfigReady(effectiveConfig, imageModel)) {
-            navigateToSettings({ continueCreation: true });
+            handleUnavailableCanvasModel(effectiveConfig, imageModel, (content) => message.warning(content));
             return;
         }
         const activeNodeIds = activeGenerationBatchNodeIds(scriptNode, "storyboard_image");
@@ -597,7 +597,7 @@ export function useCanvasStoryboard({
         }
         if (rejectInvalidProjectShots(targetRows)) return;
         if (!isAiConfigReady(effectiveConfig, videoModel)) {
-            navigateToSettings({ continueCreation: true });
+            handleUnavailableCanvasModel(effectiveConfig, videoModel, (content) => message.warning(content));
             return;
         }
         if (!await confirmGenerationSubmission(targetRows.length, videoModel, "视频生成")) return;
@@ -645,7 +645,7 @@ export function useCanvasStoryboard({
             return;
         }
         if (!isAiConfigReady(effectiveConfig, imageModel)) {
-            navigateToSettings({ continueCreation: true });
+            handleUnavailableCanvasModel(effectiveConfig, imageModel, (content) => message.warning(content));
             return;
         }
         const actionBoardRows = rows.filter((row) => !nodesRef.current.some((node) => node.type === CanvasNodeType.Image && node.metadata?.workflowKind === "action_board" && node.metadata.shotIndex === row.shotNumber && Boolean(node.metadata.content)));
@@ -717,7 +717,7 @@ export function useCanvasStoryboard({
         });
         if (!targetRows.length) return message.info("所选镜头视频已生成或正在生成");
         if (!isAiConfigReady(effectiveConfig, videoModel)) {
-            navigateToSettings({ continueCreation: true });
+            handleUnavailableCanvasModel(effectiveConfig, videoModel, (content) => message.warning(content));
             return;
         }
         if (!await confirmGenerationSubmission(targetRows.length, videoModel, "视频生成")) return;

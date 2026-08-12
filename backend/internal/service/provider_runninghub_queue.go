@@ -230,7 +230,8 @@ func (s *Service) tryAcquireRunningHubWorkflowSlot(ctx context.Context, spec run
 		return nil, nil, err
 	}
 	if !acquired {
-		return nil, runningHubWorkflowCapacityWaitDefault(), nil
+		wait := runningHubWorkflowCapacityWaitDefault()
+		return nil, &wait, nil
 	}
 	// 槽位和数据库状态分别防运行期竞态与进程崩溃；拿到槽位后必须再核对一次数据库真相。
 	wait, err = s.runningHubWorkflowCapacityBlocker(spec, taskID)

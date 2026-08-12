@@ -260,7 +260,7 @@ export function CanvasNodePromptPanel({ node, isRunning, onPromptChange, onConfi
                         onOpenChange={expanded ? undefined : onImageSettingsOpenChange}
                     />
                 ) : mode === "video" ? (
-                    <CanvasVideoSettingsPopover config={config} operation={selectedVideoOperation} buttonClassName="!h-7 !w-[136px] !justify-start !rounded-md !border-0 !bg-transparent !px-1.5 !text-[10px] !font-normal !shadow-none [&>span]:min-w-0 [&_.lucide]:!size-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
+                    <CanvasVideoSettingsPopover config={config} operation={selectedVideoOperation} workflowParameters={node.metadata?.runningHubParameters} buttonClassName="!h-7 !w-[136px] !justify-start !rounded-md !border-0 !bg-transparent !px-1.5 !text-[10px] !font-normal !shadow-none [&>span]:min-w-0 [&_.lucide]:!size-3" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} onWorkflowParameterChange={(key, value) => onConfigChange(node.id, runningHubParameterPatch(node.metadata, key, value))} />
                 ) : mode === "audio" ? (
                     <CanvasAudioSettingsPopover config={config} buttonClassName="!h-7 !w-[138px] !justify-start !rounded-md !border-0 !bg-transparent !px-1.5 !text-[10px] !font-normal !shadow-none [&>span]:min-w-0 [&_.lucide]:!size-3" onConfigChange={(key, value) => onConfigChange(node.id, audioConfigPatch(key, value))} />
                 ) : null}
@@ -475,6 +475,10 @@ function audioConfigPatch(key: CanvasAudioSettingKey, value: string) {
     if (key === "audioFormat") return { audioFormat: value };
     if (key === "audioSpeed") return { audioSpeed: value };
     return { audioInstructions: value };
+}
+
+function runningHubParameterPatch(metadata: CanvasNodeMetadata | undefined, key: string, value: string) {
+    return { runningHubParameters: { ...(metadata?.runningHubParameters || {}), [key]: value } };
 }
 
 function videoOperationPatch(config: AiConfig, metadata: CanvasNodeMetadata | undefined, value: NonNullable<CanvasNodeMetadata["videoEditOperation"]>) {

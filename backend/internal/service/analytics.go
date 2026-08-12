@@ -792,6 +792,16 @@ func (s *Service) EnrichAPICallLog(log *model.ApiCallLog, responseBody []byte) {
 			}
 		}
 	}
+	if log.Status == model.ApiCallStatusSucceeded && strings.Contains(strings.ToLower(log.Path), "/task/openapi/") {
+		code := runningHubScalarString(payload["code"])
+		if code != "" && code != "0" && code != "804" && code != "813" {
+			// RunningHub 把明确拒绝放在 HTTP 200 的业务信封中；必须在写日志前改成失败，
+			// 否则 803 等节点校验错误会被误认为一次成功计费调用。
+			log.Status = model.ApiCallStatusFailed
+			log.ErrorCode = defaultString(publicProviderErrorCode(code), "provider_rejected")
+			log.Error = runningHubSafeMessage(stringField(payload, "msg"))
+		}
+	}
 	if log.Status == model.ApiCallStatusFailed {
 		errorCode, errorMessage := publicProviderFailureDetailsFromPayload(payload)
 		log.ErrorCode = errorCode
@@ -820,7 +830,7 @@ func (s *Service) EnrichAPICallLog(log *model.ApiCallLog, responseBody []byte) {
 	// 轮询与下载必须沿用创建阶段已确认的任务 ID；响应中的普通资源 id 不能反向覆盖它。
 	providerRequestID := strings.TrimSpace(log.ProviderRequestID)
 	if providerRequestID == "" {
-		providerRequestID = firstNonEmpty(stringField(payload, "task_id"), stringField(payload, "id"), stringField(payload, "request_id"))
+		providerRequestID = firstNonEmpty(stringField(payload, "task_id"), stringField(payload, "taskId"), stringField(payload, "id"), stringField(payload, "request_id"))
 	}
 	// Gemini Veo 以 operation name 作为可恢复任务标识；只在视频创建响应中接受 name，
 	// 避免把其他 Gemini 资源对象的名称误记成供应商任务 ID。

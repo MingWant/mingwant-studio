@@ -1,6 +1,7 @@
-import { Divider, Input, InputNumber, Select, Space, Switch } from "antd";
+import { Button, Divider, Input, InputNumber, Select, Space, Switch } from "antd";
+import { Plus, Trash2 } from "lucide-react";
 
-import { defaultModelCapabilityConfig, MODEL_CAPABILITY_CONFIG_VERSION, type ModelCapabilityConfig, type VideoCapabilityConfig } from "@/lib/model-capabilities";
+import { defaultModelCapabilityConfig, MODEL_CAPABILITY_CONFIG_VERSION, normalizeRunningHubWorkflowConfig, type ModelCapabilityConfig, type RunningHubParameterMapping, type RunningHubReferenceMapping, type RunningHubWorkflowConfig, type VideoCapabilityConfig } from "@/lib/model-capabilities";
 
 type Props = {
     protocol?: string;
@@ -14,6 +15,7 @@ export function ModelCapabilityEditor({ protocol, value, onChange }: Props) {
     const updateReferences = (patch: Partial<VideoCapabilityConfig["references"]>) => update({ references: { ...video.references, ...patch } });
     const updateDuration = (patch: Partial<VideoCapabilityConfig["duration"]>) => update({ duration: { ...video.duration, ...patch } });
     const updateBoolean = (key: "generateAudio" | "watermark", patch: Partial<VideoCapabilityConfig["generateAudio"]>) => update({ [key]: { ...video[key], ...patch } } as Pick<VideoCapabilityConfig, "generateAudio" | "watermark">);
+    const runningHub = normalizeRunningHubWorkflowConfig(video.runningHub);
 
     return (
         <div className="space-y-3 rounded-lg border border-border/70 bg-foreground/[.025] p-3">
@@ -52,8 +54,96 @@ export function ModelCapabilityEditor({ protocol, value, onChange }: Props) {
                 <BooleanField label="支持生成声音" value={video.generateAudio} onChange={(patch) => updateBoolean("generateAudio", patch)} />
                 <BooleanField label="支持水印" value={video.watermark} onChange={(patch) => updateBoolean("watermark", patch)} />
             </div>
+            {protocol === "runninghub-workflow" ? <RunningHubWorkflowEditor value={runningHub} onChange={(next) => update({ runningHub: next })} /> : null}
         </div>
     );
+}
+
+const runningHubParameterSources: Array<{ label: string; value: RunningHubParameterMapping["source"] }> = [
+    { label: "提示词", value: "prompt" },
+    { label: "视频时长", value: "duration" },
+    { label: "画面宽度", value: "width" },
+    { label: "画面高度", value: "height" },
+    { label: "分辨率", value: "resolution" },
+    { label: "生成声音", value: "generate_audio" },
+    { label: "水印", value: "watermark" },
+    { label: "随机种子", value: "seed" },
+    { label: "帧率", value: "fps" },
+    { label: "自定义值", value: "custom" },
+];
+
+const runningHubValueTypes: Array<{ label: string; value: RunningHubParameterMapping["valueType"] }> = [
+    { label: "文本", value: "string" },
+    { label: "整数", value: "integer" },
+    { label: "小数", value: "number" },
+    { label: "开关", value: "boolean" },
+];
+
+const runningHubReferenceKinds: Array<{ label: string; value: RunningHubReferenceMapping["kind"] }> = [
+    { label: "图片", value: "image" },
+    { label: "视频", value: "video" },
+    { label: "音频", value: "audio" },
+];
+
+function RunningHubWorkflowEditor({ value, onChange }: { value: RunningHubWorkflowConfig; onChange: (value: RunningHubWorkflowConfig) => void }) {
+    const patch = (next: Partial<RunningHubWorkflowConfig>) => onChange({ ...value, ...next });
+    const updateParameter = (index: number, next: Partial<RunningHubParameterMapping>) => patch({ parameters: value.parameters.map((item, itemIndex) => itemIndex === index ? { ...item, ...next } : item) });
+    const updateReference = (index: number, next: Partial<RunningHubReferenceMapping>) => patch({ references: value.references.map((item, itemIndex) => itemIndex === index ? { ...item, ...next } : item) });
+    return <>
+        <Divider className="!my-2" />
+        <div>
+            <div className="text-sm font-semibold">RHWorkspace 节点映射</div>
+            <div className="mt-1 text-xs leading-5 text-foreground/50">模型标识填写 workflowId。推荐让结果节点后的轻量断点确定性失败，避免依赖消费级 Key 的取消权限；取消 API 仅作为异常兜底。</div>
+        </div>
+        <div className="grid grid-cols-2 gap-3">
+            <TextField label="视频结果节点 ID" value={value.resultNodeId} onChange={(resultNodeId) => patch({ resultNodeId })} />
+            <label className="text-xs"><span className="mb-1 block text-foreground/60">主终止方式</span><Select className="w-full" value={value.terminationMode} options={[{ label: "工作流断点失败（推荐）", value: "breakpoint" }, { label: "调用取消 API", value: "cancel" }]} onChange={(terminationMode: RunningHubWorkflowConfig["terminationMode"]) => patch({ terminationMode })} /></label>
+            <TextField label="取消兜底节点（逗号分隔）" value={value.stopOnNodeIds.join(", ")} onChange={(next) => patch({ stopOnNodeIds: parseStringList(next) })} />
+            {value.terminationMode === "breakpoint" ? <>
+                <TextField label="预期失败节点 ID" value={value.failureNodeId} onChange={(failureNodeId) => patch({ failureNodeId })} />
+                <TextField label="触发失败的字段名" value={value.failureNodeField} onChange={(failureNodeField) => patch({ failureNodeField })} />
+                <div className="col-span-2"><TextField label="触发失败的字段值" value={value.failureNodeValue} onChange={(failureNodeValue) => patch({ failureNodeValue })} /></div>
+            </> : null}
+            <NumberField label="等待 WSS 地址（秒）" value={value.wssWaitSeconds} min={5} max={600} onChange={(wssWaitSeconds) => patch({ wssWaitSeconds })} />
+            <NumberField label="WSS 静默保护（秒）" value={value.monitorSilenceSeconds} min={15} max={600} onChange={(monitorSilenceSeconds) => patch({ monitorSilenceSeconds })} />
+            <NumberField label="宽高对齐倍数" value={value.dimensionMultiple} min={1} max={1024} onChange={(dimensionMultiple) => patch({ dimensionMultiple })} />
+        </div>
+        <div className="rounded-md border border-amber-500/25 bg-amber-500/[.06] px-3 py-2 text-[11px] leading-5 text-foreground/65">All-in-One 默认在节点 12 保存首段视频后，让节点 73 先拆出视频/音频，再把二采条件节点 69 的 width 设为非 32 对齐的 481，使其在第二次采样前触发尺寸契约错误；若节点 69 未失败，则在采样器 48 开始时调用取消兜底。节点映射只能替换字段值，不能启用被禁用的工作流节点；视频/音频参考分支 23–26 仍需先在 RHWorkspace 中启用并保持连线。</div>
+        <div className="space-y-2">
+            <div><div className="text-xs font-semibold">画布参数 → 工作流字段</div><div className="mt-0.5 text-[11px] text-foreground/45">勾选“画布可调”后，用户会在视频设置中看到该参数；否则使用通用参数或这里的默认值。</div></div>
+            {value.parameters.map((item, index) => <div key={`parameter-${index}`} className="rounded-md border border-border/70 bg-background/35 p-2.5">
+                <div className="mb-2 flex items-center justify-between"><span className="text-xs font-medium">参数 {index + 1}</span><Button type="text" danger size="small" aria-label={`删除参数 ${index + 1}`} icon={<Trash2 className="size-3.5" />} onClick={() => patch({ parameters: value.parameters.filter((_, itemIndex) => itemIndex !== index) })} /></div>
+                <div className="grid grid-cols-2 gap-2">
+                    <TextField label="显示名称" value={item.label} onChange={(label) => updateParameter(index, { label })} />
+                    <label className="text-xs"><span className="mb-1 block text-foreground/60">取值来源</span><Select className="w-full" value={item.source} options={runningHubParameterSources} onChange={(source) => updateParameter(index, { source })} /></label>
+                    <TextField label="节点 ID" value={item.nodeId} onChange={(nodeId) => updateParameter(index, { nodeId })} />
+                    <TextField label="字段名" value={item.fieldName} onChange={(fieldName) => updateParameter(index, { fieldName })} />
+                    <label className="text-xs"><span className="mb-1 block text-foreground/60">字段类型</span><Select className="w-full" value={item.valueType} options={runningHubValueTypes} onChange={(valueType) => updateParameter(index, { valueType })} /></label>
+                    <TextField label="默认值" value={item.defaultValue || ""} onChange={(defaultValue) => updateParameter(index, { defaultValue })} />
+                </div>
+                <div className="mt-2 flex items-center justify-end gap-2 text-xs"><span className="text-foreground/55">画布可调</span><Switch size="small" checked={Boolean(item.userEditable)} onChange={(userEditable) => updateParameter(index, { userEditable })} /></div>
+            </div>)}
+            <Button type="dashed" block icon={<Plus className="size-3.5" />} onClick={() => patch({ parameters: [...value.parameters, { label: "自定义参数", source: "custom", nodeId: "", fieldName: "", valueType: "string", userEditable: true }] })}>添加参数映射</Button>
+        </div>
+        <div className="space-y-2">
+            <div><div className="text-xs font-semibold">画布参考素材 → Load 节点</div><div className="mt-0.5 text-[11px] text-foreground/45">图片、视频、音频可以同时连接并分别编号；“第 1 个”就是该类型在画布中的第一个有效连接。</div></div>
+            {value.references.map((item, index) => <div key={`reference-${index}`} className="rounded-md border border-border/70 bg-background/35 p-2.5">
+                <div className="mb-2 flex items-center justify-between"><span className="text-xs font-medium">素材 {index + 1}</span><Button type="text" danger size="small" aria-label={`删除素材映射 ${index + 1}`} icon={<Trash2 className="size-3.5" />} onClick={() => patch({ references: value.references.filter((_, itemIndex) => itemIndex !== index) })} /></div>
+                <div className="grid grid-cols-2 gap-2">
+                    <label className="text-xs"><span className="mb-1 block text-foreground/60">素材类型</span><Select className="w-full" value={item.kind} options={runningHubReferenceKinds} onChange={(kind) => updateReference(index, { kind })} /></label>
+                    <NumberField label="该类型第几个" value={item.index + 1} min={1} max={100} onChange={(next) => updateReference(index, { index: next - 1 })} />
+                    <TextField label="Load 节点 ID" value={item.nodeId} onChange={(nodeId) => updateReference(index, { nodeId })} />
+                    <TextField label="上传字段名" value={item.fieldName} onChange={(fieldName) => updateReference(index, { fieldName })} />
+                </div>
+                <div className="mt-2 flex items-center justify-end gap-2 text-xs"><span className="text-foreground/55">必需素材</span><Switch size="small" checked={Boolean(item.required)} onChange={(required) => updateReference(index, { required })} /></div>
+            </div>)}
+            <Button type="dashed" block icon={<Plus className="size-3.5" />} onClick={() => patch({ references: [...value.references, { kind: "image", index: nextRunningHubReferenceIndex(value.references, "image"), nodeId: "", fieldName: "image" }] })}>添加素材映射</Button>
+        </div>
+    </>;
+}
+
+function nextRunningHubReferenceIndex(items: RunningHubReferenceMapping[], kind: RunningHubReferenceMapping["kind"]) {
+    return Math.max(-1, ...items.filter((item) => item.kind === kind).map((item) => item.index)) + 1;
 }
 
 function NumberField({ label, value, min, max, step = 1, onChange }: { label: string; value: number; min: number; max: number; step?: number; onChange: (value: number) => void }) {

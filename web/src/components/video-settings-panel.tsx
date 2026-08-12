@@ -4,7 +4,7 @@ import { Switch } from "antd";
 import { ImageSettingsTheme } from "@/components/image-settings-panel";
 import { boolConfig, isSeedanceFastModel, isSeedanceVideoConfig, normalizeSeedanceDuration, normalizeSeedanceRatio, normalizeSeedanceResolution, seedanceRatioOptions, seedanceResolutionOptions } from "@/lib/seedance-video";
 import { type CanvasTheme } from "@/lib/canvas-theme";
-import { durationValues, formatCapabilityRatio, normalizeCapabilityRatio, normalizeCapabilityResolution, ratioFromSize, sizeForCapabilityRatio, videoCapabilityFromConfig } from "@/lib/model-capabilities";
+import { alignVideoSizeToMultiple, durationValues, formatCapabilityRatio, normalizeCapabilityRatio, normalizeCapabilityResolution, ratioFromSize, sizeForCapabilityRatio, videoCapabilityFromConfig, type RunningHubParameterMapping } from "@/lib/model-capabilities";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
 import { isXAIVideoRequest } from "@/lib/model-protocols";
 import { modelOptionName, resolveModelRequestConfig, type AiConfig } from "@/stores/use-config-store";
@@ -23,12 +23,14 @@ type VideoSettingsPanelProps = {
     config: AiConfig;
     operation?: CanvasVideoEditOperation;
     onConfigChange: (key: "vquality" | "size" | "videoSeconds" | "videoGenerateAudio" | "videoWatermark", value: string) => void;
+    workflowParameters?: Record<string, string>;
+    onWorkflowParameterChange?: (key: string, value: string) => void;
     theme: CanvasTheme;
     showTitle?: boolean;
     className?: string;
 };
 
-export function VideoSettingsPanel({ config, operation, onConfigChange, theme, showTitle = true, className = "w-[292px] space-y-3" }: VideoSettingsPanelProps) {
+export function VideoSettingsPanel({ config, operation, onConfigChange, workflowParameters, onWorkflowParameterChange, theme, showTitle = true, className = "w-[292px] space-y-3" }: VideoSettingsPanelProps) {
     const capability = videoCapabilityForConfig(config);
     if (isSeedanceVideoConfig(config)) {
         return <SeedanceVideoSettingsPanel config={config} capability={capability} onConfigChange={onConfigChange} theme={theme} showTitle={showTitle} className={className} />;
@@ -39,6 +41,9 @@ export function VideoSettingsPanel({ config, operation, onConfigChange, theme, s
     const dimensions = readSizeDimensions(size);
     const resolution = normalizeCapabilityResolution(config.vquality);
     const request = resolveModelRequestConfig(config, config.model || config.videoModel);
+    const runningHubParameters = request.interfaceType === "runninghub-workflow" ? capability.runningHub?.parameters.filter((item) => item.userEditable) || [] : [];
+    const runningHubDimensionMultiple = request.interfaceType === "runninghub-workflow" ? capability.runningHub?.dimensionMultiple || 1 : 1;
+    const alignedRunningHubSize = alignVideoSizeToMultiple(size, runningHubDimensionMultiple);
     const xai = isXAIVideoRequest(request.interfaceType, request.model);
     const xaiReferenceMode = operation === "reference_to_video" && xai;
     const xaiEditMode = operation === "edit_video" && xai;
@@ -50,6 +55,9 @@ export function VideoSettingsPanel({ config, operation, onConfigChange, theme, s
     const updateDimension = (key: "width" | "height", value: number | null) => {
         const next = Math.max(1, Math.floor(value || dimensions[key] || 720));
         onConfigChange("size", `${key === "width" ? next : dimensions.width}x${key === "height" ? next : dimensions.height}`);
+    };
+    const commitRunningHubDimensions = () => {
+        if (runningHubDimensionMultiple > 1 && alignedRunningHubSize !== size) onConfigChange("size", alignedRunningHubSize);
     };
 
     return (
@@ -68,10 +76,11 @@ export function VideoSettingsPanel({ config, operation, onConfigChange, theme, s
                 </SettingGroup> : null}
                 {!xaiSourceVideoMode ? <SettingGroup title="尺寸" color={theme.node.muted}>
                     <div className="grid grid-cols-[1fr_auto_1fr] items-center gap-1.5">
-                        <DimensionInput prefix="W" value={dimensions.width} disabled={size === "auto"} theme={theme} onChange={(value) => updateDimension("width", value)} />
+                        <DimensionInput prefix="W" value={dimensions.width} disabled={size === "auto"} step={runningHubDimensionMultiple} theme={theme} onChange={(value) => updateDimension("width", value)} onCommit={commitRunningHubDimensions} />
                         <span className="text-xs opacity-45">×</span>
-                        <DimensionInput prefix="H" value={dimensions.height} disabled={size === "auto"} theme={theme} onChange={(value) => updateDimension("height", value)} />
+                        <DimensionInput prefix="H" value={dimensions.height} disabled={size === "auto"} step={runningHubDimensionMultiple} theme={theme} onChange={(value) => updateDimension("height", value)} onCommit={commitRunningHubDimensions} />
                     </div>
+                    {runningHubDimensionMultiple > 1 ? <div className="text-[10px] leading-4 opacity-60">宽高需按 {runningHubDimensionMultiple} 对齐{alignedRunningHubSize !== size ? `，当前值将在提交时调整为 ${alignedRunningHubSize.replace("x", "×")}` : ""}</div> : null}
                     <div className="grid grid-cols-3 gap-1.5">
                         {capability.ratios.map((value) => {
                             const item = { value, label: formatCapabilityRatio(value), ...ratioPreview(normalizeCapabilityRatio(value)) };
@@ -83,7 +92,7 @@ export function VideoSettingsPanel({ config, operation, onConfigChange, theme, s
                                 className="flex h-8 cursor-pointer items-center justify-center gap-1.5 rounded-md border px-1 text-[11px] font-medium transition hover:opacity-80"
                                 style={{ background: selected ? theme.accent.primarySoft : "transparent", borderColor: selected ? theme.accent.primary : theme.node.stroke, color: selected ? theme.accent.primary : theme.node.text }}
                                 onMouseDown={(event) => event.stopPropagation()}
-                                onClick={() => onConfigChange("size", sizeForCapabilityRatio(item.value))}
+                                onClick={() => onConfigChange("size", alignVideoSizeToMultiple(sizeForCapabilityRatio(item.value), runningHubDimensionMultiple))}
                             >
                                 <SizePreview width={item.width} height={item.height} color={selected ? theme.accent.primary : theme.node.text} />
                                 <span>{item.label}</span>
@@ -113,9 +122,32 @@ export function VideoSettingsPanel({ config, operation, onConfigChange, theme, s
                         {capability.watermark.supported ? <SwitchRow label="添加水印" checked={boolConfig(config.videoWatermark, capability.watermark.default)} theme={theme} onChange={(checked) => onConfigChange("videoWatermark", String(checked))} /> : null}
                     </div>
                 </SettingGroup> : null}
+                {runningHubParameters.length ? <SettingGroup title="工作流参数" color={theme.node.muted}>
+                    <div className="space-y-2 rounded-md border p-2" style={{ borderColor: theme.node.stroke }}>
+                        {runningHubParameters.map((mapping) => <RunningHubParameterField key={`${mapping.nodeId}:${mapping.fieldName}`} mapping={mapping} value={workflowParameters?.[`${mapping.nodeId}:${mapping.fieldName}`] ?? mapping.defaultValue ?? ""} theme={theme} onChange={(value) => onWorkflowParameterChange?.(`${mapping.nodeId}:${mapping.fieldName}`, value)} />)}
+                    </div>
+                </SettingGroup> : null}
             </div>
         </ImageSettingsTheme>
     );
+}
+
+function RunningHubParameterField({ mapping, value, theme, onChange }: { mapping: RunningHubParameterMapping; value: string; theme: CanvasTheme; onChange: (value: string) => void }) {
+    if (mapping.valueType === "boolean") {
+        return <div className="flex min-h-8 items-center justify-between gap-3 text-[11px]"><span>{mapping.label}</span><Switch size="small" checked={value === "true"} onChange={(checked) => onChange(String(checked))} /></div>;
+    }
+    return <label className="block text-[11px]">
+        <span className="mb-1 block" style={{ color: theme.node.muted }}>{mapping.label}</span>
+        <input
+            type={mapping.valueType === "string" ? "text" : "number"}
+            step={mapping.valueType === "integer" ? 1 : mapping.valueType === "number" ? "any" : undefined}
+            className="h-8 w-full rounded-md border bg-transparent px-2 outline-none"
+            style={{ borderColor: theme.node.stroke, color: theme.node.text }}
+            value={value}
+            onChange={(event) => onChange(event.target.value)}
+            onMouseDown={(event) => event.stopPropagation()}
+        />
+    </label>;
 }
 
 function SeedanceVideoSettingsPanel({ config, capability, onConfigChange, theme, showTitle, className }: VideoSettingsPanelProps & { capability: ReturnType<typeof videoCapabilityForConfig> }) {
@@ -248,13 +280,13 @@ function SettingGroup({ title, color, children }: { title: string; color: string
     );
 }
 
-function DimensionInput({ prefix, value, disabled, theme, onChange }: { prefix: string; value: number; disabled: boolean; theme: CanvasTheme; onChange: (value: number | null) => void }) {
+function DimensionInput({ prefix, value, disabled, step = 1, theme, onChange, onCommit }: { prefix: string; value: number; disabled: boolean; step?: number; theme: CanvasTheme; onChange: (value: number | null) => void; onCommit?: () => void }) {
     return (
         <label className="flex h-8 overflow-hidden rounded-md border text-[11px]" style={{ background: theme.node.fill, borderColor: theme.node.stroke, color: theme.node.text, opacity: disabled ? 0.55 : 1 }}>
             <span className="grid w-7 place-items-center" style={{ color: theme.node.muted }}>
                 {prefix}
             </span>
-            <input type="number" min={1} disabled={disabled} className="min-w-0 flex-1 bg-transparent px-2 outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" value={value || ""} onChange={(event) => onChange(Number(event.target.value) || null)} onMouseDown={(event) => event.stopPropagation()} />
+            <input type="number" min={1} step={step} disabled={disabled} className="min-w-0 flex-1 bg-transparent px-2 outline-none [appearance:textfield] [&::-webkit-inner-spin-button]:appearance-none [&::-webkit-outer-spin-button]:appearance-none" value={value || ""} onChange={(event) => onChange(Number(event.target.value) || null)} onBlur={onCommit} onMouseDown={(event) => event.stopPropagation()} />
         </label>
     );
 }

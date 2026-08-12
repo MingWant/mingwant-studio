@@ -22,16 +22,17 @@ type ModelCapabilityConfig struct {
 }
 
 type VideoCapabilityConfig struct {
-	References        VideoReferenceConfig `json:"references"`
-	Duration          VideoDurationConfig  `json:"duration"`
-	Ratios            []string             `json:"ratios"`
-	DefaultRatio      string               `json:"defaultRatio"`
-	Resolutions       []string             `json:"resolutions"`
-	DefaultResolution string               `json:"defaultResolution"`
-	GenerateAudio     VideoBooleanConfig   `json:"generateAudio"`
-	Watermark         VideoBooleanConfig   `json:"watermark"`
-	Operations        []string             `json:"operations"`
-	DefaultOperation  string               `json:"defaultOperation"`
+	References        VideoReferenceConfig       `json:"references"`
+	Duration          VideoDurationConfig        `json:"duration"`
+	Ratios            []string                   `json:"ratios"`
+	DefaultRatio      string                     `json:"defaultRatio"`
+	Resolutions       []string                   `json:"resolutions"`
+	DefaultResolution string                     `json:"defaultResolution"`
+	GenerateAudio     VideoBooleanConfig         `json:"generateAudio"`
+	Watermark         VideoBooleanConfig         `json:"watermark"`
+	Operations        []string                   `json:"operations"`
+	DefaultOperation  string                     `json:"defaultOperation"`
+	RunningHub        *RunningHubWorkflowConfig `json:"runningHub,omitempty"`
 }
 
 type VideoReferenceConfig struct {
@@ -60,7 +61,12 @@ type VideoBooleanConfig struct {
 	Default   bool `json:"default"`
 }
 
-const modelCapabilityConfigVersion = 2
+const (
+	modelCapabilityConfigVersion          = 5
+	xaiVideoOperationsMigrationVersion    = 2
+	runningHubBreakpointMigrationVersion = 4
+	runningHubRequiredImagesMigrationVersion = 5
+)
 
 // DefaultModelCapabilityConfig 为协议提供可审计的初始模板。管理员可以在模型管理中
 // 调整模板，但没有显式配置的历史视频模型仍按其协议模板校验，不会退回无界请求。
@@ -111,6 +117,17 @@ func DefaultModelCapabilityConfig(protocol string) *ModelCapabilityConfig {
 		video.GenerateAudio = VideoBooleanConfig{Supported: false, Default: false}
 		video.References.MaxImages = 1
 		video.Ratios = []string{"16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"}
+	case model.ChannelInterfaceRunningHub:
+		video.References = VideoReferenceConfig{
+			PromptMaxChars: 100_000,
+			MaxImages: 3, MaxImageBytes: 30 * 1024 * 1024,
+			MaxVideos: 1, MaxVideoBytes: 30 * 1024 * 1024, MaxVideoDuration: 3600,
+			MaxAudios: 1, MaxAudioBytes: 30 * 1024 * 1024, MaxAudioDuration: 3600,
+		}
+		video.Duration = VideoDurationConfig{Selection: "range", Min: 1, Max: 60, Step: 1, Default: 5}
+		video.Operations = []string{"workflow"}
+		video.DefaultOperation = "workflow"
+		video.RunningHub = defaultRunningHubWorkflowConfig()
 	}
 	return &ModelCapabilityConfig{Version: modelCapabilityConfigVersion, Video: video}
 }
@@ -133,9 +150,46 @@ func NormalizeModelCapabilityConfig(capability string, protocol string, input *M
 	video.DefaultResolution = normalizeResolution(video.DefaultResolution)
 	video.Operations = normalizeCapabilityStringList(video.Operations, normalizeCapabilityOperation)
 	video.DefaultOperation = normalizeCapabilityOperation(video.DefaultOperation)
+	if model.ChannelInterfaceType(protocol) == model.ChannelInterfaceRunningHub {
+		workflow := video.RunningHub
+		if workflow == nil {
+			workflow = defaultRunningHubWorkflowConfig()
+		}
+		if storedVersion < runningHubBreakpointMigrationVersion {
+			// v4 把不可靠的 SaveText 断点迁到真实二采条件节点；旧配置必须整体
+			// 换成新拓扑，不能残留会在节点 73 过早调用取消的兜底节点。
+			fallback := defaultRunningHubWorkflowConfig()
+			workflow.StopOnNodeIDs = append([]string(nil), fallback.StopOnNodeIDs...)
+			workflow.TerminationMode = fallback.TerminationMode
+			workflow.FailureNodeID = fallback.FailureNodeID
+			workflow.FailureNodeField = fallback.FailureNodeField
+			workflow.FailureNodeValue = fallback.FailureNodeValue
+		}
+		if storedVersion < runningHubRequiredImagesMigrationVersion {
+			// 早期模板未标记三张 H3 图片为必填，会在画布没传图时静默沿用
+			// RHWorkspace 里遗留的旧图片。只迁移默认节点，不改管理员自定义映射。
+			requiredDefaults := make(map[string]struct{})
+			for _, item := range defaultRunningHubWorkflowConfig().References {
+				if item.Required {
+					requiredDefaults[fmt.Sprintf("%s:%d:%s:%s", item.Kind, item.Index, item.NodeID, item.FieldName)] = struct{}{}
+				}
+			}
+			for index := range workflow.References {
+				item := &workflow.References[index]
+				key := fmt.Sprintf("%s:%d:%s:%s", strings.ToLower(strings.TrimSpace(item.Kind)), item.Index, strings.TrimSpace(item.NodeID), strings.TrimSpace(item.FieldName))
+				if _, exists := requiredDefaults[key]; exists {
+					item.Required = true
+				}
+			}
+		}
+		normalized := normalizeRunningHubWorkflowConfig(*workflow)
+		video.RunningHub = &normalized
+	} else {
+		video.RunningHub = nil
+	}
 	// v1 的 xAI 模板发布时尚未接入官方 edits/extensions。仅迁移完整历史默认值，
 	// 管理员自定义过的操作列表保持原样，避免把主动禁用的能力重新打开。
-	if model.ChannelInterfaceType(protocol) == model.ChannelInterfaceXAIVideo && storedVersion < modelCapabilityConfigVersion && isLegacyXAIVideoOperations(video.Operations) {
+	if model.ChannelInterfaceType(protocol) == model.ChannelInterfaceXAIVideo && storedVersion < xaiVideoOperationsMigrationVersion && isLegacyXAIVideoOperations(video.Operations) {
 		video.References.MaxVideos = 1
 		video.References.MaxVideoDuration = 15
 		video.Operations = []string{"text_to_video", "image_to_video", "reference_to_video", "edit_video", "extend"}
@@ -241,6 +295,9 @@ func (s *Service) ValidateTaskCapability(userID string, input map[string]any) er
 	var profile *VideoCapabilityConfig
 	if channelID == "" {
 		protocol := model.ChannelInterfaceType(strings.TrimSpace(taskInput.Config.InterfaceType))
+		if protocol == model.ChannelInterfaceRunningHub {
+			return BadAuthRequest("RunningHub RHWorkspace 只允许管理员配置的系统渠道，不能作为个人自定义渠道调用")
+		}
 		if protocol != "" && capabilityForProtocol(protocol) != "video" {
 			return BadAuthRequest("当前自定义渠道协议不是视频协议")
 		}
@@ -277,6 +334,8 @@ func (s *Service) ValidateTaskCapability(userID string, input map[string]any) er
 			return BadAuthRequest("当前视频模型能力参数无效，请联系管理员重新保存模型配置")
 		}
 		profile = stored.Video
+		taskInput.Config.InterfaceType = string(protocol)
+		taskInput.Config.CapabilityConfig = stored
 	}
 	return validateVideoTask(profile, taskInput)
 }
@@ -365,6 +424,11 @@ func validateVideoCapabilityConfig(value *VideoCapabilityConfig) error {
 	}
 	if !value.GenerateAudio.Supported && value.GenerateAudio.Default || !value.Watermark.Supported && value.Watermark.Default {
 		return BadAuthRequest("不支持的音频或水印能力不能设置为默认开启")
+	}
+	if value.RunningHub != nil {
+		if err := validateRunningHubWorkflowConfig(value.RunningHub); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -501,12 +565,13 @@ func validateVideoTask(profile *VideoCapabilityConfig, input canvasGenerationInp
 		return BadAuthRequest("当前视频模型不支持该生成模式")
 	}
 	xaiSourceVideoMode := isXAIVideoConfig(input.Config) && (operation == "edit_video" || operation == "extend")
+	runningHubWorkflow := input.Config.InterfaceType == string(model.ChannelInterfaceRunningHub)
 	seconds, err := strconv.Atoi(strings.TrimSpace(input.Config.VideoSeconds))
 	if err != nil || (!xaiSourceVideoMode && !videoDurationAllowed(profile.Duration, seconds)) {
 		return BadAuthRequest("视频时长不在当前模型支持范围内")
 	}
 	// edits/extensions 不接受画幅和分辨率，旧画布残留值既不会发送给 xAI，也不应阻断任务。
-	if !xaiSourceVideoMode && input.Config.Size != "" && !videoRatioAllowed(profile.Ratios, input.Config.Size) {
+	if !xaiSourceVideoMode && !runningHubWorkflow && input.Config.Size != "" && !videoRatioAllowed(profile.Ratios, input.Config.Size) {
 		return BadAuthRequest("画面比例不在当前模型支持范围内")
 	}
 	if quality := strings.TrimSpace(input.Config.VQuality); !xaiSourceVideoMode && quality != "" && !strings.EqualFold(quality, "auto") && !containsCapabilityString(profile.Resolutions, normalizeResolution(quality)) {
@@ -593,6 +658,11 @@ func validateVideoTask(profile *VideoCapabilityConfig, input canvasGenerationInp
 			}
 		default:
 			return BadAuthRequest("grok2api 公开视频接口不支持该生成模式")
+		}
+	}
+	if runningHubWorkflow {
+		if err := validateRunningHubVideoTask(profile, input); err != nil {
+			return err
 		}
 	}
 	return nil

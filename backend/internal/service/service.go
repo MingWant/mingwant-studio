@@ -739,6 +739,7 @@ func (s *Service) refreshTaskProviderState(task *model.Task) error {
 		task.ProviderRequestID = latest.ProviderRequestID
 	}
 	task.ProviderCallState = latest.ProviderCallState
+	task.ProviderStateJSON = latest.ProviderStateJSON
 	task.PollStage = latest.PollStage
 	task.NextPollAt = latest.NextPollAt
 	return nil
@@ -1286,6 +1287,25 @@ func (s *Service) processClaimedTask(task *model.Task) error {
 	defer close(leaseDone)
 	s.registerActiveTask(task.ID, cancel)
 	defer s.unregisterActiveTask(task.ID)
+
+	capacityCtx, runningHubGuard, capacityDeferred, capacityErr := s.prepareClaimedRunningHubWorkflowCapacity(ctx, task)
+	if capacityErr != nil {
+		if latest, latestErr := s.repo.Task(task.ID); latestErr == nil && latest.Status == model.TaskStatusCancelled {
+			return nil
+		}
+		s.logTaskInternalErrorBestEffort(task.UserID, task.ID, "读取 RunningHub 工作流排队状态失败", capacityErr)
+		if strings.TrimSpace(task.ProviderRequestID) != "" || !providerDispatchDefinitelyNotStarted(task.ProviderCallState) {
+			return s.deferClaimedRunningHubWorkflowGuardRecovery(task)
+		}
+		return s.failClaimedTaskBeforeProvider(task, claimOwner, "读取 RunningHub 工作流排队状态失败，本次没有发出供应商请求；系统已停止任务并退回预留积分。")
+	}
+	if capacityDeferred {
+		return nil
+	}
+	ctx = capacityCtx
+	if runningHubGuard != nil {
+		defer runningHubGuard.Release()
+	}
 
 	if err := s.prepareClaimedTaskProviderCall(task, "调用生成模型", 35, "info", "供应商调用前检查已通过", "当前 Worker 租约、任务状态和调用阶段已原子确认；下一步进入计费运行边界"); err != nil {
 		return err

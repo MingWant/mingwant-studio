@@ -110,6 +110,9 @@ func (s *Service) FetchAdminChannelModels(ctx context.Context, actor *model.User
 	if err != nil {
 		return nil, err
 	}
+	if channel.InterfaceType == model.ChannelInterfaceRunningHub {
+		return nil, BadAuthRequest("RunningHub 工作流使用 RHWorkspace workflowId，不提供模型目录；请手动新增工作流模型")
+	}
 	// 使用服务端保存的渠道密钥请求上游，避免密钥为了拉目录再次经过浏览器。
 	models, err := s.FetchChannelModels(ctx, actor, ChannelModelsRequest{BaseURL: channel.BaseURL, APIKey: channel.APIKey, APIFormat: channel.APIFormat})
 	if err != nil {
@@ -191,6 +194,9 @@ func (s *Service) SaveAdminChannelModel(actor *model.User, channelID string, id 
 		}
 		if !validChannelInterfaceType(protocol) {
 			return BadAuthRequest("请选择有效的模型请求协议")
+		}
+		if protocol == model.ChannelInterfaceRunningHub && !validRunningHubWorkflowID(modelKey) {
+			return BadAuthRequest("RunningHub workflowId 必须为 5-40 位数字")
 		}
 		if expected := capabilityForProtocol(protocol); expected != "" && expected != capability {
 			return BadAuthRequest("模型能力与请求协议不匹配")
@@ -519,7 +525,7 @@ func capabilityForProtocol(protocol model.ChannelInterfaceType) string {
 		return "image"
 	case model.ChannelInterfaceOpenAIAudio:
 		return "audio"
-	case model.ChannelInterfaceNewAPIVideo, model.ChannelInterfaceNewAPIChannel1, model.ChannelInterfaceNewAPIChannel2, model.ChannelInterfaceXAIVideo, model.ChannelInterfaceGrok2APIVideo, model.ChannelInterfaceGeminiVeo:
+	case model.ChannelInterfaceNewAPIVideo, model.ChannelInterfaceNewAPIChannel1, model.ChannelInterfaceNewAPIChannel2, model.ChannelInterfaceXAIVideo, model.ChannelInterfaceGrok2APIVideo, model.ChannelInterfaceGeminiVeo, model.ChannelInterfaceRunningHub:
 		return "video"
 	case model.ChannelInterfaceChatCompletion, model.ChannelInterfaceOpenAIResponse, model.ChannelInterfaceGeminiContent:
 		return "text"

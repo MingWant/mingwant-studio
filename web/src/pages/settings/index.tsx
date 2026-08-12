@@ -9,7 +9,7 @@ import { WorkspaceState } from "@/components/layout/workspace-state";
 import { WorkspaceSignalIcon } from "@/components/ui/aceternity/workspace-signal-icon";
 import { ChannelProbeButton } from "@/components/channel-probe-button";
 import { refreshSystemChannels } from "@/lib/user-session";
-import { isGeminiModelProtocol, MODEL_PROTOCOL_OPTIONS, modelProtocolLabel } from "@/lib/model-protocols";
+import { isGeminiModelProtocol, USER_MODEL_PROTOCOL_OPTIONS, modelProtocolLabel } from "@/lib/model-protocols";
 import { fetchChannelModels } from "@/services/api/image";
 import { audioFormatOptions, audioVoiceOptions, normalizeAudioSpeedValue } from "@/lib/audio-generation";
 import {
@@ -42,7 +42,7 @@ type UserChannelProtocol = ChannelInterfaceType | "auto" | "gemini";
 const channelProtocolOptions = [
     { label: "OpenAI 自动兼容", value: "auto" },
     { label: "Google Gemini（模型级选择）", value: "gemini" },
-    ...MODEL_PROTOCOL_OPTIONS,
+    ...USER_MODEL_PROTOCOL_OPTIONS,
 ];
 
 function isConfigSection(value: string | null): value is ConfigSectionKey {

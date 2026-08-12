@@ -36,30 +36,30 @@ type canvasGenerationInput struct {
 }
 
 type providerConfig struct {
-	ChannelID             string `json:"channelId"`
-	APIFormat             string `json:"apiFormat"`
-	InterfaceType         string `json:"interfaceType"`
-	BaseURL               string `json:"baseUrl"`
-	APIKey                string `json:"apiKey"`
-	Model                 string `json:"model"`
+	ChannelID             string                 `json:"channelId"`
+	APIFormat             string                 `json:"apiFormat"`
+	InterfaceType         string                 `json:"interfaceType"`
+	BaseURL               string                 `json:"baseUrl"`
+	APIKey                string                 `json:"apiKey"`
+	Model                 string                 `json:"model"`
 	CapabilityConfig      *ModelCapabilityConfig `json:"capabilityConfig,omitempty"`
-	Size                  string `json:"size"`
-	Quality               string `json:"quality"`
-	TransparentBackground string `json:"transparentBackground"`
-	Count                 string `json:"count"`
-	VideoSeconds          string `json:"videoSeconds"`
-	VQuality              string `json:"vquality"`
-	VideoGenerateAudio    string `json:"videoGenerateAudio"`
-	VideoWatermark        string `json:"videoWatermark"`
-	AudioVoice            string `json:"audioVoice"`
-	AudioFormat           string `json:"audioFormat"`
-	AudioSpeed            string `json:"audioSpeed"`
-	AudioInstructions     string `json:"audioInstructions"`
-	SystemPrompt          string `json:"systemPrompt"`
-	RequireStreaming      bool   `json:"requireStreaming,omitempty"`
+	Size                  string                 `json:"size"`
+	Quality               string                 `json:"quality"`
+	TransparentBackground string                 `json:"transparentBackground"`
+	Count                 string                 `json:"count"`
+	VideoSeconds          string                 `json:"videoSeconds"`
+	VQuality              string                 `json:"vquality"`
+	VideoGenerateAudio    string                 `json:"videoGenerateAudio"`
+	VideoWatermark        string                 `json:"videoWatermark"`
+	AudioVoice            string                 `json:"audioVoice"`
+	AudioFormat           string                 `json:"audioFormat"`
+	AudioSpeed            string                 `json:"audioSpeed"`
+	AudioInstructions     string                 `json:"audioInstructions"`
+	SystemPrompt          string                 `json:"systemPrompt"`
+	RequireStreaming      bool                   `json:"requireStreaming,omitempty"`
 	// 手动交付会沿用测活确认的传输方式；非流式渠道不能先被后台强行发起 SSE 请求。
-	PreferNonStreaming    bool   `json:"preferNonStreaming,omitempty"`
-	ResponseMIMEType      string `json:"-"`
+	PreferNonStreaming    bool                   `json:"preferNonStreaming,omitempty"`
+	ResponseMIMEType      string                 `json:"-"`
 }
 
 // 没有任务上下文时仍保留一个默认保护；后台任务必须遵守其策略上下文的截止时间，
@@ -116,6 +116,8 @@ type providerAnalyticsContext struct {
 	Model                      string
 	VideoSeconds               int
 	RequestKind                string
+	NonBillable                bool
+	AllowWhenCircuitOpen       bool
 	ProviderRequestID          string
 	PollStage                  string
 	ConcurrencyLimit           int
@@ -154,6 +156,18 @@ func withProviderRequestKind(ctx context.Context, requestKind string) context.Co
 		return ctx
 	}
 	metadata.RequestKind = requestKind
+	return context.WithValue(ctx, providerAnalyticsKey{}, metadata)
+}
+
+func withNonBillableProviderRequest(ctx context.Context) context.Context {
+	metadata, ok := ctx.Value(providerAnalyticsKey{}).(providerAnalyticsContext)
+	if !ok {
+		return ctx
+	}
+	// 查询、下载、素材上传和取消不会创建新的生成尝试，既不能重复计入模型按次成本，
+	// 也不能提前把真正的付费 create 标成已发出。
+	metadata.NonBillable = true
+	metadata.DispatchCheckpointRequired = false
 	return context.WithValue(ctx, providerAnalyticsKey{}, metadata)
 }
 
@@ -213,6 +227,9 @@ func (s *Service) processCanvasGenerationTask(ctx context.Context, userID string
 	}
 	if strings.TrimSpace(input.Config.BaseURL) == "" || strings.TrimSpace(input.Config.APIKey) == "" || strings.TrimSpace(input.Config.Model) == "" {
 		return nil, markProviderPreparationFailure(errors.New("后端生成任务缺少 Base URL、API Key 或模型名"))
+	}
+	if input.Config.InterfaceType == string(model.ChannelInterfaceRunningHub) && strings.TrimSpace(input.Config.ChannelID) == "" {
+		return nil, markProviderPreparationFailure(errors.New("RunningHub RHWorkspace 只能通过管理员配置的系统渠道调用"))
 	}
 	if err := validateGenerationInterface(input.Mode, input.Config.InterfaceType); err != nil {
 		return nil, markProviderPreparationFailure(err)
@@ -394,6 +411,15 @@ func (s *Service) resolveProviderConfig(ctx context.Context, config providerConf
 	config.BaseURL = channel.BaseURL
 	config.APIKey = channel.APIKey
 	config.Model = modelName
+	if strings.EqualFold(strings.TrimSpace(channelModel.Capability), "video") {
+		capabilityConfig, capabilityErr := DecodeModelCapabilityConfig(channelModel.CapabilityConfigJSON, config.InterfaceType)
+		if capabilityErr != nil {
+			return providerConfig{}, errors.New("当前系统视频模型能力参数无效，请联系管理员重新保存")
+		}
+		config.CapabilityConfig = capabilityConfig
+	} else {
+		config.CapabilityConfig = nil
+	}
 	return config, nil
 }
 
@@ -419,10 +445,30 @@ func (s *Service) resolveProviderPollingConfig(ctx context.Context, config provi
 		return providerConfig{}, errors.New("任务没有记录供应商模型")
 	}
 	interfaceType := model.ChannelInterfaceType(strings.TrimSpace(config.InterfaceType))
-	if interfaceType == "" {
-		if channelModel, modelErr := s.repo.ChannelModelByKeyIncludingDisabled(channel.ID, modelName); modelErr == nil && channelModel.Protocol != "" {
-			interfaceType = channelModel.Protocol
+	if interfaceType == "" && channel.InterfaceType == model.ChannelInterfaceRunningHub {
+		interfaceType = model.ChannelInterfaceRunningHub
+	}
+	channelModel, modelErr := s.repo.ChannelModelByKeyIncludingDisabled(channel.ID, modelName)
+	if modelErr != nil {
+		if !errors.Is(modelErr, gorm.ErrRecordNotFound) {
+			return providerConfig{}, modelErr
 		}
+		if interfaceType != model.ChannelInterfaceRunningHub {
+			return providerConfig{}, errors.New("任务记录的系统渠道模型不存在")
+		}
+		// RHWorkspace 恢复只取消和读取已持久化的原 taskId，不创建新工作流；
+		// 即使管理员已删除模型，也不能因此失去成本保护入口。
+		config.ChannelID = channel.ID
+		config.InterfaceType = string(interfaceType)
+		config.BaseURL = channel.BaseURL
+		config.APIKey = channel.APIKey
+		config.Model = modelName
+		config.APIFormat = apiFormatForProtocol(interfaceType, channel.APIFormat)
+		config.CapabilityConfig = nil
+		return config, nil
+	}
+	if interfaceType == "" && channelModel.Protocol != "" {
+		interfaceType = channelModel.Protocol
 	}
 	if interfaceType == "" {
 		interfaceType = channel.InterfaceType
@@ -433,6 +479,21 @@ func (s *Service) resolveProviderPollingConfig(ctx context.Context, config provi
 	config.APIKey = channel.APIKey
 	config.Model = modelName
 	config.APIFormat = apiFormatForProtocol(interfaceType, channel.APIFormat)
+	if interfaceType == model.ChannelInterfaceRunningHub {
+		// 恢复只使用任务私有检查点中的结果节点证据；当前模型映射即使已被修改，
+		// 也不能阻止系统取消和读取原 taskId，更不能替换原任务节点身份。
+		config.CapabilityConfig = nil
+		return config, nil
+	}
+	if strings.EqualFold(strings.TrimSpace(channelModel.Capability), "video") {
+		capabilityConfig, capabilityErr := DecodeModelCapabilityConfig(channelModel.CapabilityConfigJSON, string(interfaceType))
+		if capabilityErr != nil {
+			return providerConfig{}, errors.New("任务记录的系统视频模型能力参数无效")
+		}
+		config.CapabilityConfig = capabilityConfig
+	} else {
+		config.CapabilityConfig = nil
+	}
 	return config, nil
 }
 
@@ -799,6 +860,9 @@ func streamingRequiredError(cause error) error {
 }
 
 func runVideoTask(ctx context.Context, input canvasGenerationInput) (map[string]interface{}, error) {
+	if input.Config.InterfaceType == string(model.ChannelInterfaceRunningHub) {
+		return runRunningHubWorkflowVideoTask(ctx, input)
+	}
 	if input.Config.InterfaceType == "gemini-veo" {
 		return runGeminiVeoVideoTask(ctx, input)
 	}
@@ -1408,7 +1472,7 @@ func validateGenerationInterface(mode string, interfaceType string) error {
 	allowed := map[string]map[string]bool{
 		"text":  {"chat-completion": true, "openai-response": true, "gemini-content": true},
 		"image": {"openai-image": true, "xai-image": true, "grok2api-image": true},
-		"video": {"newapi": true, "newapi-channel-1": true, "newapi-channel-2": true, "xai-video": true, "grok2api-video": true, "gemini-veo": true},
+		"video": {"newapi": true, "newapi-channel-1": true, "newapi-channel-2": true, "xai-video": true, "grok2api-video": true, "gemini-veo": true, "runninghub-workflow": true},
 		"audio": {"openai-audio": true},
 	}
 	if allowed[mode] != nil && !allowed[mode][interfaceType] {
@@ -1653,7 +1717,7 @@ func doBinaryWithResponseLimit(req *http.Request, explicitResponseLimit int64) (
 		}
 		responseLimit = megabytes(policy.Resource.GeneratedFileMB)
 		// 低频测活是管理员确认渠道恢复的入口；允许它穿过已打开的熔断器，成功后会清除失败状态。
-		if metadata.RequestKind != "health_check" {
+		if metadata.RequestKind != "health_check" && !metadata.AllowWhenCircuitOpen {
 			open, err := coordinator.circuitOpen(req.Context(), channelID)
 			if err != nil {
 				return nil, "", fmt.Errorf("读取渠道熔断状态失败：%w", err)
@@ -1783,7 +1847,7 @@ func recordProviderRequest(req *http.Request, startedAt time.Time, statusCode in
 	apiLog := model.ApiCallLog{
 		UserID: metadata.UserID, ChannelID: metadata.ChannelID, TaskID: metadata.TaskID, BillingOrderID: metadata.BillingOrderID,
 		Source: "backend-task", Capability: metadata.Capability, Operation: metadata.Operation,
-		RequestKind: requestKind, Billable: req.Method == http.MethodPost,
+		RequestKind: requestKind, Billable: req.Method == http.MethodPost && !metadata.NonBillable,
 		APIFormat: apiFormat, Method: req.Method, Path: req.URL.Path, Model: metadata.Model,
 		Status: status, StatusCode: statusCode, DurationMs: time.Since(startedAt).Milliseconds(),
 		Error: errorText, ConcurrencyLimit: metadata.ConcurrencyLimit, UpstreamURL: req.URL.Scheme + "://" + req.URL.Host + req.URL.Path,
@@ -1809,7 +1873,10 @@ func recordProviderRequest(req *http.Request, startedAt time.Time, statusCode in
 	if err := metadata.Service.LogAPICall(apiLog); err != nil {
 		stdlog.Printf("provider request log write failed task=%s billing_order=%s request_kind=%s: %v", metadata.TaskID, metadata.BillingOrderID, requestKind, err)
 		logErr := fmt.Errorf("上游调用日志写入失败：%w", err)
-		if !billingRisk || channelSlotFailure {
+		// 上传素材、轮询、取消和下载不会创建新的生成费用。它们的日志失败仍要
+		// 中止当前处理，但不能单独把尚未发出的生成订单升级为费用待核对；
+		// 若创建请求早已 dispatched，任务终态逻辑仍会依据持久状态保守核账。
+		if !billingRisk || channelSlotFailure || !apiLog.Billable {
 			return logErr
 		}
 		reviewErr := providerBillingReviewError{reason: "上游请求可能已经执行，但调用日志写入失败，费用状态待核对且请勿立即重试", cause: err}

@@ -40,6 +40,7 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
     const billingMode = Form.useWatch("billingMode", form) || "fixed_request";
     const modelCapability = Form.useWatch("capability", form);
     const modelProtocol = Form.useWatch("protocol", form);
+    const runningHubWorkflow = modelProtocol === "runninghub-workflow";
 
     const reload = async () => {
         if (!channel) return;
@@ -189,9 +190,9 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
                     </div>
                 </div>
                 <Space wrap>
-                    <Button loading={fetching} icon={<RefreshCw className="size-4" />} onClick={() => void fetchModels()}>
+                    {channel.interfaceType === "runninghub-workflow" ? <span className="text-xs text-foreground/50">RHWorkspace 工作流请手动新增</span> : <Button loading={fetching} icon={<RefreshCw className="size-4" />} onClick={() => void fetchModels()}>
                         拉取模型
-                    </Button>
+                    </Button>}
                     <Button type="primary" icon={<Plus className="size-4" />} onClick={startCreate}>
                         新增模型
                     </Button>
@@ -216,8 +217,8 @@ export function ChannelModelManager({ channel, onClose, onChanged }: { channel: 
             </TableSurface>
             <Drawer title={editing ? "编辑模型" : "新增模型"} open={editorOpen} size="min(720px, 100vw)" onClose={() => setEditorOpen(false)} styles={{ body: { paddingBottom: 88 } }} extra={editing ? <Button size="small" icon={<Plus className="size-3.5" />} onClick={startCreate}>新增</Button> : null}>
                 <Form form={form} layout="vertical" requiredMark={false}>
-                    <Form.Item name="modelKey" label="模型标识" rules={[{ required: true, message: "请输入模型标识" }]}>
-                        <Input placeholder="gpt-image-2" />
+                    <Form.Item name="modelKey" label={runningHubWorkflow ? "RHWorkspace workflowId" : "模型标识"} extra={runningHubWorkflow ? "填写 RunningHub 工作空间发布后的数字 workflowId；不要填写节点 ID 或工作流名称。" : undefined} rules={runningHubWorkflow ? [{ required: true, message: "请输入 workflowId" }, { pattern: /^\d{5,40}$/, message: "workflowId 应为 5-40 位数字" }] : [{ required: true, message: "请输入模型标识" }]}>
+                        <Input inputMode={runningHubWorkflow ? "numeric" : undefined} placeholder={runningHubWorkflow ? "例如 1930349977192198146" : "gpt-image-2"} />
                     </Form.Item>
                     <Form.Item name="displayName" label="显示名称">
                         <Input placeholder="不填则使用模型标识" />

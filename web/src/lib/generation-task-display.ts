@@ -20,6 +20,7 @@ export const operationOptions = [
     { label: "镜头/运镜调整", value: "camera_motion" },
     { label: "风格迁移", value: "style_transfer" },
     { label: "参考音频生成视频", value: "audio_to_video" },
+    { label: "All-in-One 工作流", value: "workflow" },
     { label: "结果版本对比", value: "compare_versions" },
 ];
 

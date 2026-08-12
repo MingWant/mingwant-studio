@@ -200,6 +200,7 @@ func (s *Service) saveTaskCompletionWithinStorageQuota(task *model.Task, resultJ
 	completed.Progress = 100
 	completed.ResultJSON = string(resultJSON)
 	completed.DeliveryOpsJSON = ""
+	completed.ProviderStateJSON = ""
 	completed.InputJSON = publicInputJSON
 	completed.PollStage = "completed"
 	completed.NextPollAt = nil

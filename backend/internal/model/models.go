@@ -78,6 +78,7 @@ const (
 	ChannelInterfaceXAIVideo       ChannelInterfaceType = "xai-video"
 	ChannelInterfaceGrok2APIVideo  ChannelInterfaceType = "grok2api-video"
 	ChannelInterfaceGeminiVeo      ChannelInterfaceType = "gemini-veo"
+	ChannelInterfaceRunningHub     ChannelInterfaceType = "runninghub-workflow"
 
 	ApiCallStatusSucceeded ApiCallStatus = "succeeded"
 	ApiCallStatusFailed    ApiCallStatus = "failed"
@@ -748,6 +749,8 @@ type Task struct {
 	LeaseRecovered      bool                  `json:"-" gorm:"-"`
 	DeliveryRecoverable bool                  `json:"deliveryRecoverable,omitempty" gorm:"-"`
 	ProviderCallState   TaskProviderCallState `json:"-" gorm:"size:24"`
+	// ProviderStateJSON 只保存异步供应商的私有恢复检查点，不能随任务详情返回给浏览器。
+	ProviderStateJSON   string                `json:"-" gorm:"type:text"`
 	InputJSON           string                `json:"inputJson" gorm:"type:text"`
 	ResultJSON          string                `json:"resultJson" gorm:"type:text"`
 	DeliveryOpsJSON     string                `json:"-" gorm:"type:text"`

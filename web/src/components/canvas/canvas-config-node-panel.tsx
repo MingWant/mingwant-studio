@@ -161,7 +161,7 @@ export function CanvasConfigNodePanel({ node, isRunning, inputSummary, onConfigC
                         fullWidth
                     />
                     {mode === "video" ? (
-                        <CanvasVideoSettingsPopover config={config} operation={selectedOperation} placement="topRight" buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} />
+                        <CanvasVideoSettingsPopover config={config} operation={selectedOperation} workflowParameters={node.metadata?.runningHubParameters} placement="topRight" buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, videoConfigPatch(key, value))} onWorkflowParameterChange={(key, value) => onConfigChange(node.id, runningHubParameterPatch(node.metadata, key, value))} />
                     ) : mode === "image" ? (
                         <CanvasImageSettingsPopover config={config} placement="topRight" autoAdjustOverflow={false} buttonClassName="canvas-compact-control !h-10 !w-full !justify-start !rounded-lg !px-2" onConfigChange={(key, value) => onConfigChange(node.id, key === "count" ? { count: Number(value) || 1 } : { [key]: value })} />
                     ) : mode === "audio" ? (
@@ -257,6 +257,10 @@ function videoConfigPatch(key: keyof AiConfig, value: string) {
     if (key === "videoGenerateAudio") return { generateAudio: value };
     if (key === "videoWatermark") return { watermark: value };
     return { [key]: value };
+}
+
+function runningHubParameterPatch(metadata: CanvasNodeMetadata | undefined, key: string, value: string) {
+    return { runningHubParameters: { ...(metadata?.runningHubParameters || {}), [key]: value } };
 }
 
 function videoOperationPatch(config: AiConfig, metadata: CanvasNodeMetadata | undefined, value: NonNullable<CanvasNodeMetadata["videoEditOperation"]>) {

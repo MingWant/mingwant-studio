@@ -2,7 +2,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router";
 import { useQuery } from "@tanstack/react-query";
 import { App, Button, Dropdown, Input, Modal, Select } from "antd";
-import { Download, FileUp, MoreHorizontal, Plus, Search, ShoppingBag, Trash2 } from "lucide-react";
+import { Download, FileUp, FlaskConical, MoreHorizontal, Plus, Search, ShoppingBag, Trash2 } from "lucide-react";
 
 import { CollectionGrid, ListToolbar, PageHeader, PaginationBar, WorkspacePage } from "@/components/layout/workspace-page";
 import { WorkspaceLoadingState, WorkspaceState } from "@/components/layout/workspace-state";
@@ -17,9 +17,11 @@ import { useCanvasUiStore } from "@/stores/canvas/use-canvas-ui-store";
 import { exportCanvasProjects } from "@/lib/canvas/canvas-export";
 import { consumeCanvasAgentLaunchCredentials } from "@/lib/canvas/canvas-agent-launch";
 import { createCommerceWorkflowTemplate } from "@/lib/canvas/canvas-commerce-workflow";
+import { createRunningHubWorkflowTemplate, findRunningHubWorkflowModel } from "@/lib/canvas/canvas-runninghub-workflow";
 import { saveCanvasDrawing, type CanvasDrawingRenderDraft } from "@/lib/canvas/canvas-drawing-storage";
 import { createCanvasProjectWithRemoteSync, saveRemoteUserDataNow } from "@/services/user-data-sync";
 import { listProjects } from "@/services/api/projects";
+import { useEffectiveConfig } from "@/stores/use-config-store";
 
 export default function CanvasPage() {
     const { message } = App.useApp();
@@ -34,6 +36,7 @@ export default function CanvasPage() {
     const [pageSize, setPageSize] = useState(24);
     const hydrated = useCanvasStore((state) => state.hydrated);
     const projects = useCanvasStore((state) => state.projects);
+    const effectiveConfig = useEffectiveConfig();
     const importProject = useCanvasStore((state) => state.importProject);
     const selectedIds = useCanvasUiStore((state) => state.selectedProjectIds);
     const setDeleteIds = useCanvasUiStore((state) => state.setDeleteProjectIds);
@@ -62,6 +65,18 @@ export default function CanvasPage() {
         const template = createCommerceWorkflowTemplate();
         void createCanvasProjectWithRemoteSync(`AI 带货批次 ${projects.length + 1}`, undefined, template).then(({ id, syncError }) => {
             if (syncError) message.warning("带货工作流已在本地创建，云端同步失败，请稍后从保存入口重试");
+            enterProject(id);
+        });
+    };
+    const createRunningHubAndEnter = () => {
+        const model = findRunningHubWorkflowModel(effectiveConfig);
+        if (!model) {
+            message.error("尚未找到可用的 RunningHub 视频模型，请先在系统渠道启用工作流模型");
+            return;
+        }
+        const template = createRunningHubWorkflowTemplate(model);
+        void createCanvasProjectWithRemoteSync(`RunningHub 测试 ${projects.length + 1}`, undefined, template).then(({ id, syncError }) => {
+            if (syncError) message.warning("RunningHub 测试画布已在本地创建，云端同步失败，请稍后从保存入口重试");
             enterProject(id);
         });
     };
@@ -162,6 +177,7 @@ export default function CanvasPage() {
                                 ) : null}
                         <Button className="!h-9 !px-3.5" disabled={!hydrated} icon={<FileUp className="size-3.5" />} onClick={() => inputRef.current?.click()}>导入</Button>
                         <Button className="!h-9 !px-3.5" disabled={!hydrated} icon={<ShoppingBag className="size-3.5" />} onClick={createCommerceAndEnter}>15 条带货模板</Button>
+                        <Button className="!h-9 !px-3.5" disabled={!hydrated} icon={<FlaskConical className="size-3.5" />} onClick={createRunningHubAndEnter}>RunningHub 测试</Button>
                         <Button className="!h-9 !px-4" type="primary" disabled={!hydrated} icon={<Plus className="size-3.5" />} onClick={createAndEnter}>新建画布</Button>
                         </>
                     )}

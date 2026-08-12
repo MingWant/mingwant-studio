@@ -79,7 +79,7 @@ func (r *Repository) UserStorageUsage(userID string) (UserStorageUsage, error) {
 			(SELECT COALESCE(SUM(length(CAST(COALESCE(prompt, '') AS BLOB)) + length(CAST(COALESCE(canvas_snapshot_json, '') AS BLOB)) + length(CAST(COALESCE(canvas_ops_json, '') AS BLOB))), 0) FROM sessions WHERE user_id = ?)
 			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(content, '') AS BLOB)) + length(CAST(COALESCE(payload, '') AS BLOB))), 0) FROM messages WHERE user_id = ?) AS session_bytes,
 			(SELECT COUNT(*) FROM tasks WHERE user_id = ?) AS task_count,
-			(SELECT COALESCE(SUM(length(CAST(COALESCE(prompt, '') AS BLOB)) + length(CAST(COALESCE(input_json, '') AS BLOB)) + length(CAST(COALESCE(result_json, '') AS BLOB)) + length(CAST(COALESCE(delivery_ops_json, '') AS BLOB)) + length(CAST(COALESCE(error, '') AS BLOB))), 0) FROM tasks WHERE user_id = ?)
+			(SELECT COALESCE(SUM(length(CAST(COALESCE(prompt, '') AS BLOB)) + length(CAST(COALESCE(input_json, '') AS BLOB)) + length(CAST(COALESCE(result_json, '') AS BLOB)) + length(CAST(COALESCE(delivery_ops_json, '') AS BLOB)) + length(CAST(COALESCE(provider_state_json, '') AS BLOB)) + length(CAST(COALESCE(error, '') AS BLOB))), 0) FROM tasks WHERE user_id = ?)
 			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(message, '') AS BLOB)) + length(CAST(COALESCE(payload, '') AS BLOB))), 0) FROM task_logs WHERE user_id = ?)
 			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(url, '') AS BLOB)) + length(CAST(COALESCE(payload, '') AS BLOB))), 0) FROM results WHERE user_id = ?)
 			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(path, '') AS BLOB)) + length(CAST(COALESCE(model, '') AS BLOB)) + length(CAST(COALESCE(provider_request_id, '') AS BLOB)) + length(CAST(COALESCE(error_code, '') AS BLOB)) + length(CAST(COALESCE(error, '') AS BLOB)) + length(CAST(COALESCE(upstream_url, '') AS BLOB))), 0) FROM api_call_logs WHERE user_id = ?) AS task_bytes,
@@ -99,7 +99,7 @@ func (r *Repository) UserTaskStorageUsage(userID string) (UserStorageUsage, erro
 	query := `
 		SELECT
 			(SELECT COUNT(*) FROM tasks WHERE user_id = ?) AS task_count,
-			(SELECT COALESCE(SUM(length(CAST(COALESCE(prompt, '') AS BLOB)) + length(CAST(COALESCE(input_json, '') AS BLOB)) + length(CAST(COALESCE(result_json, '') AS BLOB)) + length(CAST(COALESCE(delivery_ops_json, '') AS BLOB)) + length(CAST(COALESCE(error, '') AS BLOB))), 0) FROM tasks WHERE user_id = ?)
+			(SELECT COALESCE(SUM(length(CAST(COALESCE(prompt, '') AS BLOB)) + length(CAST(COALESCE(input_json, '') AS BLOB)) + length(CAST(COALESCE(result_json, '') AS BLOB)) + length(CAST(COALESCE(delivery_ops_json, '') AS BLOB)) + length(CAST(COALESCE(provider_state_json, '') AS BLOB)) + length(CAST(COALESCE(error, '') AS BLOB))), 0) FROM tasks WHERE user_id = ?)
 			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(message, '') AS BLOB)) + length(CAST(COALESCE(payload, '') AS BLOB))), 0) FROM task_logs WHERE user_id = ?)
 			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(url, '') AS BLOB)) + length(CAST(COALESCE(payload, '') AS BLOB))), 0) FROM results WHERE user_id = ?)
 			+ (SELECT COALESCE(SUM(length(CAST(COALESCE(path, '') AS BLOB)) + length(CAST(COALESCE(model, '') AS BLOB)) + length(CAST(COALESCE(provider_request_id, '') AS BLOB)) + length(CAST(COALESCE(error_code, '') AS BLOB)) + length(CAST(COALESCE(error, '') AS BLOB)) + length(CAST(COALESCE(upstream_url, '') AS BLOB))), 0) FROM api_call_logs WHERE user_id = ?) AS task_bytes,
@@ -382,6 +382,37 @@ func (r *Repository) ActiveTaskCountForUser(userID string) (int64, error) {
 	return count, err
 }
 
+// ChannelProviderExecutionState 只统计已经越过普通排队阶段的当前计费尝试。
+// RunningHub 这类异步供应商在 HTTP create 返回后仍会长时间占用账号并发，
+// 因此不能用单次 HTTP 槽位判断账号是否已经空闲。
+func (r *Repository) ChannelProviderExecutionState(channelIDs []string, excludeTaskID string) (int64, bool, error) {
+	if len(channelIDs) == 0 {
+		return 0, false, errors.New("渠道并发范围为空")
+	}
+	excludeTaskID = strings.TrimSpace(excludeTaskID)
+	var activeCount int64
+	activeQuery := r.db.Model(&model.Task{}).
+		Joins("JOIN billing_orders ON billing_orders.id = tasks.billing_order_id").
+		Where("billing_orders.channel_id IN ?", channelIDs).
+		Where("tasks.status = ?", model.TaskStatusRunning).
+		Where("tasks.id <> ?", excludeTaskID).
+		Where("(tasks.provider_call_state IS NULL OR tasks.provider_call_state = '' OR tasks.provider_call_state <> ?) OR (tasks.provider_request_id IS NOT NULL AND tasks.provider_request_id <> '')", model.TaskProviderCallPending)
+	if err := activeQuery.Count(&activeCount).Error; err != nil {
+		return 0, false, err
+	}
+
+	var uncertainCount int64
+	uncertainQuery := r.db.Model(&model.BillingOrder{}).
+		Joins("JOIN tasks ON tasks.billing_order_id = billing_orders.id").
+		Where("billing_orders.channel_id IN ?", channelIDs).
+		Where("billing_orders.status = ?", model.BillingStatusUncertain).
+		Where("tasks.id <> ?", excludeTaskID)
+	if err := uncertainQuery.Count(&uncertainCount).Error; err != nil {
+		return 0, false, err
+	}
+	return activeCount, uncertainCount > 0, nil
+}
+
 // 任务领取以数据库租约为真相；PostgreSQL 锁行跳过竞争任务，SQLite 继续依赖条件更新保证单实例原子性。
 func (r *Repository) ClaimNextTask(owner string, leaseDuration time.Duration) (*model.Task, error) {
 	var task model.Task
@@ -507,6 +538,46 @@ func (r *Repository) UpdateRecoveringTaskProviderState(id string, owner string, 
 	return nil
 }
 
+// CheckpointTaskProviderState 把结果节点证据、用户可见进度与同一个上游任务 ID 原子绑定。
+// 该私有检查点允许 Worker 中断后只恢复原任务，绝不能据此创建新的供应商任务。
+func (r *Repository) CheckpointTaskProviderState(id string, owner string, providerRequestID string, pollStage string, providerStateJSON string, stage string, progress int) error {
+	providerRequestID = strings.TrimSpace(providerRequestID)
+	if strings.TrimSpace(id) == "" || strings.TrimSpace(owner) == "" || providerRequestID == "" {
+		return ErrTaskStateConflict
+	}
+	now := time.Now()
+	result := r.db.Model(&model.Task{}).
+		Where("id = ? AND status IN ? AND lease_owner = ? AND lease_expires_at IS NOT NULL AND lease_expires_at > ?", id, []model.TaskStatus{model.TaskStatusRunning, model.TaskStatusFailed, model.TaskStatusCancelled}, owner, now).
+		Where("(provider_request_id = '' OR provider_request_id IS NULL OR provider_request_id = ?)", providerRequestID).
+		Updates(map[string]any{
+			"provider_request_id": providerRequestID,
+			"poll_stage": normalizedTaskProviderPollStage(pollStage),
+			"provider_state_json": providerStateJSON,
+			"stage": strings.TrimSpace(stage),
+			"progress": progress,
+			"updated_at": now,
+		})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTaskStateConflict
+	}
+	return nil
+}
+
+func normalizedTaskProviderPollStage(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		value = "pending"
+	}
+	runes := []rune(value)
+	if len(runes) > 32 {
+		return string(runes[:32])
+	}
+	return value
+}
+
 func (r *Repository) DeferTaskProviderPoll(id string, owner string, stage string, pollStage string, nextPollAt time.Time) error {
 	result := r.db.Model(&model.Task{}).
 		Where("id = ? AND status = ? AND lease_owner = ?", id, model.TaskStatusRunning, owner).
@@ -524,6 +595,34 @@ func (r *Repository) DeferTaskProviderPoll(id string, owner string, stage string
 	}
 	if result.RowsAffected != 1 {
 		return errors.New("任务轮询租约已失效")
+	}
+	return nil
+}
+
+// DeferClaimedTaskForProviderCapacity 在供应商调用前归还 Worker 和任务租约，
+// 但保留任务、计费预留和原有调用状态；这样等待账号容量不会占满全局 Worker。
+func (r *Repository) DeferClaimedTaskForProviderCapacity(id string, owner string, stage string, pollStage string, nextPollAt time.Time, resetStartedAt bool) error {
+	updates := map[string]any{
+		"stage":            stage,
+		"progress":         10,
+		"poll_stage":       normalizedTaskProviderPollStage(pollStage),
+		"next_poll_at":     &nextPollAt,
+		"lease_owner":      "",
+		"lease_expires_at": nil,
+		"updated_at":       time.Now(),
+	}
+	if resetStartedAt {
+		// 供应商尚未建连时，排队等待不消耗视频执行时限。
+		updates["started_at"] = nil
+	}
+	result := r.db.Model(&model.Task{}).
+		Where("id = ? AND status = ? AND lease_owner = ?", id, model.TaskStatusRunning, owner).
+		Updates(updates)
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return ErrTaskStateConflict
 	}
 	return nil
 }

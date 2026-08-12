@@ -14,11 +14,13 @@ type CanvasVideoSettingsPopoverProps = {
     config: AiConfig;
     operation?: CanvasVideoEditOperation;
     onConfigChange: (key: keyof AiConfig, value: string) => void;
+    workflowParameters?: Record<string, string>;
+    onWorkflowParameterChange?: (key: string, value: string) => void;
     buttonClassName?: string;
     placement?: "topLeft" | "top" | "topRight" | "bottomLeft" | "bottom" | "bottomRight";
 };
 
-export function CanvasVideoSettingsPopover({ config, operation, onConfigChange, buttonClassName, placement = "topLeft" }: CanvasVideoSettingsPopoverProps) {
+export function CanvasVideoSettingsPopover({ config, operation, onConfigChange, workflowParameters, onWorkflowParameterChange, buttonClassName, placement = "topLeft" }: CanvasVideoSettingsPopoverProps) {
     const theme = canvasThemes[useThemeStore((state) => state.theme)];
     const buttonRef = useRef<HTMLSpanElement>(null);
     const panelRef = useRef<HTMLDivElement>(null);
@@ -53,7 +55,7 @@ export function CanvasVideoSettingsPopover({ config, operation, onConfigChange, 
         };
     }, [open]);
 
-    const panel = open && buttonRect ? <VideoSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} operation={operation} onConfigChange={onConfigChange} /> : null;
+    const panel = open && buttonRect ? <VideoSettingsPortal buttonRect={buttonRect} panelRef={panelRef} placement={placement} theme={theme} config={config} operation={operation} onConfigChange={onConfigChange} workflowParameters={workflowParameters} onWorkflowParameterChange={onWorkflowParameterChange} /> : null;
 
     return (
         <>
@@ -77,6 +79,8 @@ function VideoSettingsPortal({
     config,
     operation,
     onConfigChange,
+    workflowParameters,
+    onWorkflowParameterChange,
 }: {
     buttonRect: DOMRect;
     panelRef: RefObject<HTMLDivElement | null>;
@@ -85,6 +89,8 @@ function VideoSettingsPortal({
     config: AiConfig;
     operation?: CanvasVideoEditOperation;
     onConfigChange: (key: keyof AiConfig, value: string) => void;
+    workflowParameters?: Record<string, string>;
+    onWorkflowParameterChange?: (key: string, value: string) => void;
 }) {
     const gap = 8;
     const margin = 12;
@@ -93,7 +99,7 @@ function VideoSettingsPortal({
     const alignCenter = placement === "top" || placement === "bottom";
     const left = alignCenter ? buttonRect.left + buttonRect.width / 2 - width / 2 : alignRight ? buttonRect.right - width : buttonRect.left;
     const topPlacement = placement?.startsWith("top");
-    const estimatedHeight = 370;
+    const estimatedHeight = 480;
     const topSpace = buttonRect.top - gap - margin;
     const bottomSpace = window.innerHeight - buttonRect.bottom - gap - margin;
     const placeAbove = topPlacement ? topSpace >= estimatedHeight || topSpace >= bottomSpace : bottomSpace < estimatedHeight && topSpace > bottomSpace;
@@ -122,7 +128,7 @@ function VideoSettingsPortal({
             onMouseDown={(event) => event.stopPropagation()}
             onClick={(event) => event.stopPropagation()}
         >
-            <VideoSettingsPanel config={config} operation={operation} onConfigChange={(key, value) => onConfigChange(key, value)} theme={theme} className="space-y-3" />
+            <VideoSettingsPanel config={config} operation={operation} onConfigChange={(key, value) => onConfigChange(key, value)} workflowParameters={workflowParameters} onWorkflowParameterChange={onWorkflowParameterChange} theme={theme} className="space-y-3" />
         </div>,
         document.body,
     );

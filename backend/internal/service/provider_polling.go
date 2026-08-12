@@ -112,6 +112,10 @@ func isTransientProviderPollError(err error) bool {
 	if errors.As(err, &httpErr) {
 		return httpErr.StatusCode == 404 || httpErr.StatusCode == 408 || httpErr.StatusCode == 425 || httpErr.StatusCode == 429 || httpErr.StatusCode >= 500
 	}
+	var runningHubErr runningHubApplicationError
+	if errors.As(err, &runningHubErr) && runningHubApplicationCodeUncertain(runningHubErr.Code) {
+		return true
+	}
 	var networkErr net.Error
 	if errors.As(err, &networkErr) {
 		return true

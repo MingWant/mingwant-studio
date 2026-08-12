@@ -69,7 +69,7 @@
 
 ## 异步任务与计费终态
 
-`tasks` 使用 `lease_owner` / `lease_expires_at` 领取 Worker 租约；`provider_call_state` 是不对客户端公开的供应商调用边界。`pending` 表示新尝试尚未提交调用前检查点；`preflight` 表示有效租约、调用阶段和审计日志已经原子落库，但供应商 HTTP 请求仍未发出；`dispatched` 表示至少一次请求已经跨过本地发送边界，之后即使连接取消也必须按可能执行处理。旧版 `prepared` 与空值没有精确发送证据，只能保守视为可能已经调用。异步视频创建成功后把供应商任务 ID、`poll_stage` 与 `next_poll_at` 持久化，释放 Worker，到了查询时间再重新领取。`idx_tasks_status_next_poll` 用于定位到期轮询任务，原始 `started_at` 负责约束跨重启的总超时时间。
+`tasks` 使用 `lease_owner` / `lease_expires_at` 领取 Worker 租约；`provider_call_state` 是不对客户端公开的供应商调用边界。`pending` 表示新尝试尚未提交调用前检查点；`preflight` 表示有效租约、调用阶段和审计日志已经原子落库，但供应商 HTTP 请求仍未发出；`dispatched` 表示至少一次请求已经跨过本地发送边界，之后即使连接取消也必须按可能执行处理。旧版 `prepared` 与空值没有精确发送证据，只能保守视为可能已经调用。异步视频创建成功后把供应商任务 ID、`poll_stage` 与 `next_poll_at` 持久化，释放 Worker，到了查询时间再重新领取。RunningHub RHWorkspace 还使用私有 `provider_state_json` 保存创建时的控制节点、结果节点证据、结果地址以及取消请求、接受和终态确认；WSS 鉴权地址不得落库。取消接口返回成功只记录“取消已接受”，之后只有同一 taskId 的输出查询进入中断/取消终态，或已接受取消后返回任务已清除，才记录取消终态确认；若先观察到正常完成则必须标记自然结束并拒绝交付。断点模式只有在节点 12 已产出结果，并且 WSS 或结构化失败对象明确指向创建时保存的节点 69 时，才记录工作流断点终止；不能从异常正文猜测节点身份。Worker 中断后只能监控、取消和读取同一个上游 taskId，没有结果节点证据、失败节点不符或已经自然结束的工作流不得恢复为成功。`idx_tasks_status_next_poll` 用于定位到期轮询任务，原始 `started_at` 负责约束跨重启的总超时时间。
 
 画布节点生成、脚本分镜、影视 Agent 会话和 LLM 测活任务还保存不对外返回的 `request_key`。画布键由服务端按任务类型、画布 ID、操作和节点 ID 计算 SHA-256；影视 Agent 任务按持久会话 ID 计算，均不接受浏览器覆盖。自定义渠道探针键包含用户已校验的完整配置摘要，系统探针键只按渠道与模型生成稳定摘要，文本测活和固定工具诊断共用该活动键但在输入中保存不同 `kind`，任何键都不保存 API Key 明文。`idx_tasks_user_active_request_key` 只在 `queued` / `running` 状态下对 `user_id + request_key` 建立部分唯一约束；`idx_tasks_active_system_probe_key` 再对 `probe-system-`（以及早期 `probe-tool-system-`）系统探针键建立跨用户部分唯一约束。探针首次创建时把 Web 请求前生成的随机键保存到私有 `probe_request_key`，`idx_tasks_user_probe_request_key` 对 `user_id + probe_request_key` 做不受任务终态影响的永久唯一约束。
 
@@ -110,4 +110,5 @@
 - `tasks.provider_call_state` 由 GORM 自动建列。新领取和显式重试的任务写入 `pending`，调用前审计事务将其改为 `preflight`，HTTP 建连前再以有效租约条件改为 `dispatched`。后续结构修复只续租和追加审计，不能把已经存在的 `dispatched` 降回 `preflight`；升级前空值与旧版 `prepared` 都不被当作“尚未调用”的证明。
 - `tasks.request_key`、`tasks.probe_request_key`、`channel_probe_submissions` 与 `sessions.request_key` 由 GORM 自动迁移；`idx_channel_probe_submission` 随模型建立，`idx_tasks_user_active_request_key`、`idx_tasks_active_system_probe_key`、`idx_tasks_user_probe_request_key` 和 `idx_sessions_user_request_key` 在启动迁移中显式创建，以同时兼容 SQLite 与 PostgreSQL 的任务、系统测活、首次提交/接管提交重放及会话幂等约束。数据库账号必须具有建表、建列和建索引权限，迁移失败时服务应停止启动，不能在缺少去重约束时继续接单。
 - `tasks.delivery_ops_json` 是结果交付检查点的私有部分，只在终态事务前暂存画布操作；任务列表和详情只公开是否可恢复，不返回操作正文。显式付费重试必须先拒绝仍有完整检查点的任务，恢复成功后才清空该字段。
+- `tasks.provider_state_json` 是异步供应商的私有控制检查点。RunningHub 只保存与当前计费尝试和 taskId 绑定的结果节点、抢停与结果读取证据；成功终态和新的显式付费重试会清空该字段，失败或取消时保留以便只恢复原任务。
 - `resources.source_task_id`、`source_attempt`、`source_path`、`content_sha256` 与 `quota_day` 由 GORM 自动建列；`idx_resources_task_output` 在启动迁移中显式创建。同一尝试的资源身份不能只依赖随机对象键，新的任务重试也不能沿用上一笔计费尝试的资源身份。

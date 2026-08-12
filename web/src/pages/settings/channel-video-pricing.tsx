@@ -1,6 +1,6 @@
 import { InputNumber, Segmented, Select } from "antd";
 
-import { isXAIImageModel, isXAIVideoModel, MODEL_PROTOCOL_OPTIONS, modelProtocolCapability, modelProtocolDefinition, modelProtocolLabel, type ModelProtocol } from "@/lib/model-protocols";
+import { isXAIImageModel, isXAIVideoModel, USER_MODEL_PROTOCOL_OPTIONS, modelProtocolCapability, modelProtocolDefinition, modelProtocolLabel, type ModelProtocol } from "@/lib/model-protocols";
 import { modelMatchesCapability, modelOptionName, type ModelChannel } from "@/stores/use-config-store";
 
 type ModelCost = NonNullable<ModelChannel["modelCosts"]>[number];
@@ -39,7 +39,7 @@ export function ChannelModelSettings({ channel, onChange }: { channel: ModelChan
                             <Select<ModelProtocol>
                                 size="small"
                                 value={protocol}
-                                options={MODEL_PROTOCOL_OPTIONS}
+                                options={USER_MODEL_PROTOCOL_OPTIONS}
                                 onChange={(value) => updateCost(model, { protocol: value, capability: modelProtocolCapability(value) || capability, billingMode: modelProtocolCapability(value) === "video" ? billingMode : "fixed_request" })}
                             />
                             {capability === "video" ? <Segmented size="small" block value={billingMode} options={[{ label: "按次", value: "fixed_request" }, { label: "按秒", value: "per_second" }]} onChange={(value) => updateCost(model, { billingMode: value as ModelCost["billingMode"] })} /> : <span className="text-center text-[10px] text-foreground/35">{modelProtocolLabel(protocol)}</span>}

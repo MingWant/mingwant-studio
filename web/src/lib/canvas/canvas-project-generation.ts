@@ -6,7 +6,7 @@ import { resourceIdFromStorageKey, resourceStorageKey, uploadResourceFile } from
 import { NODE_DEFAULT_SIZE } from "@/constant/canvas";
 import { normalizeVideoDuration, normalizeVideoResolution } from "@/lib/video-generation-options";
 import { isSeedanceVideoConfig } from "@/lib/seedance-video";
-import { defaultModelCapabilityConfig, normalizeCapabilityDuration, normalizeCapabilityRatio, normalizeCapabilityResolution, ratioFromSize, resolveVideoOperation, sizeForCapabilityRatio, videoCapabilityFromConfig } from "@/lib/model-capabilities";
+import { alignVideoSizeToMultiple, defaultModelCapabilityConfig, normalizeCapabilityDuration, normalizeCapabilityRatio, normalizeCapabilityResolution, ratioFromSize, resolveVideoOperation, sizeForCapabilityRatio, videoCapabilityFromConfig } from "@/lib/model-capabilities";
 import { isXAIVideoRequest } from "@/lib/model-protocols";
 import { imageMetadata, parseBackendGenerationResult } from "@/lib/canvas/canvas-generation-task-sync";
 import type { CanvasNodeGenerationMode } from "@/components/canvas/canvas-node-prompt-panel";
@@ -309,13 +309,27 @@ export function buildVideoGenerationMetadata(
     const usesImageFrame = !xai || operation === "image_to_video" || referenceMode;
     const startFrame = usesImageFrame && metadata?.videoStartFrameNodeId && context?.referenceImages.some((image) => image.id === metadata.videoStartFrameNodeId) ? metadata.videoStartFrameNodeId : undefined;
     const endFrame = (supportsEndFrame || referenceMode) && metadata?.videoEndFrameNodeId && context?.referenceImages.some((image) => image.id === metadata.videoEndFrameNodeId) ? metadata.videoEndFrameNodeId : undefined;
+    const runningHubParameters = runningHubGenerationParameters(config, metadata);
     return {
         videoEditOperation: operation,
         videoCameraMoveId: metadata?.videoCameraMoveId,
         videoCameraMovePrompt: metadata?.videoCameraMovePrompt,
         videoStartFrameNodeId: startFrame,
         videoEndFrameNodeId: endFrame,
+        runningHubParameters,
     };
+}
+
+function runningHubGenerationParameters(config: AiConfig | undefined, metadata: CanvasNodeMetadata | undefined) {
+    if (!config || !metadata?.runningHubParameters) return undefined;
+    const request = resolveModelRequestConfig(config, config.model);
+    if (request.interfaceType !== "runninghub-workflow") return undefined;
+    const channel = config.channels.find((item) => item.id === request.resolvedChannelId);
+    const modelCost = channel?.modelCosts?.find((item) => item.model === request.model);
+    const capability = videoCapabilityFromConfig(modelCost?.capabilityConfig, request.interfaceType);
+    const allowed = new Set((capability.runningHub?.parameters || []).filter((item) => item.userEditable).map((item) => `${item.nodeId}:${item.fieldName}`));
+    const entries = Object.entries(metadata.runningHubParameters).filter(([key]) => allowed.has(key));
+    return entries.length ? Object.fromEntries(entries) : undefined;
 }
 
 // xAI 编辑按原片时长计费，续写的 duration 只表示新增部分；首次生成和付费重试必须共用同一规则。
@@ -447,7 +461,12 @@ export function buildGenerationConfig(config: AiConfig, node: CanvasNodeData | u
         const modelCost = requestChannel?.modelCosts?.find((item) => item.model === requestConfig.model);
         const capability = videoCapabilityFromConfig(modelCost?.capabilityConfig, requestConfig.interfaceType);
         const requestedRatio = ratioFromSize(rawSize, capability.ratios) || normalizeCapabilityRatio(capability.defaultRatio);
-        size = isSeedanceVideoConfig(modelConfig) ? requestedRatio : sizeForCapabilityRatio(requestedRatio);
+        // RHWorkspace 的节点宽高可能要求特定倍数。保留工作流原生像素尺寸，并在提交前
+        // 对齐管理员声明的倍数，避免 720×1280 这类通用尺寸进入已计费的工作流后才失败。
+        const runningHubWorkflow = requestConfig.interfaceType === "runninghub-workflow";
+        const runningHubPixelSize = runningHubWorkflow && /^\d+x\d+$/.test(rawSize.trim());
+        const resolvedSize = runningHubPixelSize ? rawSize.trim() : isSeedanceVideoConfig(modelConfig) ? requestedRatio : sizeForCapabilityRatio(requestedRatio);
+        size = runningHubWorkflow ? alignVideoSizeToMultiple(resolvedSize, capability.runningHub?.dimensionMultiple || 1) : resolvedSize;
         const normalizedResolution = normalizeCapabilityResolution(node?.metadata?.vquality || config.vquality || defaultConfig.vquality);
         const supportedResolutions = capability.resolutions.map(normalizeCapabilityResolution);
         videoResolution = supportedResolutions.includes(normalizedResolution) ? normalizedResolution.replace(/p$/, "") : normalizeCapabilityResolution(capability.defaultResolution).replace(/p$/i, "");

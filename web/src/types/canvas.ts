@@ -53,7 +53,7 @@ export type CanvasWorkflowKind =
     | "commerce_generation"
     | "commerce_quality"
     | "commerce_delivery";
-export type CanvasVideoEditOperation = "text_to_video" | "image_to_video" | "reference_to_video" | "edit_video" | "extend" | "inpaint" | "replace_element" | "camera_motion" | "style_transfer" | "audio_to_video" | "compare_versions" | "concat";
+export type CanvasVideoEditOperation = "text_to_video" | "image_to_video" | "reference_to_video" | "edit_video" | "extend" | "inpaint" | "replace_element" | "camera_motion" | "style_transfer" | "audio_to_video" | "workflow" | "compare_versions" | "concat";
 export type CanvasSkillCategory = "writing" | "storyboard" | "image" | "video" | "utility";
 export type CanvasSkillOutputMode = "text" | "json" | "image_prompt" | "workflow";
 export type StoryboardColumn = "shotNumber" | "durationSeconds" | "plotDescription" | "dialogue" | "shotSize" | "emotion" | "lightingAndAtmosphere" | "audioEffects" | "camera" | "motion" | "timeBeats" | "imageGenerationPrompt" | "videoMotionPrompt" | "negativePrompt";
@@ -288,6 +288,8 @@ export type CanvasNodeMetadata = {
     videoCameraMovePrompt?: string;
     videoStartFrameNodeId?: string;
     videoEndFrameNodeId?: string;
+    /** 管理员明确开放给画布的 RHWorkspace 节点字段，键格式为 nodeId:fieldName。 */
+    runningHubParameters?: Record<string, string>;
     versionOfNodeId?: string;
     versionLabel?: string;
     versionPrimary?: boolean;

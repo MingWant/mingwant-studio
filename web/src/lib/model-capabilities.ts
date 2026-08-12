@@ -33,6 +33,39 @@ export type VideoCapabilityConfig = {
     watermark: VideoBooleanConfig;
     operations: string[];
     defaultOperation: string;
+    runningHub?: RunningHubWorkflowConfig;
+};
+
+export type RunningHubWorkflowConfig = {
+    resultNodeId: string;
+    stopOnNodeIds: string[];
+    terminationMode: "breakpoint" | "cancel";
+    failureNodeId: string;
+    failureNodeField: string;
+    failureNodeValue: string;
+    wssWaitSeconds: number;
+    monitorSilenceSeconds: number;
+    dimensionMultiple: number;
+    parameters: RunningHubParameterMapping[];
+    references: RunningHubReferenceMapping[];
+};
+
+export type RunningHubParameterMapping = {
+    label: string;
+    source: "prompt" | "duration" | "width" | "height" | "resolution" | "generate_audio" | "watermark" | "seed" | "fps" | "custom";
+    nodeId: string;
+    fieldName: string;
+    valueType: "string" | "integer" | "number" | "boolean";
+    defaultValue?: string;
+    userEditable?: boolean;
+};
+
+export type RunningHubReferenceMapping = {
+    kind: "image" | "video" | "audio";
+    index: number;
+    nodeId: string;
+    fieldName: string;
+    required?: boolean;
 };
 
 export type VideoBooleanConfig = {
@@ -40,7 +73,10 @@ export type VideoBooleanConfig = {
     default: boolean;
 };
 
-export const MODEL_CAPABILITY_CONFIG_VERSION = 2;
+export const MODEL_CAPABILITY_CONFIG_VERSION = 5;
+const XAI_VIDEO_OPERATIONS_MIGRATION_VERSION = 2;
+const RUNNING_HUB_BREAKPOINT_MIGRATION_VERSION = 4;
+const RUNNING_HUB_REQUIRED_IMAGES_MIGRATION_VERSION = 5;
 
 export function defaultModelCapabilityConfig(protocol?: string): ModelCapabilityConfig {
     const video: VideoCapabilityConfig = {
@@ -92,14 +128,48 @@ export function defaultModelCapabilityConfig(protocol?: string): ModelCapability
             video.references.maxImages = 1;
             video.ratios = ["16:9", "9:16", "1:1", "4:3", "3:4", "3:2", "2:3"];
             break;
+        case "runninghub-workflow":
+            video.references = { promptMaxChars: 100_000, maxImages: 3, maxImageBytes: 30 * 1024 * 1024, maxVideos: 1, maxVideoBytes: 30 * 1024 * 1024, maxVideoDurationSeconds: 3600, maxAudios: 1, maxAudioBytes: 30 * 1024 * 1024, maxAudioDurationSeconds: 3600 };
+            video.duration = { selection: "range", min: 1, max: 60, step: 1, default: 5 };
+            video.operations = ["workflow"];
+            video.defaultOperation = "workflow";
+            video.runningHub = defaultRunningHubWorkflowConfig();
+            break;
     }
     return { version: MODEL_CAPABILITY_CONFIG_VERSION, video };
 }
 
 export function videoCapabilityFromConfig(config: ModelCapabilityConfig | undefined, protocol?: string) {
     const video = config?.video || defaultModelCapabilityConfig(protocol).video!;
+    if (protocol === "runninghub-workflow") {
+        const fallback = defaultModelCapabilityConfig(protocol).video!;
+        const runningHubFallback = fallback.runningHub || defaultRunningHubWorkflowConfig();
+        const runningHub = (config?.version || 0) < RUNNING_HUB_BREAKPOINT_MIGRATION_VERSION
+            ? {
+                ...(video.runningHub || runningHubFallback),
+                stopOnNodeIds: [...runningHubFallback.stopOnNodeIds],
+                terminationMode: runningHubFallback.terminationMode,
+                failureNodeId: runningHubFallback.failureNodeId,
+                failureNodeField: runningHubFallback.failureNodeField,
+                failureNodeValue: runningHubFallback.failureNodeValue,
+            }
+            : video.runningHub || runningHubFallback;
+        const migratedRunningHub = (config?.version || 0) < RUNNING_HUB_REQUIRED_IMAGES_MIGRATION_VERSION
+            ? {
+                ...runningHub,
+                references: (Array.isArray(runningHub.references) ? runningHub.references : []).map((item) => isDefaultRequiredRunningHubImage(item) ? { ...item, required: true } : item),
+            }
+            : runningHub;
+        return {
+            ...fallback,
+            ...video,
+            references: { ...fallback.references, ...video.references },
+            duration: { ...fallback.duration, ...video.duration },
+            runningHub: normalizeRunningHubWorkflowConfig(migratedRunningHub),
+        };
+    }
     // 与后端 v1→v2 的窄迁移保持一致，让尚未重新保存的本地自定义 xAI 配置也能立即看到官方编辑/续写入口。
-    if (protocol === "xai-video" && (config?.version || 0) < MODEL_CAPABILITY_CONFIG_VERSION && isLegacyXAIVideoOperations(video.operations)) {
+    if (protocol === "xai-video" && (config?.version || 0) < XAI_VIDEO_OPERATIONS_MIGRATION_VERSION && isLegacyXAIVideoOperations(video.operations)) {
         return {
             ...video,
             references: { ...video.references, maxVideos: 1, maxVideoDurationSeconds: 15 },
@@ -107,6 +177,66 @@ export function videoCapabilityFromConfig(config: ModelCapabilityConfig | undefi
         };
     }
     return video;
+}
+
+function isDefaultRequiredRunningHubImage(item: RunningHubReferenceMapping) {
+    const defaults: Array<[number, string]> = [[0, "16"], [1, "19"], [2, "22"]];
+    return item.kind === "image"
+        && item.fieldName === "image"
+        && defaults.some(([index, nodeId]) => item.index === index && item.nodeId === nodeId);
+}
+
+export function defaultRunningHubWorkflowConfig(): RunningHubWorkflowConfig {
+    return {
+        resultNodeId: "12",
+        stopOnNodeIds: ["48"],
+        terminationMode: "breakpoint",
+        failureNodeId: "69",
+        failureNodeField: "width",
+        failureNodeValue: "481",
+        wssWaitSeconds: 180,
+        monitorSilenceSeconds: 120,
+        dimensionMultiple: 32,
+        parameters: [
+            { label: "提示词", source: "prompt", nodeId: "7", fieldName: "prompt", valueType: "string" },
+            { label: "视频时长", source: "duration", nodeId: "6", fieldName: "duration_seconds", valueType: "integer" },
+            { label: "画面宽度", source: "width", nodeId: "6", fieldName: "width", valueType: "integer" },
+            { label: "画面高度", source: "height", nodeId: "6", fieldName: "height", valueType: "integer" },
+            { label: "随机种子", source: "seed", nodeId: "9", fieldName: "seed", valueType: "integer", defaultValue: "0", userEditable: true },
+            { label: "帧率", source: "fps", nodeId: "11", fieldName: "fps", valueType: "integer", defaultValue: "24", userEditable: true },
+        ],
+        references: [
+            { kind: "image", index: 0, nodeId: "16", fieldName: "image", required: true },
+            { kind: "image", index: 1, nodeId: "19", fieldName: "image", required: true },
+            { kind: "image", index: 2, nodeId: "22", fieldName: "image", required: true },
+            { kind: "video", index: 0, nodeId: "24", fieldName: "file" },
+            { kind: "audio", index: 0, nodeId: "26", fieldName: "audio" },
+        ],
+    };
+}
+
+export function normalizeRunningHubWorkflowConfig(value?: RunningHubWorkflowConfig): RunningHubWorkflowConfig {
+    const fallback = defaultRunningHubWorkflowConfig();
+    if (!value) return fallback;
+    const dimensionMultiple = Math.floor(Number(value.dimensionMultiple));
+    const terminationMode = value.terminationMode || fallback.terminationMode;
+    const failureNodeId = value.failureNodeId || fallback.failureNodeId;
+    const failureNodeField = value.failureNodeField || fallback.failureNodeField;
+    const failureNodeValue = value.failureNodeValue || fallback.failureNodeValue;
+    const stopOnNodeIds = (Array.isArray(value.stopOnNodeIds) ? value.stopOnNodeIds : [])
+        .filter((nodeId) => terminationMode !== "breakpoint" || nodeId !== failureNodeId);
+    return {
+        ...fallback,
+        ...value,
+        terminationMode,
+        failureNodeId,
+        failureNodeField,
+        failureNodeValue,
+        dimensionMultiple: Number.isFinite(dimensionMultiple) && dimensionMultiple > 0 ? dimensionMultiple : fallback.dimensionMultiple,
+        stopOnNodeIds,
+        parameters: Array.isArray(value.parameters) ? value.parameters : [],
+        references: Array.isArray(value.references) ? value.references : [],
+    };
 }
 
 function isLegacyXAIVideoOperations(values: string[]) {
@@ -228,6 +358,14 @@ export function sizeForCapabilityRatio(ratio: string) {
     if (!Number.isFinite(widthRatio) || !Number.isFinite(heightRatio) || widthRatio <= 0 || heightRatio <= 0) return "1280x720";
     const scale = 1280 / Math.max(widthRatio, heightRatio);
     return `${Math.max(1, Math.round(widthRatio * scale))}x${Math.max(1, Math.round(heightRatio * scale))}`;
+}
+
+export function alignVideoSizeToMultiple(value: string, multiple: number) {
+    const match = String(value || "").trim().toLowerCase().match(/^(\d+)x(\d+)$/);
+    const normalizedMultiple = Math.max(1, Math.floor(Number(multiple) || 1));
+    if (!match || normalizedMultiple === 1) return value;
+    const align = (dimension: number) => Math.max(normalizedMultiple, Math.round(dimension / normalizedMultiple) * normalizedMultiple);
+    return `${align(Number(match[1]))}x${align(Number(match[2]))}`;
 }
 
 export function formatCapabilityRatio(value: string) {

@@ -322,7 +322,7 @@ func (r *Repository) retryTaskWithBilling(userID string, taskID string, order *m
 			}
 		}
 		updates := map[string]any{
-			"status": model.TaskStatusQueued, "stage": "等待队列调度", "progress": 5, "error": "", "result_json": "", "delivery_ops_json": "",
+			"status": model.TaskStatusQueued, "stage": "等待队列调度", "progress": 5, "error": "", "result_json": "", "delivery_ops_json": "", "provider_state_json": "",
 			"billing_order_id": "", "provider_request_id": "", "poll_stage": "", "next_poll_at": nil, "lease_owner": "", "lease_expires_at": nil,
 			"provider_call_state": model.TaskProviderCallPending, "started_at": nil, "completed_at": nil, "updated_at": time.Now(),
 		}

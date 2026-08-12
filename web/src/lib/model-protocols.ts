@@ -11,7 +11,8 @@ export type ModelProtocol =
     | "newapi-channel-2"
     | "xai-video"
     | "grok2api-video"
-    | "gemini-veo";
+    | "gemini-veo"
+    | "runninghub-workflow";
 
 export type ProtocolCapability = "text" | "image" | "video" | "audio";
 
@@ -23,6 +24,7 @@ export type ModelProtocolDefinition = {
     contentType: string;
     poll?: string;
     media: string;
+    systemOnly?: boolean;
 };
 
 export const MODEL_PROTOCOLS: ModelProtocolDefinition[] = [
@@ -39,6 +41,7 @@ export const MODEL_PROTOCOLS: ModelProtocolDefinition[] = [
     { value: "xai-video", label: "xAI 官方视频", capability: "video", create: "POST /v1/videos/generations · edits · extensions", poll: "GET /v1/videos/{request_id}", contentType: "application/json", media: "单张起始图、最多 7 张参考图，或 1 段 MP4 原片" },
     { value: "grok2api-video", label: "grok2api 视频", capability: "video", create: "POST /v1/videos/generations", poll: "GET /v1/videos/{request_id} · /content", contentType: "application/json", media: "文本或 URL/Base64 起始图；不发送 storage_options" },
     { value: "gemini-veo", label: "Gemini Veo", capability: "video", create: "POST /v1beta/models/{model}:predictLongRunning", poll: "GET /v1beta/{operation_name}", contentType: "application/json", media: "文本与单张起始图" },
+    { value: "runninghub-workflow", label: "RunningHub RHWorkspace 工作流", capability: "video", create: "POST /task/openapi/create", poll: "WSS 结果节点 · POST /task/openapi/cancel", contentType: "application/json + multipart/form-data", media: "nodeInfoList + 可同时使用的图片、视频、音频参考", systemOnly: true },
 ];
 
 export const MODEL_PROTOCOL_OPTIONS = [
@@ -46,6 +49,14 @@ export const MODEL_PROTOCOL_OPTIONS = [
     { label: "图片", options: protocolOptions("image") },
     { label: "视频", options: protocolOptions("video") },
     { label: "音频", options: protocolOptions("audio") },
+];
+
+// RHWorkspace 需要后端持久化 taskId、监听节点并强制抢停，不能暴露给浏览器自定义渠道直连。
+export const USER_MODEL_PROTOCOL_OPTIONS = [
+    { label: "文本", options: userProtocolOptions("text") },
+    { label: "图片", options: userProtocolOptions("image") },
+    { label: "视频", options: userProtocolOptions("video") },
+    { label: "音频", options: userProtocolOptions("audio") },
 ];
 
 export function modelProtocolDefinition(value?: string) {
@@ -98,4 +109,8 @@ export function normalizeModelProtocol(value: unknown): ModelProtocol | undefine
 
 function protocolOptions(capability: ProtocolCapability) {
     return MODEL_PROTOCOLS.filter((item) => item.capability === capability).map((item) => ({ label: `${item.label} · ${item.create.replace("POST ", "")}`, value: item.value }));
+}
+
+function userProtocolOptions(capability: ProtocolCapability) {
+    return MODEL_PROTOCOLS.filter((item) => item.capability === capability && !item.systemOnly).map((item) => ({ label: `${item.label} · ${item.create.replace("POST ", "")}`, value: item.value }));
 }

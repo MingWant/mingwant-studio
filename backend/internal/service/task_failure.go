@@ -259,7 +259,7 @@ func publicProviderErrorCode(value string) string {
 func containsPrivateTaskDiagnostic(message string) bool {
 	lower := strings.ToLower(message)
 	for _, marker := range []string{
-		"http://", "https://", "postgres://", "postgresql://", "redis://", "file://",
+		"http://", "https://", "ws://", "wss://", "postgres://", "postgresql://", "redis://", "file://",
 		"sqlstate", "sqlite", "postgres", "pq:", "redis:", "no such table", "constraint failed", "duplicate key value", "database is locked", "record not found",
 		"dial tcp", "connectex", "connection refused", "no such host", "tls handshake", "x509:", "proxyconnect", "lookup ",
 		"authorization:", "bearer ", "x-api-key:", "api_key=", "api_key:", "api-key=", "api-key:", "token=", "token:", "password=", "password:", "secret=", "secret:", "dsn=", "dsn:", "sk-",

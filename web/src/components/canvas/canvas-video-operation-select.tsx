@@ -13,6 +13,7 @@ const VIDEO_OPERATION_OPTIONS: Array<{ label: string; value: CanvasVideoEditOper
     { label: "运镜调整", value: "camera_motion" },
     { label: "风格迁移", value: "style_transfer" },
     { label: "音频生视频", value: "audio_to_video" },
+    { label: "All-in-One 工作流", value: "workflow" },
     { label: "版本对比", value: "compare_versions" },
 ];
 
